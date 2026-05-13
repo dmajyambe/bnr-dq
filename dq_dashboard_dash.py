@@ -258,6 +258,80 @@ def _kpi_card(dim: str, score: float, delta: float, spark: list) -> html.Div:
     })
 
 
+def _count_sparkline(values: list, color: str) -> dcc.Graph:
+    """Sparkline for raw-count metrics (y-axis scales to data, not 0-100)."""
+    r, g, b  = int(color[1:3], 16), int(color[3:5], 16), int(color[5:7], 16)
+    max_val  = max(values) if values and max(values) > 0 else 1
+    fig = go.Figure(go.Scatter(
+        y=values or [0], mode="lines",
+        line=dict(color=color, width=1.5),
+        fill="tozeroy",
+        fillcolor=f"rgba({r},{g},{b},0.12)",
+    ))
+    fig.update_layout(
+        height=36,
+        margin=dict(l=0, r=0, t=0, b=0),
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        xaxis=dict(visible=False),
+        yaxis=dict(visible=False, range=[0, max_val * 1.25]),
+        showlegend=False,
+    )
+    return dcc.Graph(figure=fig, config={"displayModeBar": False},
+                     style={"height": "36px", "marginTop": "8px"})
+
+
+def _dup_card(count: int, delta: int, spark: list) -> html.Div:
+    col    = C_GREEN if count == 0 else C_AMBER if count <= 10 else C_RED
+    d_col  = C_RED if delta > 0 else C_GREEN if delta < 0 else MUTED
+    d_icon = "▲" if delta > 0 else "▼" if delta < 0 else "─"
+    return html.Div([
+        html.Div("CUSTOMER DUPLICATES", style={
+            "fontSize": "11px", "fontWeight": "900",
+            "color": MUTED, "letterSpacing": "0.06em",
+            "textTransform": "uppercase", "lineHeight": "1.15",
+        }),
+        html.Div(f"{count:,}", style={
+            "fontSize": "30px", "fontWeight": "700",
+            "color": col, "lineHeight": "1.1", "marginTop": "6px",
+            "fontVariantNumeric": "tabular-nums",
+        }),
+        html.Div([
+            html.Span(f"{d_icon} {abs(delta)}", style={
+                "color": d_col, "fontWeight": "700", "fontSize": "12px",
+            }),
+            html.Span(" vs yesterday", style={
+                "color": MUTED, "fontSize": "11px",
+            }),
+        ], style={"marginTop": "4px", "lineHeight": "1.15"}),
+        _count_sparkline(spark, col),
+    ], style={
+        "background":   CARD,
+        "borderRadius": "8px",
+        "padding":      "16px",
+        "flex":         "1",
+        "minWidth":     "150px",
+        "borderTop":    f"3px solid {col}",
+        "boxShadow":    "0 1px 4px rgba(26,58,107,0.08)",
+    })
+
+
+def _inst_dup_count(entry: dict, inst_code: str) -> int:
+    if not entry or not inst_code:
+        return 0
+    return int(entry.get("by_institution", {}).get(inst_code, {}).get("customer_duplicates", 0))
+
+
+def _cat_dup_count(entry: dict, cat: str) -> int:
+    if not entry:
+        return 0
+    bc = entry.get("by_category", {})
+    if cat == "SACCO":
+        return int(bc.get("SACCO",  {}).get("customer_duplicates", 0)) + \
+               int(bc.get("OSACCO", {}).get("customer_duplicates", 0))
+    return int(bc.get(cat, {}).get("customer_duplicates", 0))
+
+
 def _trend_figure(trend: list, cat: str, inst_code: str | None = None) -> go.Figure:
     """Build trend chart. When inst_code is given, shows that institution's scores."""
     dates = [e.get("date", "") for e in trend]
@@ -599,6 +673,10 @@ def _dashboard_content(cat: str, inst: str | None, gen_status: dict | None = Non
             delta = round(now - prev, 1)
             spark = [float(_inst_scores(e, inst).get(dim, 0)) for e in trend]
             cards.append(_kpi_card(dim, now, delta, spark))
+        dup_now   = _inst_dup_count(today, inst)
+        dup_prev  = _inst_dup_count(yesterday, inst)
+        dup_spark = [_inst_dup_count(e, inst) for e in trend]
+        cards.append(_dup_card(dup_now, dup_now - dup_prev, dup_spark))
 
         fig              = _trend_figure(trend, cat, inst_code=inst)
         display_insts    = {inst: institutions[inst]}
@@ -612,6 +690,10 @@ def _dashboard_content(cat: str, inst: str | None, gen_status: dict | None = Non
             delta = round(now - prev, 1)
             spark = [float(_cat_scores(e, cat).get(dim) or 0) for e in trend]
             cards.append(_kpi_card(dim, now, delta, spark))
+        dup_now   = _cat_dup_count(today, cat)
+        dup_prev  = _cat_dup_count(yesterday, cat)
+        dup_spark = [_cat_dup_count(e, cat) for e in trend]
+        cards.append(_dup_card(dup_now, dup_now - dup_prev, dup_spark))
 
         fig           = _trend_figure(trend, cat)
         display_insts = institutions
