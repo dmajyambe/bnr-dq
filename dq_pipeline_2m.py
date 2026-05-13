@@ -374,18 +374,31 @@ def _inst_scores_from_report(report: dict, lb_score_key: str) -> dict[str, float
     }
 
 
-def _customer_dup_counts(dataframes: dict) -> dict[str, int]:
-    """Count distinct customer_ids appearing more than once per le_book in the window."""
-    df = dataframes.get("customers_expanded", pd.DataFrame())
-    if df.empty or "customer_id" not in df.columns or "le_book" not in df.columns:
+def _customer_dup_counts(engine, schema: str, valid_le_books: frozenset) -> dict[str, int]:
+    """Count distinct customer_ids with duplicates per le_book across the full table (no date filter)."""
+    from sqlalchemy import text as _text
+    lb_filter = ""
+    if valid_le_books:
+        codes     = ", ".join(f"'{lb}'" for lb in sorted(valid_le_books))
+        lb_filter = f"WHERE le_book IN ({codes})"
+    sql = _text(f"""
+        SELECT le_book, COUNT(*) AS dup_customers
+        FROM (
+            SELECT le_book, customer_id
+            FROM "{schema}".customers_expanded
+            {lb_filter}
+            GROUP BY le_book, customer_id
+            HAVING COUNT(*) > 1
+        ) sub
+        GROUP BY le_book
+    """)
+    try:
+        with engine.connect() as conn:
+            rows = conn.execute(sql).fetchall()
+        return {str(r[0]).strip(): int(r[1]) for r in rows if r[0] is not None}
+    except Exception as exc:
+        log.warning("Could not compute customer duplicate counts: %s", exc)
         return {}
-    grouped = (
-        df.groupby(["le_book", "customer_id"])
-          .size()
-          .reset_index(name="n")
-    )
-    dups = grouped[grouped["n"] > 1].groupby("le_book").size()
-    return dups.astype(int).to_dict()
 
 
 def _build_history_entry(run_date: str, R: dict, categories: dict,
@@ -665,7 +678,8 @@ def main() -> None:
 
     # ── build and append history entry ────────────────────────────────────────
     log.info("Building history entry for %s …", run_date)
-    dup_counts = _customer_dup_counts(dataframes)
+    log.info("Counting customer duplicates across full table …")
+    dup_counts = _customer_dup_counts(engine, args.schema, valid_le_books)
     log.info("Customer duplicate counts: %d institution(s) with duplicates", len(dup_counts))
     entry = _build_history_entry(run_date, R, categories, dup_counts)
     _append_history(entry)
