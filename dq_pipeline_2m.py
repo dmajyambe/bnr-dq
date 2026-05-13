@@ -374,7 +374,22 @@ def _inst_scores_from_report(report: dict, lb_score_key: str) -> dict[str, float
     }
 
 
-def _build_history_entry(run_date: str, R: dict, categories: dict) -> dict:
+def _customer_dup_counts(dataframes: dict) -> dict[str, int]:
+    """Count distinct customer_ids appearing more than once per le_book in the window."""
+    df = dataframes.get("customers_expanded", pd.DataFrame())
+    if df.empty or "customer_id" not in df.columns or "le_book" not in df.columns:
+        return {}
+    grouped = (
+        df.groupby(["le_book", "customer_id"])
+          .size()
+          .reset_index(name="n")
+    )
+    dups = grouped[grouped["n"] > 1].groupby("le_book").size()
+    return dups.astype(int).to_dict()
+
+
+def _build_history_entry(run_date: str, R: dict, categories: dict,
+                         dup_counts: dict | None = None) -> dict:
     """
     Aggregate engine results into a single history entry:
       overall        — one score per dimension (4 dims; RI averaged into accuracy)
@@ -398,14 +413,16 @@ def _build_history_entry(run_date: str, R: dict, categories: dict) -> dict:
         lb_dim_scores[lb] = _merge_rel(lb_dim_scores[lb])
 
     # enrich with category metadata; compute per-institution overall (4 dims)
+    _dups = dup_counts or {}
     by_institution: dict = {}
     for lb, dim_scores in lb_dim_scores.items():
         cat_info    = categories.get(lb, {})
         inst_scores = [dim_scores[d] for d in DIMS if d in dim_scores]
         by_institution[lb] = {
-            "name":          cat_info.get("name", lb),
-            "category_type": cat_info.get("category_type", ""),
-            "overall":       round(sum(inst_scores) / len(inst_scores), 2) if inst_scores else 0.0,
+            "name":               cat_info.get("name", lb),
+            "category_type":      cat_info.get("category_type", ""),
+            "overall":            round(sum(inst_scores) / len(inst_scores), 2) if inst_scores else 0.0,
+            "customer_duplicates": _dups.get(lb, 0),
             **{d: dim_scores.get(d, 0.0) for d in DIMS},
         }
 
@@ -422,6 +439,7 @@ def _build_history_entry(run_date: str, R: dict, categories: dict) -> dict:
         for dim in DIMS:
             scores = [i[dim] for i in institutions if i.get(dim, 0) > 0]
             cat_scores[dim] = round(sum(scores) / len(scores), 2) if scores else 0.0
+        cat_scores["customer_duplicates"] = sum(i.get("customer_duplicates", 0) for i in institutions)
         by_category[ct] = cat_scores
 
     return {
@@ -647,7 +665,9 @@ def main() -> None:
 
     # ── build and append history entry ────────────────────────────────────────
     log.info("Building history entry for %s …", run_date)
-    entry = _build_history_entry(run_date, R, categories)
+    dup_counts = _customer_dup_counts(dataframes)
+    log.info("Customer duplicate counts: %d institution(s) with duplicates", len(dup_counts))
+    entry = _build_history_entry(run_date, R, categories, dup_counts)
     _append_history(entry)
 
     # ── summary ───────────────────────────────────────────────────────────────
