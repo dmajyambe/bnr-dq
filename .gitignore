@@ -10,6 +10,7 @@ dq_validity_report.json
 dq_relationship_report.json
 dq_profile_report.json
 pipeline_run.json
+pipeline_status.json
 watermark.json
 le_book_categories.json
 
