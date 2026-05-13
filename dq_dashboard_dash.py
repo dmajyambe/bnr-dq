@@ -1518,43 +1518,47 @@ def _update_pipeline_banner(_):
     run    = _load_pipeline_run()
     status = _load_pipeline_status()
 
-    # ── last run label (from pipeline_run.json) ───────────────────────────────
-    run_date = run.get("run_date", "")
-    run_ts   = run.get("data_processed", "")
-    run_time = run_ts[11:16] + " UTC" if len(run_ts) >= 16 else ""
-    last_run = f"Last run: {run_date}" + (f"  ·  {run_time}" if run_time else "")
+    # "Data as of" = the end date of the 7-day window the pipeline processed,
+    # i.e. the most recent date whose data is reflected in the dashboard scores.
+    data_date = run.get("run_date", "—")
 
-    # ── pipeline health badge (from pipeline_status.json) ─────────────────────
+    # Pipeline execution status from pipeline_status.json
     s = status.get("status", "")
     if s == "running":
-        dot, label, color = "●", "Running…", "#FCD34D"        # yellow
-        when = status.get("started_at", "")
-        detail = f"started {when}" if when else ""
+        color  = "#FCD34D"                          # yellow
+        dot    = "● "
+        label  = "Running…"
+        ts_raw = status.get("started_at", "")
+        ts_lbl = f"since {ts_raw[11:16]}" if len(ts_raw) >= 16 else ""
     elif s == "success":
-        dot, label, color = "●", "Success", "#4ADE80"          # green
-        when = status.get("finished_at", "")
-        detail = f"finished {when}" if when else ""
+        color  = "#4ADE80"                          # green
+        dot    = "● "
+        label  = "Success"
+        ts_raw = status.get("finished_at", "")
+        ts_lbl = f"finished {ts_raw[11:16]}" if len(ts_raw) >= 16 else ""
     elif s == "failed":
-        dot, label, color = "●", "Failed", "#F87171"           # red
-        when = status.get("finished_at", "")
-        detail = f"at {when}" if when else ""
+        color  = "#F87171"                          # red
+        dot    = "● "
+        label  = "Failed"
+        ts_raw = status.get("finished_at", "")
+        ts_lbl = f"at {ts_raw[11:16]}" if len(ts_raw) >= 16 else ""
     else:
-        dot = label = detail = ""
-        color = "rgba(255,255,255,0.4)"
+        color = dot = label = ts_lbl = ""
 
-    badge = html.Span([
-        html.Span(dot + " ", style={"color": color, "fontSize": "10px"}),
-        html.Span(label,     style={"color": color, "fontWeight": "700"}),
-        html.Span(f"  {detail}" if detail else "",
-                  style={"color": "rgba(255,255,255,0.45)", "fontSize": "10px"}),
-    ]) if label else html.Span()
+    # Build one compact line: "Data as of: 2026-03-30  ·  ● Success  (finished 02:07)"
+    children = [
+        html.Span(f"Data as of: {data_date}",
+                  style={"color": "rgba(255,255,255,0.55)"}),
+    ]
+    if label:
+        children += [
+            html.Span("  ·  ", style={"color": "rgba(255,255,255,0.30)"}),
+            html.Span(dot + label, style={"color": color, "fontWeight": "700"}),
+            html.Span(f"  ({ts_lbl})" if ts_lbl else "",
+                      style={"color": "rgba(255,255,255,0.40)"}),
+        ]
 
-    return html.Div([
-        html.Div(last_run, style={
-            "fontSize": "11px", "color": "rgba(255,255,255,0.55)",
-        }),
-        html.Div(badge, style={"fontSize": "11px", "marginTop": "2px"}),
-    ])
+    return html.Span(children, style={"fontSize": "11px", "lineHeight": "1.15"})
 
 
 @app.callback(
