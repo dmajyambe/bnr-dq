@@ -27,7 +27,8 @@ _gen_lock = threading.Lock()
 _DIR            = Path(__file__).parent
 HISTORY_FILE    = _DIR / "dq_history.json"
 CATEGORIES_FILE = _DIR / "le_book_categories.json"
-PIPELINE_FILE   = _DIR / "pipeline_run.json"
+PIPELINE_FILE        = _DIR / "pipeline_run.json"
+PIPELINE_STATUS_FILE = _DIR / "pipeline_status.json"
 REPORTS_DIR     = _DIR / "reports"
 
 # design tokens
@@ -113,6 +114,15 @@ def _load_pipeline_run() -> dict:
         return {}
     try:
         return json.loads(PIPELINE_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _load_pipeline_status() -> dict:
+    if not PIPELINE_STATUS_FILE.exists():
+        return {}
+    try:
+        return json.loads(PIPELINE_STATUS_FILE.read_text(encoding="utf-8"))
     except Exception:
         return {}
 
@@ -1459,9 +1469,8 @@ app.layout = html.Div([
                 ),
             ]),
         ], style={"display": "flex", "alignItems": "center"}),
-        html.Div(_run_label, style={
-            "fontSize": "11px", "fontWeight": "400",
-            "color": "rgba(255,255,255,0.55)", "lineHeight": "1.15",
+        html.Div(id="pipeline-status-banner", style={
+            "textAlign": "right", "lineHeight": "1.5",
         }),
     ], style={
         "background":     BNR_NAVY,
@@ -1486,6 +1495,7 @@ app.layout = html.Div([
     # ── stores ────────────────────────────────────────────────────────────────
     # nav-state: {"cat": None|"B"|"MF"|"SACCO", "inst": None|"<code>"}
     # cat=None means landing page; inst=None means show all in category
+    dcc.Interval(id="status-poll", interval=30_000, n_intervals=0),
     dcc.Store(id="nav-state",    data={"cat": None, "inst": None}),
     dcc.Store(id="active-page",  data="dashboard"),
     dcc.Store(id="rules-version", data=0),
@@ -1498,6 +1508,54 @@ app.layout = html.Div([
 
 
 # ── callbacks ──────────────────────────────────────────────────────────────────
+
+@app.callback(
+    Output("pipeline-status-banner", "children"),
+    Input("status-poll", "n_intervals"),
+)
+def _update_pipeline_banner(_):
+    """Refresh the header pipeline status every 30 s without a full page reload."""
+    run    = _load_pipeline_run()
+    status = _load_pipeline_status()
+
+    # ── last run label (from pipeline_run.json) ───────────────────────────────
+    run_date = run.get("run_date", "")
+    run_ts   = run.get("data_processed", "")
+    run_time = run_ts[11:16] + " UTC" if len(run_ts) >= 16 else ""
+    last_run = f"Last run: {run_date}" + (f"  ·  {run_time}" if run_time else "")
+
+    # ── pipeline health badge (from pipeline_status.json) ─────────────────────
+    s = status.get("status", "")
+    if s == "running":
+        dot, label, color = "●", "Running…", "#FCD34D"        # yellow
+        when = status.get("started_at", "")
+        detail = f"started {when}" if when else ""
+    elif s == "success":
+        dot, label, color = "●", "Success", "#4ADE80"          # green
+        when = status.get("finished_at", "")
+        detail = f"finished {when}" if when else ""
+    elif s == "failed":
+        dot, label, color = "●", "Failed", "#F87171"           # red
+        when = status.get("finished_at", "")
+        detail = f"at {when}" if when else ""
+    else:
+        dot = label = detail = ""
+        color = "rgba(255,255,255,0.4)"
+
+    badge = html.Span([
+        html.Span(dot + " ", style={"color": color, "fontSize": "10px"}),
+        html.Span(label,     style={"color": color, "fontWeight": "700"}),
+        html.Span(f"  {detail}" if detail else "",
+                  style={"color": "rgba(255,255,255,0.45)", "fontSize": "10px"}),
+    ]) if label else html.Span()
+
+    return html.Div([
+        html.Div(last_run, style={
+            "fontSize": "11px", "color": "rgba(255,255,255,0.55)",
+        }),
+        html.Div(badge, style={"fontSize": "11px", "marginTop": "2px"}),
+    ])
+
 
 @app.callback(
     Output("active-page", "data"),
