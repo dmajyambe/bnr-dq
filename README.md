@@ -1,0 +1,231 @@
+# Data Quality Dashboard
+
+A lightweight data quality monitoring system for the BNR (National Bank of Rwanda) supervised financial institutions. It connects to PostgreSQL, evaluates 8 domain tables across 6 quality dimensions, breaks results down by legal entity (LE Book), and serves an interactive dashboard in the browser.
+
+---
+
+## Architecture
+
+```
+PostgreSQL DB  (data_quality_program schema)
+      │
+      ├──► dq_engine.py ─────────────────► dq_report.json
+      │
+      └──► dq_dashboard_dash.py
+                │
+                ├── reads dq_report.json  (DQ results)
+                ├── queries DB at startup (le_book labels)
+                └── serves browser on port 9090
+```
+
+The engine and dashboard are fully decoupled. Re-run the engine at any time to refresh results, then restart the dashboard to pick them up.
+
+---
+
+## Components
+
+### `dq_engine.py` — Data Quality Engine
+
+The engine runs once and produces the report. It works in the following sequence:
+
+**1. Connect**
+Reads database credentials from `.env` and opens a connection to PostgreSQL.
+
+**2. Discover columns**
+For each of the 8 target tables, it introspects the DB schema to retrieve the actual column list — nothing is hardcoded.
+
+**3. Route columns to dimensions**
+Each column name is matched against naming patterns to assign it to one or more quality dimensions:
+
+| Dimension | Example columns |
+|-----------|----------------|
+| Uniqueness | `customer_id`, `contract_id`, `account_no` |
+| Completeness | all non-optional columns |
+| Validity | `le_book`, `currency`, `email`, `gender`, `interest_rate`, `date_*` |
+| Accuracy | `start_date` / `maturity_date` pairs, amount relationships, name fields |
+| Consistency | `*_nt` / `*_at` code–description pairs, FCY/LCY sign matching |
+| Timeliness | `date_last_modified`, `business_date`, `schedule_date` |
+
+**4. Fetch data**
+Pulls up to N rows per table (default: 100, configurable via `--limit`). Use `--limit 0` for full tables.
+
+**5. Run DQ checks**
+For each dimension a dedicated checker is applied:
+
+- **Uniqueness** — detects duplicate values in identifier columns
+- **Completeness** — counts null cells across all completeness-routed columns
+- **Validity** — validates formats and domains (currency codes, country codes, rate ranges, date formats, yes/no flags, phone numbers, email addresses)
+- **Accuracy** — detects impossible values: start date after end date, outstanding > disbursed, purely numeric names
+- **Consistency** — checks that code/description pairs are both populated, FCY and LCY amounts have matching signs, `_nt`/`_at` lookup codes resolve to a sibling value
+- **Timeliness** — flags records with dates older than 90 days (`last_modified`, `business_date`) or future-dated beyond 1 day
+
+**6. LE Book breakdown**
+For every table that contains an `le_book` column, all 6 DQ checks are repeated on each `le_book` subset independently. This allows per-institution quality analysis within a single table.
+
+**7. Write report**
+All results are serialised to `dq_report.json`:
+- Overall average score
+- Per-dimension scores and tables tested
+- Per-table: row count, column count, average score, dimension scores, flagged row indices, issue detail text
+- Per-table per-LE Book: the same dimension breakdown for each institution's rows
+- Top-level list of all unique LE Book codes found across all tables
+
+---
+
+### `dq_dashboard_dash.py` — Interactive Dashboard
+
+A Plotly Dash application that reads `dq_report.json` and renders the results in the browser. It never writes to or reads from the database, except once at startup to resolve LE Book labels.
+
+**LE Book label resolution (startup)**
+Runs the following join against the DB to map institution codes to human-readable names:
+
+```sql
+SELECT
+    lb.le_book,
+    lb.leb_description AS le_book_name
+FROM data_quality_program.le_book lb
+LEFT JOIN (
+    SELECT
+        alpha_tab     AS category_type_at,
+        alpha_sub_tab AS category_type,
+        alpha_subtab_description
+    FROM data_quality_program.alpha_sub_tab
+) cat USING (category_type_at, category_type)
+```
+
+Falls back to the raw code if the DB is unreachable or a code has no matching entry.
+
+**Dashboard sections:**
+
+| Section | Content |
+|---------|---------|
+| Header | Schema name · Report generation timestamp |
+| Hero strip | Overall DQ score · Tables evaluated · Rows sampled · Dimensions tested |
+| Dimension row | One cell per dimension: name, average score across all tables, progress bar |
+| LE Book filter | Dropdown listing all institutions by name; filters all table cards |
+| Table cards | One card per evaluated table: average score, per-dimension bar chart, expandable issue detail |
+
+**LE Book filter behaviour**
+Selecting an institution re-renders all table cards using only rows belonging to that institution. Tables that have no data for the selected institution are hidden.
+
+---
+
+### `dq_report.json` — Report Output
+
+Generated by `dq_engine.py`. Consumed by the dashboard. Structure:
+
+```json
+{
+  "generated_at": "...",
+  "row_limit": 100,
+  "schema": "data_quality_program",
+  "le_books": ["010", "015", ...],
+  "tables": {
+    "accounts": {
+      "status": "evaluated",
+      "row_count": 100,
+      "column_count": 51,
+      "average_score": 54.7,
+      "dimensions": {
+        "uniqueness": { "score": 0.0, "flagged_count": 100, "detail": "..." },
+        ...
+      },
+      "le_book_breakdown": {
+        "085": {
+          "row_count": 21,
+          "average_score": 48.3,
+          "dimensions": { ... }
+        }
+      }
+    }
+  },
+  "executive_summary": {
+    "overall_average_score": 60.9,
+    "evaluated_tables": 8,
+    "dimension_summary": { ... }
+  }
+}
+```
+
+---
+
+## Target Tables
+
+| Table | Domain |
+|-------|--------|
+| `customers_expanded` | Customer master data |
+| `accounts` | Account records |
+| `contracts_disburse` | Disbursement records |
+| `contract_loans` | Loan contracts |
+| `contract_schedules` | Repayment schedules |
+| `contracts_expanded` | Full contract details |
+| `loan_applications_2` | Loan applications |
+| `prev_loan_applications` | Historical loan applications |
+
+---
+
+## Setup
+
+**1. Install dependencies**
+
+```bash
+pip install -r requirements.txt
+```
+
+Dash is also required:
+
+```bash
+pip install dash
+```
+
+**2. Configure credentials**
+
+Create `dashboard/.env`:
+
+```env
+MY_POSTGRES_USERNAME=your_user
+MY_POSTGRES_PASSWORD=your_password
+MY_POSTGRES_HOST=your_host
+MY_POSTGRES_PORT=5432
+MY_POSTGRES_DB=your_database
+```
+
+---
+
+## Usage
+
+**Run the engine** (generates / refreshes `dq_report.json`):
+
+```bash
+# Default: 100 rows per table
+python dq_engine.py
+
+# Full tables, no row cap
+python dq_engine.py --limit 0
+
+# Specific tables only
+python dq_engine.py --tables accounts contract_loans
+
+# Custom schema and output path
+python dq_engine.py --schema data_quality_program --output dq_report.json
+```
+
+**Start the dashboard:**
+
+```bash
+python dq_dashboard_dash.py
+```
+
+Open **http://\<server-ip\>:9090** in your browser.
+
+> If running on a remote server via VSCode Remote SSH, forward port 9090 through the VSCode **Ports** panel, or access directly via the server's IP address.
+
+---
+
+## Score Interpretation
+
+| Score | Status | Colour |
+|-------|--------|--------|
+| ≥ 90% | Excellent | Green |
+| 75–89% | Needs attention | Amber |
+| < 75% | Critical | Red |

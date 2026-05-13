@@ -1,0 +1,24 @@
+/* BNR DQ Dashboard — brand typography */
+* {
+  font-family: 'BentonSans', 'Franklin Gothic Medium', 'Arial Narrow', Arial, sans-serif;
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  padding: 0;
+  background: #F4F6F9;
+  line-height: 1.15;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* scrollbar */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: #F4F6F9; }
+::-webkit-scrollbar-thumb { background: #CBD5E1; border-radius: 3px; }
+
+/* table row hover */
+.inst-row:hover { background: #F0F4FF !important; }
+
+/* tab hover */
+.cat-tab:hover { color: #1A1A2E !important; }

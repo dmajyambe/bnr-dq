@@ -1,0 +1,33 @@
+# Credentials — never commit
+.env
+
+# Generated outputs — rebuilt by the pipeline on each run
+dq_history.json
+dq_report.json
+dq_accuracy_report.json
+dq_timeliness_report.json
+dq_validity_report.json
+dq_relationship_report.json
+dq_profile_report.json
+pipeline_run.json
+watermark.json
+le_book_categories.json
+
+# Reports and logs
+reports/
+logs/
+
+# Runtime state
+*.pid
+__pycache__/
+*.py[cod]
+*.pyo
+
+# SQLite (rules are now in PostgreSQL; db kept for tests only)
+dq_rules.db
+
+# Editor / OS
+.DS_Store
+*.swp
+*.swo
+Thumbs.db
