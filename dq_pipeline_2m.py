@@ -312,6 +312,36 @@ def load_all_tables(engine, schema: str, valid_le_books: frozenset,
     return dataframes
 
 
+def load_parent_keys(engine, schema: str) -> dict:
+    """
+    Load only the FK key column(s) for each parent table in REL_RULE_META,
+    with no date filter.  This gives the relationship engine a complete key
+    space so that parents created before the current 7-day window are not
+    mistaken for missing references.
+    """
+    from dq_rules import REL_RULE_META
+
+    parent_cols: dict[str, set] = {}
+    for meta in REL_RULE_META.values():
+        parent_cols.setdefault(meta["parent_table"], set()).add(meta["parent_col"])
+
+    result = {}
+    with engine.connect() as conn:
+        for table, cols in sorted(parent_cols.items()):
+            quoted = ", ".join(f'"{c}"' for c in sorted(cols))
+            sq_tbl = f'"{schema}"."{table}"'
+            sql    = f"SELECT DISTINCT {quoted} FROM {sq_tbl}"
+            try:
+                df = pd.read_sql(text(sql), conn)
+                df.columns = [c.lower() for c in df.columns]
+                log.info("  parent keys %-30s %8d distinct keys", table, len(df))
+                result[table] = df
+            except Exception as exc:
+                log.warning("  Could not load parent keys for %s: %s — RI will use windowed data.", table, exc)
+                result[table] = pd.DataFrame()
+    return result
+
+
 #parallel runner
 
 def _run_parallel(tasks: dict, max_workers: int = 8) -> dict:
@@ -375,7 +405,7 @@ def _inst_scores_from_report(report: dict, lb_score_key: str) -> dict[str, float
 
 
 def _customer_dup_counts(engine, schema: str, valid_le_books: frozenset) -> dict[str, int]:
-    """Count distinct customer_ids with duplicates per le_book across the full table (no date filter)."""
+    """Count distinct customer_ids with duplicates per le_book across the full table"""
     from sqlalchemy import text as _text
     lb_filter = ""
     if valid_le_books:
@@ -605,13 +635,6 @@ def main() -> None:
         json.dumps(categories, indent=2, ensure_ascii=False))
     log.info("le_book_categories.json written (%d institutions)", len(categories))
 
-    log.info("Loading %d-day window …", WINDOW_DAYS)
-    dataframes = load_all_tables(engine, args.schema, valid_le_books, start_date, end_date)
-    log.info("All tables loaded — DB connection no longer needed.")
-
-    total_rows = sum(len(df) for df in dataframes.values())
-    log.info("Total rows loaded: %d", total_rows)
-
     # write manifest immediately so dashboard shows a fresh timestamp
     processed_at = datetime.now(timezone.utc)
     run_manifest = {
@@ -619,7 +642,7 @@ def main() -> None:
         "run_date":       run_date,
         "window":         f"{start_date}:{end_date}" if start_date else WINDOW_DESC,
         "window_days":    WINDOW_DAYS,
-        "tables_loaded":  {t: len(dataframes.get(t, pd.DataFrame())) for t in TABLES},
+        "mode":           "sql",
     }
     (SCRIPT_DIR / "pipeline_run.json").write_text(
         json.dumps(run_manifest, indent=2, default=str))
@@ -634,26 +657,36 @@ def main() -> None:
     import dq_profiler_engine as prof_eng
     import dq_issue_export    as issue_eng
 
-    def _rel():
-        return rel_eng.evaluate_all_from_dataframes(dataframes, valid_le_books)
+    watermarks = _load_watermarks()
+
+    # Profiler and issue export still need row-level DataFrames; load them in
+    # parallel with the SQL engine tasks so neither blocks the other.
+    _dataframes_holder: dict = {}
+
+    def _load_frames():
+        dfs = load_all_tables(engine, args.schema, valid_le_books, start_date, end_date)
+        _dataframes_holder["dfs"] = dfs
+        return dfs
 
     def _prof():
-        r = prof_eng.profile_all_from_dataframes(dataframes, args.schema)
+        dfs = _dataframes_holder.get("dfs") or _load_frames()
+        r   = prof_eng.profile_all_from_dataframes(dfs, args.schema)
         (SCRIPT_DIR / "dq_profile_report.json").write_text(
             json.dumps(r, indent=2, default=str))
         return r
 
     tasks = {
-        "comp": partial(comp_eng.evaluate_from_dataframes, dataframes, valid_le_books,
-                        str(SCRIPT_DIR / "dq_report.json")),
-        "acc":  partial(acc_eng.evaluate_from_dataframes,  dataframes, valid_le_books,
-                        str(SCRIPT_DIR / "dq_accuracy_report.json")),
-        "tim":  partial(tim_eng.evaluate_from_dataframes,  dataframes, valid_le_books,
-                        str(SCRIPT_DIR / "dq_timeliness_report.json")),
-        "val":  partial(val_eng.evaluate_from_dataframes,  dataframes, valid_le_books,
-                        str(SCRIPT_DIR / "dq_validity_report.json")),
-        "rel":  _rel,
+        "comp": partial(comp_eng.evaluate_from_sql, engine, args.schema, valid_le_books,
+                        WINDOW_DAYS, watermarks, str(SCRIPT_DIR / "dq_report.json")),
+        "acc":  partial(acc_eng.evaluate_from_sql,  engine, args.schema, valid_le_books,
+                        WINDOW_DAYS, watermarks, str(SCRIPT_DIR / "dq_accuracy_report.json")),
+        "tim":  partial(tim_eng.evaluate_from_sql,  engine, args.schema, valid_le_books,
+                        WINDOW_DAYS, watermarks, str(SCRIPT_DIR / "dq_timeliness_report.json")),
+        "val":  partial(val_eng.evaluate_from_sql,  engine, args.schema, valid_le_books,
+                        WINDOW_DAYS, watermarks, str(SCRIPT_DIR / "dq_validity_report.json")),
+        "rel":  partial(rel_eng.evaluate_all, engine, args.schema, sample=0),
         "prof": _prof,
+        "frames": _load_frames,
     }
 
     log.info("Running %d engine tasks in parallel …", len(tasks))
@@ -664,6 +697,20 @@ def main() -> None:
     # relationship engine returns the dict; pipeline writes the file
     (SCRIPT_DIR / "dq_relationship_report.json").write_text(
         json.dumps(R.get("rel") or {}, indent=2, default=str))
+
+    # DataFrames were loaded in the "frames" task in parallel with SQL engines
+    dataframes = _dataframes_holder.get("dfs") or R.get("frames") or {}
+
+    # Update watermarks from what was loaded
+    if dataframes:
+        new_wm = dict(watermarks)
+        for tbl, df in dataframes.items():
+            if hasattr(df, "columns") and "date_last_modified" in df.columns and not df.empty:
+                new_max = df["date_last_modified"].max()
+                if pd.notna(new_max):
+                    new_wm[tbl] = str(new_max)
+        _save_watermarks(new_wm)
+        log.info("Watermarks saved → %s", WATERMARK_FILE)
 
     # ── user-defined rules ────────────────────────────────────────────────────
     import dq_user_rule_executor as usr_eng

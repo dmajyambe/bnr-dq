@@ -309,16 +309,16 @@ def evaluate_all(engine, schema: str, sample: int) -> dict:
 
 
 def _run_rule_pandas(rule_id: str, meta: dict, dataframes: dict,
-                     valid_le_books: frozenset) -> dict | None:
+                     valid_le_books: frozenset,
+                     parent_dataframes: dict | None = None) -> dict | None:
     """
     Pandas equivalent of run_rule(): check child FK values exist in the parent set.
 
-    Mirrors the SQL version's logic:
     - NULL child FK values are excluded from the denominator (not violations).
-    - Only the child table is le_book-filtered; parent is used unfiltered so that
-      cross-period references (parent created outside the 7-day window) do not
-      produce false orphans against the parent's full key space.
-    - The full parent DataFrame is used for key lookup regardless of window.
+    - Only the child table is le_book-filtered.
+    - Parent keys come from parent_dataframes (full table, no date filter) when
+      supplied, so parents created before the 7-day window are not treated as
+      missing references.
     """
     import pandas as pd
 
@@ -327,8 +327,8 @@ def _run_rule_pandas(rule_id: str, meta: dict, dataframes: dict,
     parent_t = meta["parent_table"]
     parent_c = meta["parent_col"]
 
-    child_df  = dataframes.get(child_t,  pd.DataFrame())
-    parent_df = dataframes.get(parent_t, pd.DataFrame())
+    child_df  = dataframes.get(child_t, pd.DataFrame())
+    parent_df = (parent_dataframes or dataframes).get(parent_t, pd.DataFrame())
 
     if child_df.empty or child_c not in child_df.columns:
         return None
@@ -377,7 +377,8 @@ def _run_rule_pandas(rule_id: str, meta: dict, dataframes: dict,
     }
 
 
-def evaluate_all_from_dataframes(dataframes: dict, valid_le_books: frozenset) -> dict:
+def evaluate_all_from_dataframes(dataframes: dict, valid_le_books: frozenset,
+                                  parent_dataframes: dict | None = None) -> dict:
     """Run all RI rules on pre-loaded DataFrames; return report dict (no file write)."""
     report: dict = {
         "generated_at": datetime.utcnow().isoformat(),
@@ -398,7 +399,7 @@ def evaluate_all_from_dataframes(dataframes: dict, valid_le_books: frozenset) ->
 
         for rule_id in rule_ids:
             meta   = RULE_META[rule_id]
-            result = _run_rule_pandas(rule_id, meta, dataframes, valid_le_books)
+            result = _run_rule_pandas(rule_id, meta, dataframes, valid_le_books, parent_dataframes)
 
             if result is None:
                 report["warnings"][rule_id] = f"Rule {rule_id} could not be evaluated."

@@ -655,6 +655,317 @@ def evaluate_from_dataframes(dataframes: dict, valid_le_books: frozenset,
     return report
 
 
+def _val_rule_sql(rule_id: str, existing: set) -> tuple[str, str] | None:
+    """Return (total_expr, valid_expr) SQL strings for this validity rule."""
+    def has(*cols): return all(c in existing for c in cols)
+
+    if rule_id == "VAL-001":
+        if not has("email_id"): return None
+        return (
+            'SUM(CASE WHEN "email_id" IS NOT NULL THEN 1 ELSE 0 END)',
+            r"""SUM(CASE WHEN "email_id" IS NOT NULL AND "email_id"::TEXT ~ '^[^@\s]+@[^@\s]+\.[^@\s]+$' THEN 1 ELSE 0 END)""",
+        )
+
+    if rule_id == "VAL-002":
+        cols = [c for c in ("work_telephone", "home_telephone") if c in existing]
+        if not cols: return None
+        total = " + ".join(
+            f'SUM(CASE WHEN "{c}" IS NOT NULL AND TRIM("{c}"::TEXT) != \'\' THEN 1 ELSE 0 END)'
+            for c in cols
+        )
+        valid = " + ".join(
+            f'SUM(CASE WHEN "{c}" IS NOT NULL AND TRIM("{c}"::TEXT) != \'\' '
+            f'AND LENGTH(REGEXP_REPLACE("{c}"::TEXT, \'[^0-9]\', \'\', \'g\')) >= {MIN_PHONE_DIGITS} THEN 1 ELSE 0 END)'
+            for c in cols
+        )
+        return (total, valid)
+
+    if rule_id == "VAL-003":
+        cols = [c for c in ("currency", "mis_currency") if c in existing]
+        if not cols: return None
+        total = " + ".join(
+            f'SUM(CASE WHEN "{c}" IS NOT NULL AND TRIM("{c}"::TEXT) != \'\' THEN 1 ELSE 0 END)'
+            for c in cols
+        )
+        valid = " + ".join(
+            f'SUM(CASE WHEN "{c}" IS NOT NULL AND TRIM("{c}"::TEXT) != \'\' '
+            f'AND TRIM("{c}"::TEXT) ~ \'^[A-Z]{{3}}$\' THEN 1 ELSE 0 END)'
+            for c in cols
+        )
+        return (total, valid)
+
+    if rule_id == "VAL-004":
+        if not has("national_id_type", "national_id_number"): return None
+        return (
+            "SUM(CASE WHEN \"national_id_type\" IS NOT NULL AND TRIM(\"national_id_type\"::TEXT) != '' THEN 1 ELSE 0 END)",
+            f"SUM(CASE WHEN \"national_id_type\" IS NOT NULL AND TRIM(\"national_id_type\"::TEXT) != '' "
+            f"AND LENGTH(TRIM(COALESCE(\"national_id_number\"::TEXT, ''))) >= {MIN_NATIONAL_ID} THEN 1 ELSE 0 END)",
+        )
+
+    if rule_id == "VAL-010":
+        if not has("interest_rate_dr"): return None
+        return (
+            'SUM(CASE WHEN "interest_rate_dr" IS NOT NULL THEN 1 ELSE 0 END)',
+            f'SUM(CASE WHEN "interest_rate_dr" IS NOT NULL AND "interest_rate_dr"::NUMERIC >= 0 AND "interest_rate_dr"::NUMERIC <= {INTEREST_RATE_MAX} THEN 1 ELSE 0 END)',
+        )
+
+    if rule_id == "VAL-011":
+        if not has("interest_rate_cr"): return None
+        return (
+            'SUM(CASE WHEN "interest_rate_cr" IS NOT NULL THEN 1 ELSE 0 END)',
+            f'SUM(CASE WHEN "interest_rate_cr" IS NOT NULL AND "interest_rate_cr"::NUMERIC >= 0 AND "interest_rate_cr"::NUMERIC <= {INTEREST_RATE_MAX} THEN 1 ELSE 0 END)',
+        )
+
+    if rule_id == "VAL-012":
+        cols = [c for c in ("current_disbursed_amt", "previous_disbursed_amt") if c in existing]
+        if not cols: return None
+        return (
+            " + ".join(f'SUM(CASE WHEN "{c}" IS NOT NULL THEN 1 ELSE 0 END)' for c in cols),
+            " + ".join(f'SUM(CASE WHEN "{c}" IS NOT NULL AND "{c}"::NUMERIC >= 0 THEN 1 ELSE 0 END)' for c in cols),
+        )
+
+    if rule_id == "VAL-013":
+        if not has("emi_amount"): return None
+        return (
+            'SUM(CASE WHEN "emi_amount" IS NOT NULL THEN 1 ELSE 0 END)',
+            'SUM(CASE WHEN "emi_amount" IS NOT NULL AND "emi_amount"::NUMERIC > 0 THEN 1 ELSE 0 END)',
+        )
+
+    if rule_id == "VAL-014":
+        cols = [c for c in ("outstanding_amount_lcy", "outstanding_amount",
+                            "principal_amount_due", "int_amount_due",
+                            "due_amount", "principal_amount_lcy") if c in existing]
+        if not cols: return None
+        return (
+            " + ".join(f'SUM(CASE WHEN "{c}" IS NOT NULL THEN 1 ELSE 0 END)' for c in cols),
+            " + ".join(f'SUM(CASE WHEN "{c}" IS NOT NULL AND "{c}"::NUMERIC >= 0 THEN 1 ELSE 0 END)' for c in cols),
+        )
+
+    if rule_id == "VAL-015":
+        if not has("applied_amount_lcy"): return None
+        return (
+            'SUM(CASE WHEN "applied_amount_lcy" IS NOT NULL THEN 1 ELSE 0 END)',
+            'SUM(CASE WHEN "applied_amount_lcy" IS NOT NULL AND "applied_amount_lcy"::NUMERIC > 0 THEN 1 ELSE 0 END)',
+        )
+
+    if rule_id == "VAL-016":
+        if not has("num_of_instalments"): return None
+        return (
+            'SUM(CASE WHEN "num_of_instalments" IS NOT NULL THEN 1 ELSE 0 END)',
+            'SUM(CASE WHEN "num_of_instalments" IS NOT NULL AND "num_of_instalments"::NUMERIC >= 1 THEN 1 ELSE 0 END)',
+        )
+
+    if rule_id == "VAL-020":
+        if not has("num_instalments_paid", "num_of_instalments"): return None
+        return (
+            'SUM(CASE WHEN "num_instalments_paid" IS NOT NULL AND "num_of_instalments" IS NOT NULL THEN 1 ELSE 0 END)',
+            'SUM(CASE WHEN "num_instalments_paid" IS NOT NULL AND "num_of_instalments" IS NOT NULL '
+            'AND "num_instalments_paid"::NUMERIC <= "num_of_instalments"::NUMERIC THEN 1 ELSE 0 END)',
+        )
+
+    if rule_id == "VAL-021":
+        if not has("approved_amount_lcy", "applied_amount_lcy"): return None
+        return (
+            'SUM(CASE WHEN "approved_amount_lcy" IS NOT NULL AND "applied_amount_lcy" IS NOT NULL THEN 1 ELSE 0 END)',
+            'SUM(CASE WHEN "approved_amount_lcy" IS NOT NULL AND "applied_amount_lcy" IS NOT NULL '
+            'AND "approved_amount_lcy"::NUMERIC <= "applied_amount_lcy"::NUMERIC THEN 1 ELSE 0 END)',
+        )
+
+    if rule_id == "VAL-022":
+        if not has("date_of_birth", "customer_open_date"): return None
+        return (
+            'SUM(CASE WHEN "date_of_birth" IS NOT NULL AND "customer_open_date" IS NOT NULL THEN 1 ELSE 0 END)',
+            f'SUM(CASE WHEN "date_of_birth" IS NOT NULL AND "customer_open_date" IS NOT NULL '
+            f'AND ("customer_open_date"::DATE - "date_of_birth"::DATE) >= {MIN_AGE_AT_OPEN * 365} THEN 1 ELSE 0 END)',
+        )
+
+    return None
+
+
+def evaluate_from_sql(engine, schema: str, valid_le_books: frozenset,
+                       window_days: int, watermarks: dict, output_path: str) -> dict:
+    """Run validity checks in pure SQL — one query per table, no DataFrames."""
+    from sqlalchemy import text as _text
+
+    report: dict = {
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "tables":       {},
+        "warnings":     {},
+    }
+    all_scores:   list[float] = []
+    all_le_books: set         = set()
+
+    lb_clause = (
+        'AND "le_book" IN (' + ", ".join(f"'{lb}'" for lb in sorted(valid_le_books)) + ")"
+        if valid_le_books else ""
+    )
+
+    with engine.connect() as conn:
+        for table in TARGET_TABLES:
+            log.info("━━  %s", table)
+            rule_ids = TABLE_RULES.get(table, [])
+            val_cols = VALIDITY_COLUMNS.get(table, [])
+            if not rule_ids or not val_cols:
+                continue
+
+            sq = f'"{schema}"."{table}"'
+            wanted = list(set(val_cols) | {"le_book", "date_creation", "date_last_modified"})
+            existing = {
+                r[0] for r in conn.execute(_text("""
+                    SELECT column_name FROM information_schema.columns
+                    WHERE table_schema = :s AND table_name = :t
+                      AND column_name = ANY(:cols)
+                """), {"s": schema, "t": table, "cols": wanted}).fetchall()
+            }
+
+            rule_exprs: dict[str, tuple[str, str]] = {}
+            for rid in rule_ids:
+                exprs = _val_rule_sql(rid, existing)
+                if exprs:
+                    rule_exprs[rid] = exprs
+
+            if not rule_exprs:
+                report["tables"][table] = {"status": "no_data", "row_count": 0}
+                report["warnings"][table] = "No applicable validity columns found."
+                continue
+
+            date_parts = []
+            if "date_creation" in existing:
+                date_parts.append(
+                    f'"date_creation" BETWEEN CURRENT_DATE - INTERVAL \'{window_days} days\' AND CURRENT_DATE'
+                )
+            if "date_last_modified" in existing:
+                wm = watermarks.get(table)
+                date_parts.append(
+                    f'"date_last_modified" > \'{wm}\'' if wm else
+                    f'"date_last_modified" BETWEEN CURRENT_DATE - INTERVAL \'{window_days} days\' AND CURRENT_DATE'
+                )
+            date_clause = "(" + " OR ".join(date_parts) + ")" if date_parts else "TRUE"
+
+            scope_cols = sorted({"le_book"} & existing | {c for c in val_cols if c in existing})
+            has_lb     = "le_book" in existing
+            lb_select  = '"le_book", ' if has_lb else ""
+            group_by   = 'GROUP BY "le_book" ORDER BY "le_book"' if has_lb else ""
+
+            rule_selects = []
+            for rid, (tot_expr, val_expr) in rule_exprs.items():
+                rkey = rid.lower().replace("-", "")
+                rule_selects.append(f"{tot_expr} AS {rkey}_total,\n       {val_expr} AS {rkey}_valid")
+
+            sql = f"""
+                WITH scope AS (
+                    SELECT {", ".join(f'"{c}"' for c in scope_cols)}
+                    FROM   {sq}
+                    WHERE  {date_clause}
+                    {lb_clause}
+                )
+                SELECT {lb_select}COUNT(*) AS total_rows,
+                       {chr(10) + '       ,'.join(rule_selects)}
+                FROM scope
+                {group_by}
+            """
+
+            try:
+                rows = conn.execute(_text(sql)).mappings().fetchall()
+            except Exception as exc:
+                log.error("  %s: query failed — %s", table, exc)
+                conn.rollback()
+                report["tables"][table] = {"status": "no_data", "row_count": 0}
+                report["warnings"][table] = str(exc)
+                continue
+
+            if not rows:
+                report["tables"][table] = {"status": "no_data", "row_count": 0}
+                report["warnings"][table] = "No rows in window."
+                continue
+
+            total_rows      = sum(int(r["total_rows"]) for r in rows)
+            rules_out:      dict                   = {}
+            rule_scores:    list[float]             = []
+            lb_rule_scores: dict[str, list[float]]  = {}
+
+            for rid in rule_exprs:
+                rkey    = rid.lower().replace("-", "")
+                r_total = sum(int(r.get(f"{rkey}_total") or 0) for r in rows)
+                r_valid = sum(int(r.get(f"{rkey}_valid") or 0) for r in rows)
+                if r_total == 0:
+                    continue
+                score = _pct(r_valid, r_total)
+                rule_scores.append(score)
+                meta  = RULE_META[rid]
+
+                lb_breakdown: dict = {}
+                if has_lb:
+                    for r in rows:
+                        lb     = str(r["le_book"])
+                        all_le_books.add(lb)
+                        lb_tot = int(r.get(f"{rkey}_total") or 0)
+                        lb_val = int(r.get(f"{rkey}_valid") or 0)
+                        if lb_tot == 0:
+                            continue
+                        lb_score = _pct(lb_val, lb_tot)
+                        lb_breakdown[lb] = {
+                            "valid": lb_val, "invalid": lb_tot - lb_val,
+                            "total": lb_tot, "validity_score": lb_score,
+                        }
+                        lb_rule_scores.setdefault(lb, []).append(lb_score)
+
+                rules_out[rid] = {
+                    "rule_name": meta["name"], "category": meta["category"],
+                    "fields": meta["fields"],
+                    "valid": r_valid, "invalid": r_total - r_valid,
+                    "total": r_total, "validity_score": score,
+                    "le_book_breakdown": lb_breakdown,
+                }
+                log.info("  %s  score=%.2f%%  invalid=%d / %d", rid, score, r_total - r_valid, r_total)
+
+            if not rule_scores:
+                continue
+
+            table_score = round(sum(rule_scores) / len(rule_scores), 2)
+            all_scores.append(table_score)
+
+            le_book_breakdown: dict = {}
+            for lb, lb_scores in lb_rule_scores.items():
+                lb_row = max(
+                    rules_out[rid]["le_book_breakdown"].get(lb, {}).get("total", 0)
+                    for rid in rules_out
+                )
+                le_book_breakdown[lb] = {
+                    "row_count":      lb_row,
+                    "validity_score": round(sum(lb_scores) / len(lb_scores), 2),
+                    "rules": {
+                        rid: {
+                            "rule_name":      rules_out[rid]["rule_name"],
+                            "validity_score": rules_out[rid]["le_book_breakdown"].get(lb, {}).get("validity_score", 0.0),
+                            **{k: rules_out[rid]["le_book_breakdown"].get(lb, {}).get(k, 0)
+                               for k in ("valid", "invalid", "total")},
+                        }
+                        for rid in rules_out if lb in rules_out[rid]["le_book_breakdown"]
+                    },
+                }
+
+            report["tables"][table] = {
+                "status": "evaluated", "row_count": total_rows,
+                "rules_applied": len(rules_out), "validity_score": table_score,
+                "rules": rules_out, "le_book_breakdown": le_book_breakdown,
+            }
+            log.info("  Table validity: %.2f%%  (%d rules)", table_score, len(rules_out))
+
+    evaluated = [v for v in report["tables"].values() if v.get("status") == "evaluated"]
+    overall   = round(sum(all_scores) / len(all_scores), 2) if all_scores else 0.0
+    report["le_books"] = sorted(all_le_books)
+    report["executive_summary"] = {
+        "overall_validity_score": overall,
+        "total_tables":           len(report["tables"]),
+        "evaluated_tables":       len(evaluated),
+    }
+    with open(output_path, "w", encoding="utf-8") as fh:
+        json.dump(report, fh, indent=2, default=str)
+    log.info("Validity report → %s  (overall %.2f%%)", output_path, overall)
+    return report
+
+
 # ── CLI entry-point ────────────────────────────────────────────────────────────
 
 def main():
