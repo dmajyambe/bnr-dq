@@ -516,6 +516,279 @@ def evaluate_from_dataframes(dataframes: dict, valid_le_books: frozenset,
     return report
 
 
+def _acc_rule_sql(rule_id: str, existing: set,
+                   valid_le_books: frozenset) -> tuple[str, str] | None:
+    """Return (total_expr, valid_expr) SQL strings for this rule, or None if cols missing."""
+    def has(*cols): return all(c in existing for c in cols)
+
+    if rule_id == "ACC-001":
+        if not has("le_book"): return None
+        lb_in = ", ".join(f"'{lb}'" for lb in sorted(valid_le_books))
+        valid_expr = (
+            f'SUM(CASE WHEN "le_book" IS NOT NULL AND TRIM("le_book"::TEXT) IN ({lb_in}) THEN 1 ELSE 0 END)'
+            if lb_in else 'SUM(CASE WHEN "le_book" IS NOT NULL THEN 1 ELSE 0 END)'
+        )
+        return ('SUM(CASE WHEN "le_book" IS NOT NULL THEN 1 ELSE 0 END)', valid_expr)
+
+    if rule_id == "ACC-002":
+        if not has("account_status"): return None
+        vals = ", ".join(f"'{v}'" for v in sorted(str(x) for x in VALID_ACCOUNT_STATUS))
+        return (
+            'SUM(CASE WHEN "account_status" IS NOT NULL THEN 1 ELSE 0 END)',
+            f'SUM(CASE WHEN "account_status" IS NOT NULL AND "account_status"::TEXT IN ({vals}) THEN 1 ELSE 0 END)',
+        )
+
+    if rule_id == "ACC-003":
+        if not has("performance_class"): return None
+        vals = ", ".join(f"'{v}'" for v in sorted(VALID_PERFORMANCE_CLASS))
+        return (
+            'SUM(CASE WHEN "performance_class" IS NOT NULL THEN 1 ELSE 0 END)',
+            f'SUM(CASE WHEN "performance_class" IS NOT NULL AND UPPER(TRIM("performance_class"::TEXT)) IN ({vals}) THEN 1 ELSE 0 END)',
+        )
+
+    if rule_id == "ACC-004":
+        if not has("customer_gender"): return None
+        vals = ", ".join(f"'{v}'" for v in sorted(VALID_GENDER))
+        return (
+            'SUM(CASE WHEN "customer_gender" IS NOT NULL THEN 1 ELSE 0 END)',
+            f'SUM(CASE WHEN "customer_gender" IS NOT NULL AND UPPER(TRIM("customer_gender"::TEXT)) IN ({vals}) THEN 1 ELSE 0 END)',
+        )
+
+    if rule_id == "ACC-005":
+        if not has("account_type"): return None
+        vals = ", ".join(f"'{v}'" for v in sorted(VALID_ACCOUNT_TYPE))
+        return (
+            'SUM(CASE WHEN "account_type" IS NOT NULL THEN 1 ELSE 0 END)',
+            f'SUM(CASE WHEN "account_type" IS NOT NULL AND UPPER(TRIM("account_type"::TEXT)) IN ({vals}) THEN 1 ELSE 0 END)',
+        )
+
+    if rule_id == "ACC-010":
+        if not has("customer_gender", "legal_status"): return None
+        corp = ", ".join(f"'{v}'" for v in sorted(str(x) for x in CORPORATE_LEGAL_STATUS))
+        return (
+            'SUM(CASE WHEN "customer_gender" IS NOT NULL AND "legal_status" IS NOT NULL THEN 1 ELSE 0 END)',
+            f'SUM(CASE WHEN "customer_gender" IS NOT NULL AND "legal_status" IS NOT NULL '
+            f'AND ("legal_status"::TEXT NOT IN ({corp}) OR UPPER(TRIM("customer_gender"::TEXT)) = \'C\') THEN 1 ELSE 0 END)',
+        )
+
+    if rule_id == "ACC-011":
+        if not has("account_type", "vision_sbu"): return None
+        pension = ", ".join(f"'{v}'" for v in sorted(PENSION_ACCOUNT_TYPES))
+        return (
+            'SUM(CASE WHEN "account_type" IS NOT NULL AND "vision_sbu" IS NOT NULL THEN 1 ELSE 0 END)',
+            f'SUM(CASE WHEN "account_type" IS NOT NULL AND "vision_sbu" IS NOT NULL '
+            f'AND NOT (UPPER(TRIM("account_type"::TEXT)) IN ({pension}) AND UPPER(TRIM("vision_sbu"::TEXT)) = \'RETL\') THEN 1 ELSE 0 END)',
+        )
+
+    if rule_id == "ACC-012":
+        if not has("customer_gender", "marital_status"): return None
+        return (
+            'SUM(CASE WHEN "customer_gender" IS NOT NULL AND "marital_status" IS NOT NULL THEN 1 ELSE 0 END)',
+            'SUM(CASE WHEN "customer_gender" IS NOT NULL AND "marital_status" IS NOT NULL '
+            'AND (UPPER(TRIM("customer_gender"::TEXT)) != \'C\' OR UPPER(TRIM("marital_status"::TEXT)) = \'NA\') THEN 1 ELSE 0 END)',
+        )
+
+    if rule_id == "ACC-013":
+        if not has("le_book"): return None
+        return (
+            'SUM(CASE WHEN "le_book" IS NOT NULL THEN 1 ELSE 0 END)',
+            r"""SUM(CASE WHEN "le_book" IS NOT NULL AND "le_book"::TEXT ~ '^[0-9]{3}$' THEN 1 ELSE 0 END)""",
+        )
+
+    return None
+
+
+def evaluate_from_sql(engine, schema: str, valid_le_books: frozenset,
+                       window_days: int, watermarks: dict, output_path: str) -> dict:
+    """Run accuracy checks in pure SQL — one query per table, no DataFrames."""
+    from sqlalchemy import text as _text
+
+    global VALID_LE_BOOKS
+    VALID_LE_BOOKS = valid_le_books
+
+    report: dict = {
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "tables":       {},
+        "warnings":     {},
+    }
+    all_scores:   list[float] = []
+    all_le_books: set         = set()
+
+    lb_clause = (
+        'AND "le_book" IN (' + ", ".join(f"'{lb}'" for lb in sorted(valid_le_books)) + ")"
+        if valid_le_books else ""
+    )
+
+    with engine.connect() as conn:
+        for table in TARGET_TABLES:
+            log.info("━━  %s", table)
+            rule_ids = TABLE_RULES.get(table, [])
+            acc_cols = ACCURACY_COLUMNS.get(table, [])
+            if not rule_ids or not acc_cols:
+                continue
+
+            sq = f'"{schema}"."{table}"'
+            wanted = list(set(acc_cols) | {"le_book", "date_creation", "date_last_modified"})
+            existing = {
+                r[0] for r in conn.execute(_text("""
+                    SELECT column_name FROM information_schema.columns
+                    WHERE table_schema = :s AND table_name = :t
+                      AND column_name = ANY(:cols)
+                """), {"s": schema, "t": table, "cols": wanted}).fetchall()
+            }
+
+            # Build per-rule SQL expressions
+            rule_exprs: dict[str, tuple[str, str]] = {}
+            for rid in rule_ids:
+                exprs = _acc_rule_sql(rid, existing, valid_le_books)
+                if exprs:
+                    rule_exprs[rid] = exprs
+
+            if not rule_exprs:
+                report["tables"][table] = {"status": "no_data", "row_count": 0}
+                report["warnings"][table] = "No applicable accuracy columns found."
+                continue
+
+            date_parts = []
+            if "date_creation" in existing:
+                date_parts.append(
+                    f'"date_creation" BETWEEN CURRENT_DATE - INTERVAL \'{window_days} days\' AND CURRENT_DATE'
+                )
+            if "date_last_modified" in existing:
+                wm = watermarks.get(table)
+                date_parts.append(
+                    f'"date_last_modified" > \'{wm}\'' if wm else
+                    f'"date_last_modified" BETWEEN CURRENT_DATE - INTERVAL \'{window_days} days\' AND CURRENT_DATE'
+                )
+            date_clause = "(" + " OR ".join(date_parts) + ")" if date_parts else "TRUE"
+
+            # Collect all unique columns needed for the CTE scope
+            scope_cols  = sorted({"le_book"} & existing | {c for c in acc_cols if c in existing})
+            has_lb      = "le_book" in existing
+            lb_select   = '"le_book", ' if has_lb else ""
+            group_by    = 'GROUP BY "le_book" ORDER BY "le_book"' if has_lb else ""
+
+            rule_selects = []
+            for rid, (tot_expr, val_expr) in rule_exprs.items():
+                rkey = rid.lower().replace("-", "")
+                rule_selects.append(f"{tot_expr} AS {rkey}_total,\n       {val_expr} AS {rkey}_valid")
+
+            sql = f"""
+                WITH scope AS (
+                    SELECT {", ".join(f'"{c}"' for c in scope_cols)}
+                    FROM   {sq}
+                    WHERE  {date_clause}
+                    {lb_clause}
+                )
+                SELECT {lb_select}COUNT(*) AS total_rows,
+                       {chr(10) + '       ,'.join(rule_selects)}
+                FROM scope
+                {group_by}
+            """
+
+            try:
+                rows = conn.execute(_text(sql)).mappings().fetchall()
+            except Exception as exc:
+                log.error("  %s: query failed — %s", table, exc)
+                conn.rollback()
+                report["tables"][table] = {"status": "no_data", "row_count": 0}
+                report["warnings"][table] = str(exc)
+                continue
+
+            if not rows:
+                report["tables"][table] = {"status": "no_data", "row_count": 0}
+                report["warnings"][table] = "No rows in window."
+                continue
+
+            # Aggregate across le_books
+            total_rows = sum(int(r["total_rows"]) for r in rows)
+
+            rules_out: dict      = {}
+            rule_scores: list[float] = []
+            lb_rule_scores: dict[str, list[float]] = {}
+
+            for rid in rule_exprs:
+                rkey    = rid.lower().replace("-", "")
+                r_total = sum(int(r.get(f"{rkey}_total") or 0) for r in rows)
+                r_valid = sum(int(r.get(f"{rkey}_valid") or 0) for r in rows)
+                if r_total == 0:
+                    continue
+                score = _pct(r_valid, r_total)
+                rule_scores.append(score)
+                meta  = RULE_META[rid]
+
+                lb_breakdown: dict = {}
+                if has_lb:
+                    for r in rows:
+                        lb      = str(r["le_book"])
+                        all_le_books.add(lb)
+                        lb_tot  = int(r.get(f"{rkey}_total") or 0)
+                        lb_val  = int(r.get(f"{rkey}_valid") or 0)
+                        if lb_tot == 0:
+                            continue
+                        lb_score = _pct(lb_val, lb_tot)
+                        lb_breakdown[lb] = {
+                            "valid": lb_val, "invalid": lb_tot - lb_val,
+                            "total": lb_tot, "accuracy_score": lb_score,
+                        }
+                        lb_rule_scores.setdefault(lb, []).append(lb_score)
+
+                rules_out[rid] = {
+                    "rule_name": meta["name"], "category": meta["category"],
+                    "fields": meta["fields"],
+                    "valid": r_valid, "invalid": r_total - r_valid,
+                    "total": r_total, "accuracy_score": score,
+                    "le_book_breakdown": lb_breakdown,
+                }
+                log.info("  %s  score=%.2f%%  invalid=%d / %d", rid, score, r_total - r_valid, r_total)
+
+            if not rule_scores:
+                continue
+
+            table_score   = round(sum(rule_scores) / len(rule_scores), 2)
+            all_scores.append(table_score)
+
+            le_book_breakdown: dict = {}
+            for lb, lb_scores in lb_rule_scores.items():
+                lb_row = max(
+                    rules_out[rid]["le_book_breakdown"].get(lb, {}).get("total", 0)
+                    for rid in rules_out
+                )
+                le_book_breakdown[lb] = {
+                    "row_count":      lb_row,
+                    "accuracy_score": round(sum(lb_scores) / len(lb_scores), 2),
+                    "rules": {
+                        rid: {
+                            "rule_name":      rules_out[rid]["rule_name"],
+                            "accuracy_score": rules_out[rid]["le_book_breakdown"].get(lb, {}).get("accuracy_score", 0.0),
+                            **{k: rules_out[rid]["le_book_breakdown"].get(lb, {}).get(k, 0)
+                               for k in ("valid", "invalid", "total")},
+                        }
+                        for rid in rules_out if lb in rules_out[rid]["le_book_breakdown"]
+                    },
+                }
+
+            report["tables"][table] = {
+                "status": "evaluated", "row_count": total_rows,
+                "rules_applied": len(rules_out), "accuracy_score": table_score,
+                "rules": rules_out, "le_book_breakdown": le_book_breakdown,
+            }
+            log.info("  Table accuracy: %.2f%%  (%d rules)", table_score, len(rules_out))
+
+    evaluated = [v for v in report["tables"].values() if v.get("status") == "evaluated"]
+    overall   = round(sum(all_scores) / len(all_scores), 2) if all_scores else 0.0
+    report["le_books"] = sorted(all_le_books)
+    report["executive_summary"] = {
+        "overall_accuracy_score": overall,
+        "total_tables":           len(report["tables"]),
+        "evaluated_tables":       len(evaluated),
+    }
+    with open(output_path, "w", encoding="utf-8") as fh:
+        json.dump(report, fh, indent=2, default=str)
+    log.info("Accuracy report → %s  (overall %.2f%%)", output_path, overall)
+    return report
+
+
 #main function
 def main():
     # CLI entrypoint: parse args, load .env, connect to DB, run evaluate, log summary
