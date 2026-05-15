@@ -35,7 +35,7 @@ TABLES = [
 ]
 
 DATE_COLUMN    = "date_creation"
-WINDOW_DAYS    = 7
+WINDOW_DAYS    = 30
 WINDOW_DESC    = f"date_creation OR date_last_modified within last {WINDOW_DAYS} days"
 WATERMARK_FILE = SCRIPT_DIR / "watermark.json"
 HISTORY_FILE   = SCRIPT_DIR / "dq_history.json"
@@ -241,21 +241,25 @@ def _needed_columns(table: str) -> set:
 #table loader
 
 def load_all_tables(engine, schema: str, valid_le_books: frozenset,
-                    start_date: str = None, end_date: str = None) -> dict:
+                    watermarks: dict | None = None,
+                    start_date: str = None, end_date: str = None) -> tuple[dict, dict]:
     """
     Fetch all dimension tables within the date window into DataFrames.
     Only columns required by the DQ engines are selected.
     le_book filter is applied in-memory after loading.
+
+    Returns (dataframes, updated_watermarks). Does NOT save watermarks —
+    the caller is responsible for persisting them.
     """
     dataframes   = {}
     processed_at = datetime.now(timezone.utc)
-    watermarks   = _load_watermarks()
+    wm           = dict(watermarks) if watermarks else {}
 
     with engine.connect() as conn:
         for table in TABLES:
             sq_tbl = f'"{schema}"."{table}"'
             clause, filter_type = _build_date_filter(
-                conn, schema, table, watermarks, start_date, end_date)
+                conn, schema, table, wm, start_date, end_date)
 
             needed   = _needed_columns(table)
             existing = _db_columns(conn, schema, table)
@@ -301,15 +305,13 @@ def load_all_tables(engine, schema: str, valid_le_books: frozenset,
                 if "date_last_modified" in df.columns and not df.empty:
                     new_max = df["date_last_modified"].max()
                     if pd.notna(new_max):
-                        watermarks[table] = str(new_max)
+                        wm[table] = str(new_max)
                 dataframes[table] = df
             except Exception as exc:
                 log.error("  Failed to load %s: %s", table, exc)
                 dataframes[table] = pd.DataFrame()
 
-    _save_watermarks(watermarks)
-    log.info("Watermarks saved → %s", WATERMARK_FILE)
-    return dataframes
+    return dataframes, wm
 
 
 def load_parent_keys(engine, schema: str) -> dict:
@@ -469,6 +471,18 @@ def _build_history_entry(run_date: str, R: dict, categories: dict,
             **{d: dim_scores.get(d, 0.0) for d in DIMS},
         }
 
+    # Institutions with dup counts but no windowed DQ data still need an entry
+    for lb, dup in _dups.items():
+        if lb not in by_institution:
+            cat_info = categories.get(lb, {})
+            by_institution[lb] = {
+                "name":               cat_info.get("name", lb),
+                "category_type":      cat_info.get("category_type", ""),
+                "overall":            0.0,
+                "customer_duplicates": dup,
+                **{d: 0.0 for d in DIMS},
+            }
+
     # by_category: average institution scores grouped by category_type
     cat_buckets: dict[str, list[dict]] = {}
     for inst_data in by_institution.values():
@@ -504,6 +518,7 @@ def _append_history(entry: dict) -> None:
     # idempotent: replace if same date was already written today
     history = [e for e in history if e.get("date") != entry["date"]]
     history.append(entry)
+    history.sort(key=lambda e: e.get("date", ""))
     HISTORY_FILE.write_text(json.dumps(history, indent=2, default=str))
     log.info("History log updated → %s  (%d entries total)", HISTORY_FILE, len(history))
 
@@ -654,26 +669,18 @@ def main() -> None:
     import timeliness_check   as tim_eng
     import validity_check     as val_eng
     import relationship_check as rel_eng
-    import dq_profiler_engine as prof_eng
     import dq_issue_export    as issue_eng
 
     watermarks = _load_watermarks()
 
-    # Profiler and issue export still need row-level DataFrames; load them in
-    # parallel with the SQL engine tasks so neither blocks the other.
     _dataframes_holder: dict = {}
 
     def _load_frames():
-        dfs = load_all_tables(engine, args.schema, valid_le_books, start_date, end_date)
-        _dataframes_holder["dfs"] = dfs
+        dfs, updated_wm = load_all_tables(engine, args.schema, valid_le_books,
+                                          watermarks, start_date, end_date)
+        _dataframes_holder["dfs"]        = dfs
+        _dataframes_holder["watermarks"] = updated_wm
         return dfs
-
-    def _prof():
-        dfs = _dataframes_holder.get("dfs") or _load_frames()
-        r   = prof_eng.profile_all_from_dataframes(dfs, args.schema)
-        (SCRIPT_DIR / "dq_profile_report.json").write_text(
-            json.dumps(r, indent=2, default=str))
-        return r
 
     tasks = {
         "comp": partial(comp_eng.evaluate_from_sql, engine, args.schema, valid_le_books,
@@ -685,7 +692,6 @@ def main() -> None:
         "val":  partial(val_eng.evaluate_from_sql,  engine, args.schema, valid_le_books,
                         WINDOW_DAYS, watermarks, str(SCRIPT_DIR / "dq_validity_report.json")),
         "rel":  partial(rel_eng.evaluate_all, engine, args.schema, sample=0),
-        "prof": _prof,
         "frames": _load_frames,
     }
 
@@ -701,16 +707,9 @@ def main() -> None:
     # DataFrames were loaded in the "frames" task in parallel with SQL engines
     dataframes = _dataframes_holder.get("dfs") or R.get("frames") or {}
 
-    # Update watermarks from what was loaded
-    if dataframes:
-        new_wm = dict(watermarks)
-        for tbl, df in dataframes.items():
-            if hasattr(df, "columns") and "date_last_modified" in df.columns and not df.empty:
-                new_max = df["date_last_modified"].max()
-                if pd.notna(new_max):
-                    new_wm[tbl] = str(new_max)
-        _save_watermarks(new_wm)
-        log.info("Watermarks saved → %s", WATERMARK_FILE)
+    # Persist watermarks once — updated_wm was built inside _load_frames
+    _save_watermarks(_dataframes_holder.get("watermarks") or watermarks)
+    log.info("Watermarks saved → %s", WATERMARK_FILE)
 
     # ── user-defined rules ────────────────────────────────────────────────────
     import dq_user_rule_executor as usr_eng
@@ -718,10 +717,22 @@ def main() -> None:
     usr_eng.run_all_user_rules(dataframes, valid_le_books)
 
     # ── per-institution row-level issue reports ───────────────────────────────
+    log.info("Loading full parent key tables for accurate RI checks …")
+    parent_dataframes = load_parent_keys(engine, args.schema)
     log.info("Generating per-institution issue reports …")
     issue_eng.export_institution_issues(
-        dataframes, categories, valid_le_books, SCRIPT_DIR / "reports"
+        dataframes, categories, valid_le_books, SCRIPT_DIR / "reports", parent_dataframes
     )
+
+    # ── issue tracking: detect, update urgency, apply penalties, notify ──────
+    import dq_issue_tracker as tracker
+    log.info("Updating issue tracker …")
+    tracker.detect_and_update_issues(R, categories, run_date)
+    penalised = tracker.apply_penalties(run_date)
+    if penalised:
+        log.warning("%d issue(s) past SLA — penalties recorded.", penalised)
+    log.info("Running notification sweep …")
+    tracker.run_notification_sweep(categories)
 
     # ── build and append history entry ────────────────────────────────────────
     log.info("Building history entry for %s …", run_date)

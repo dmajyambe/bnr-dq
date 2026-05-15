@@ -27,9 +27,11 @@ from dq_pipeline_2m import (
     _build_conn_string,
     _get_engine,
     load_all_tables,
+    load_parent_keys,
     fetch_le_book_categories,
     SCHEMA,
 )
+import accuracy_check
 import dq_issue_export
 
 
@@ -64,7 +66,7 @@ def main() -> None:
     valid_le_books = frozenset({le_book})
 
     log.info("Loading table data …")
-    dataframes = load_all_tables(
+    dataframes, _ = load_all_tables(
         engine, args.schema, valid_le_books,
         start_date=args.start_date,
         end_date=args.end_date,
@@ -77,10 +79,17 @@ def main() -> None:
         log.error("No data found for le_book=%s. Check the date window or le_book code.", le_book)
         sys.exit(1)
 
+    # ACC-001 checks le_book against all valid institution codes — set the global
+    # before export so the accuracy engine doesn't flag all rows as invalid
+    accuracy_check.VALID_LE_BOOKS = frozenset(categories.keys())
+
+    log.info("Loading full parent key tables for accurate RI checks …")
+    parent_dataframes = load_parent_keys(engine, args.schema)
+
     log.info("Generating issue report …")
     out_dir = SCRIPT_DIR / "reports"
     dq_issue_export.export_institution_issues(
-        dataframes, categories, valid_le_books, out_dir,
+        dataframes, categories, valid_le_books, out_dir, parent_dataframes,
     )
 
     # find the generated file and report its path

@@ -135,7 +135,7 @@ def _completeness_df(inst_frames: dict) -> pd.DataFrame:
 
 
 def _rule_issues_df(inst_frames: dict, engine_mod, table_rules: dict,
-                    rule_meta: dict, score_key: str) -> pd.DataFrame:
+                    rule_meta: dict) -> pd.DataFrame:
     COLS = ["Row ID", "Record Info", "Table", "Rule", "Rule Name", "Field(s)", "Bad Value"]
     chunks = []
     for table, df in inst_frames.items():
@@ -163,11 +163,13 @@ def _rule_issues_df(inst_frames: dict, engine_mod, table_rules: dict,
     return pd.concat(chunks, ignore_index=True) if chunks else pd.DataFrame(columns=COLS)
 
 
-def _relationship_df(le_book: str, dataframes: dict) -> pd.DataFrame:
+def _relationship_df(le_book: str, dataframes: dict,
+                     parent_dataframes: dict | None = None) -> pd.DataFrame:
     COLS = ["Row ID", "Record Info", "Issue",
             "Checked Table", "FK Column", "Orphaned Value (not found in parent)",
             "Expected In Table", "Rule"]
     chunks = []
+    _parents = parent_dataframes or dataframes
     for rule_id, meta in REL_META.items():
         child_t  = meta["child_table"]
         child_c  = meta["child_col"]
@@ -175,7 +177,7 @@ def _relationship_df(le_book: str, dataframes: dict) -> pd.DataFrame:
         parent_c = meta["parent_col"]
 
         child_full = dataframes.get(child_t,  pd.DataFrame())
-        parent_df  = dataframes.get(parent_t, pd.DataFrame())
+        parent_df  = _parents.get(parent_t, pd.DataFrame())
         if child_full.empty or parent_df.empty:
             continue
         if child_c not in child_full.columns or parent_c not in parent_df.columns:
@@ -247,36 +249,93 @@ def _style_sheet(ws, n_cols: int) -> None:
 
 # ── single-institution XLSX writer ────────────────────────────────────────────
 
+def _open_issues_df(le_book: str) -> pd.DataFrame:
+    """
+    Return a DataFrame of tracked open issues for this institution from SQLite.
+    This sheet is the bridge between the alert email and the row-level evidence
+    sheets — it lists exactly the (dimension, table, rule) combinations referenced
+    in any notification sent to this institution.
+    """
+    try:
+        from dq_issue_tracker import get_open_issues
+        from datetime import date
+        issues = get_open_issues(le_book)
+    except Exception:
+        issues = []
+
+    if not issues:
+        return pd.DataFrame(columns=[
+            "Dimension", "Table", "Rule ID", "Failing Rows",
+            "Detected", "SLA Deadline", "Days Remaining", "Urgency", "Status",
+        ])
+
+    today = date.today()
+    rows  = []
+    for iss in issues:
+        try:
+            days_left = (date.fromisoformat(iss["sla_deadline"]) - today).days
+        except Exception:
+            days_left = ""
+        rows.append({
+            "Dimension":     iss["dimension"].title(),
+            "Table":         iss["table_name"],
+            "Rule ID":       iss["rule_id"],
+            "Failing Rows":  iss["failing_rows"],
+            "Detected":      iss["detected_at"],
+            "SLA Deadline":  iss["sla_deadline"],
+            "Days Remaining": days_left,
+            "Urgency":       iss.get("urgency_band", "").title(),
+            "Status":        iss.get("status", "open").title(),
+        })
+    return pd.DataFrame(rows)
+
+
 def _write_institution_xlsx(
     le_book: str,
     cat_info: dict,
     inst_frames: dict,
     dataframes: dict,
     output_dir: Path,
+    parent_dataframes: dict | None = None,
 ) -> None:
     inst_name = (cat_info.get("name") or le_book).title()
     safe      = re.sub(r"[^\w]", "_", inst_name)[:30].strip("_")
     path      = output_dir / f"{le_book}_{safe}.xlsx"
 
-    comp_df = _completeness_df(inst_frames)
-    acc_df  = _rule_issues_df(inst_frames, accuracy_check,   ACC_TABLE_RULES, ACC_META, "accuracy_score")
-    tim_df  = _rule_issues_df(inst_frames, timeliness_check, TIM_TABLE_RULES, TIM_META, "timeliness_score")
-    val_df  = _rule_issues_df(inst_frames, validity_check,   VAL_TABLE_RULES, VAL_META, "validity_score")
-    rel_df  = _relationship_df(le_book, dataframes)
+    comp_df   = _completeness_df(inst_frames)
+    acc_df    = _rule_issues_df(inst_frames, accuracy_check,   ACC_TABLE_RULES, ACC_META)
+    tim_df    = _rule_issues_df(inst_frames, timeliness_check, TIM_TABLE_RULES, TIM_META)
+    val_df    = _rule_issues_df(inst_frames, validity_check,   VAL_TABLE_RULES, VAL_META)
+    rel_df    = _relationship_df(le_book, dataframes, parent_dataframes)
+    issues_df = _open_issues_df(le_book)
 
-    run_ts  = datetime.now().strftime("%Y-%m-%d %H:%M UTC")
-    info_df = pd.DataFrame({
-        "Item":  ["Institution", "LE Book", "Category", "Generated At"],
-        "Value": [inst_name, le_book, cat_info.get("category_type", ""), run_ts],
-    })
+    run_ts = datetime.now().strftime("%Y-%m-%d %H:%M UTC")
+
+    # Info sheet — includes SLA note so the report is self-contained evidence
+    info_rows = [
+        ("Institution",  inst_name),
+        ("LE Book",      le_book),
+        ("Category",     cat_info.get("category_type", "")),
+        ("Generated At", run_ts),
+        ("", ""),
+        ("EVIDENCE NOTE",
+         "The 'Open Issues' sheet lists every tracked DQ issue for this institution. "
+         "Each row matches a rule/table combination referenced in BNR alert emails. "
+         "The dimension sheets below contain the exact failing records for those rules."),
+    ]
+    info_df = pd.DataFrame(info_rows, columns=["Item", "Value"])
+
     summary_df = pd.DataFrame({
-        "Dimension":   ["Completeness", "Accuracy", "Timeliness", "Validity", "Accuracy (Referential)"],
-        "Issue Count": [len(comp_df), len(acc_df), len(tim_df), len(val_df), len(rel_df)],
+        "Dimension":   ["Completeness", "Accuracy", "Timeliness", "Validity",
+                        "Accuracy (Referential)", "Tracked Open Issues"],
+        "Issue Count": [len(comp_df), len(acc_df), len(tim_df), len(val_df),
+                        len(rel_df), len(issues_df)],
     })
 
     sheets = [
         ("Info",          info_df),
         ("Summary",       summary_df),
+        ("Open Issues",   issues_df),   # ← matches alert email exactly
         ("Completeness",  comp_df),
         ("Accuracy",      acc_df),
         ("Timeliness",    tim_df),
@@ -303,6 +362,7 @@ def export_institution_issues(
     le_book_categories: dict,
     valid_le_books: frozenset,
     output_dir: Path,
+    parent_dataframes: dict | None = None,
 ) -> None:
     """
     Write one XLSX per institution with row-level DQ issues across all 5 dimensions.
@@ -312,6 +372,8 @@ def export_institution_issues(
         le_book_categories: {le_book: {"name": ..., "category_type": ...}}
         valid_le_books:     frozenset of le_book codes in scope.
         output_dir:         Directory to write XLSX files into (created if absent).
+        parent_dataframes:  Full-table parent key DataFrames (no date filter) for
+                            accurate RI checks. Falls back to dataframes if not given.
     """
     output_dir = Path(output_dir)
     output_dir.mkdir(exist_ok=True)
@@ -340,6 +402,7 @@ def export_institution_issues(
                 inst_frames,
                 dataframes,
                 output_dir,
+                parent_dataframes,
             )
         except Exception as exc:
             log.error("  ✗ %s — %s", le_book, exc)

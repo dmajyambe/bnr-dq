@@ -3,6 +3,7 @@ import csv
 import io
 import json
 import logging
+import os
 import subprocess
 import sys
 import threading
@@ -11,6 +12,8 @@ from pathlib import Path
 import dash
 from dash import dcc, html, Input, Output, ALL, ctx, State
 import plotly.graph_objects as go
+from flask import session as flask_session
+import dq_auth
 from dq_rules import (
     get_all_rules, get_user_rules, get_draft_rules,
     add_user_rule, next_user_rule_id,
@@ -96,6 +99,34 @@ LANDING_CATS = [
     },
 ]
 
+
+# ── issue tracker (loaded fresh each render — SQLite is fast) ─────────────────
+def _issue_summary() -> dict:
+    try:
+        from dq_issue_tracker import get_institution_issue_summary
+        return get_institution_issue_summary()
+    except Exception:
+        return {}
+
+def _institution_issues(le_book: str) -> list:
+    try:
+        from dq_issue_tracker import get_open_issues
+        return get_open_issues(le_book)
+    except Exception:
+        return []
+
+_URGENCY_COLORS = {
+    "new":       "#2563EB",
+    "attention": "#D97706",
+    "urgent":    "#EA580C",
+    "critical":  "#DC2626",
+}
+_URGENCY_LABELS = {
+    "new":       "New (1–3d)",
+    "attention": "Needs Attention (4–15d)",
+    "urgent":    "Urgent (16–20d)",
+    "critical":  "About to Breach (21–30d)",
+}
 
 # ── data loading ───────────────────────────────────────────────────────────────
 
@@ -372,7 +403,8 @@ def _trend_figure(trend: list, cat: str, inst_code: str | None = None) -> go.Fig
     return fig
 
 
-def _institution_table(institutions: dict, gen_status: dict | None = None) -> html.Div:
+def _institution_table(institutions: dict, gen_status: dict | None = None,
+                       issue_summary: dict | None = None) -> html.Div:
     if not institutions:
         return html.Div(
             "No institution data for this category.",
@@ -387,11 +419,13 @@ def _institution_table(institutions: dict, gen_status: dict | None = None) -> ht
         if any(d.get(dim, 100) < 75 for dim in DIMS)
     )
 
+    _isu  = issue_summary or {}
     H = {"fontSize": "11px", "fontWeight": "900", "color": MUTED,
          "textTransform": "uppercase", "letterSpacing": "0.05em",
          "lineHeight": "1.15", "flexShrink": "0"}
-    COL_W = "74px"
-    DL_W  = "52px"
+    COL_W  = "74px"
+    DL_W   = "52px"
+    NTFY_W = "36px"
 
     header = html.Div([
         html.Span("Institution", style={**H, "flex": "1", "flexShrink": "1"}),
@@ -399,6 +433,7 @@ def _institution_table(institutions: dict, gen_status: dict | None = None) -> ht
           for d in DIMS],
         html.Span("Overall", style={**H, "width": COL_W, "textAlign": "center"}),
         html.Span("Report",  style={**H, "width": DL_W,  "textAlign": "center"}),
+        html.Span("Alert",   style={**H, "width": NTFY_W, "textAlign": "center"}),
     ], style={
         "display": "flex", "alignItems": "center", "gap": "4px",
         "padding": "9px 14px",
@@ -412,12 +447,32 @@ def _institution_table(institutions: dict, gen_status: dict | None = None) -> ht
         overall = float(d.get("overall") or 0)
         bg      = CARD if i % 2 == 0 else "#FAFBFC"
 
+        # urgency left-border based on tracked issues
+        isu_info = _isu.get(lb, {})
+        worst    = isu_info.get("worst_urgency")
+        left_clr = _URGENCY_COLORS.get(worst, "transparent") if worst else "transparent"
+        n_issues = isu_info.get("total", 0)
+
+        # institution name cell with urgency dot
+        name_children = []
+        if worst:
+            tip = f"{n_issues} open issue(s) — {_URGENCY_LABELS.get(worst, worst)}"
+            name_children.append(html.Span("●", title=tip, style={
+                "color": left_clr, "fontSize": "9px",
+                "marginRight": "5px", "flexShrink": "0",
+            }))
+        name_children.append(html.Span(name, title=name, style={
+            "fontSize": "12px", "color": TEXT, "lineHeight": "1.15",
+            "overflow": "hidden", "textOverflow": "ellipsis",
+            "whiteSpace": "nowrap",
+        }))
+
         cells = [
-            html.Span(name, title=name, style={
-                "flex": "1", "flexShrink": "1",
-                "fontSize": "12px", "color": TEXT, "lineHeight": "1.15",
-                "overflow": "hidden", "textOverflow": "ellipsis",
-                "whiteSpace": "nowrap",
+            html.Div(name_children, style={
+                "flex": "1", "flexShrink": "1", "display": "flex",
+                "alignItems": "center", "minWidth": "0",
+                "borderLeft": f"3px solid {left_clr}",
+                "paddingLeft": "6px", "marginLeft": "-6px",
             }),
         ]
         for dim in DIMS:
@@ -480,6 +535,24 @@ def _institution_table(institutions: dict, gen_status: dict | None = None) -> ht
                 },
             )
         cells.append(dl_btn)
+
+        # Notify button — shown when institution has open issues
+        if n_issues > 0:
+            notify_btn = html.Div(
+                "🔔",
+                id={"type": "notify-btn", "index": lb},
+                n_clicks=0,
+                title=f"Send reminder to {name} ({n_issues} open issue(s))",
+                style={
+                    "width": NTFY_W, "textAlign": "center", "flexShrink": "0",
+                    "fontSize": "13px", "lineHeight": "1.15",
+                    "cursor": "pointer", "userSelect": "none",
+                    "color": left_clr,
+                },
+            )
+        else:
+            notify_btn = html.Span("", style={"width": NTFY_W, "flexShrink": "0"})
+        cells.append(notify_btn)
 
         data_rows.append(html.Div(cells, className="inst-row", style={
             "display": "flex", "alignItems": "center", "gap": "4px",
@@ -813,9 +886,187 @@ def _dashboard_content(cat: str, inst: str | None, gen_status: dict | None = Non
                 "marginBottom":  "12px",
                 "lineHeight":    "1.15",
             }),
-            html.Div(id="inst-table", children=_institution_table(display_insts, gen_status)),
+            html.Div(id="inst-table", children=_institution_table(
+                display_insts, gen_status, _issue_summary())),
         ]),
     ])
+
+
+# ── alerts page ───────────────────────────────────────────────────────────────
+
+def _alerts_page() -> html.Div:
+    from datetime import date as _date
+    try:
+        from dq_issue_tracker import (
+            get_open_issues, get_penalties, URGENCY_COLORS,
+        )
+        issues   = get_open_issues()
+        penalties = get_penalties()
+    except Exception:
+        issues, penalties = [], []
+
+    today = _date.today()
+
+    # ── summary bar ───────────────────────────────────────────────────────────
+    band_counts = {"new": 0, "attention": 0, "urgent": 0, "critical": 0}
+    for iss in issues:
+        b = iss.get("urgency_band", "new")
+        if b in band_counts:
+            band_counts[b] += 1
+
+    summary_chips = []
+    for band, label in [("critical", "About to Breach"), ("urgent", "Urgent"),
+                         ("attention", "Needs Attention"), ("new", "New")]:
+        n = band_counts[band]
+        clr = _URGENCY_COLORS[band]
+        summary_chips.append(html.Div([
+            html.Span(str(n), style={"fontWeight": "900", "fontSize": "22px", "color": clr}),
+            html.Span(label,  style={"fontSize": "11px",  "color": MUTED, "marginTop": "2px"}),
+        ], style={
+            "display": "flex", "flexDirection": "column", "alignItems": "center",
+            "background": CARD, "borderRadius": "8px", "padding": "14px 22px",
+            "border": f"2px solid {clr}", "minWidth": "110px",
+        }))
+
+    summary_bar = html.Div(summary_chips, style={
+        "display": "flex", "gap": "12px", "flexWrap": "wrap", "marginBottom": "24px",
+    })
+
+    # ── issues table ──────────────────────────────────────────────────────────
+    if not issues:
+        issues_section = html.Div("No open issues.", style={"color": MUTED, "padding": "24px"})
+    else:
+        H = {"fontSize": "11px", "fontWeight": "900", "color": MUTED,
+             "textTransform": "uppercase", "letterSpacing": "0.05em", "padding": "8px 10px"}
+        hdr = html.Div([
+            html.Span("Institution",  style={**H, "flex": "1"}),
+            html.Span("Table",        style={**H, "width": "160px"}),
+            html.Span("Rule",         style={**H, "width": "90px"}),
+            html.Span("Dimension",    style={**H, "width": "100px"}),
+            html.Span("Failing Rows", style={**H, "width": "90px", "textAlign": "right"}),
+            html.Span("Detected",     style={**H, "width": "90px"}),
+            html.Span("Deadline",     style={**H, "width": "90px"}),
+            html.Span("Remaining",    style={**H, "width": "76px", "textAlign": "center"}),
+            html.Span("Notify",       style={**H, "width": "52px", "textAlign": "center"}),
+        ], style={
+            "display": "flex", "background": BG, "borderRadius": "8px 8px 0 0",
+            "borderBottom": f"2px solid {DIVIDER}",
+        })
+
+        issue_rows = []
+        for i, iss in enumerate(sorted(issues, key=lambda x: x.get("sla_deadline", ""))):
+            band      = iss.get("urgency_band", "new")
+            clr       = _URGENCY_COLORS.get(band, MUTED)
+            try:
+                days_left = (date.fromisoformat(iss["sla_deadline"]) - today).days
+            except Exception:
+                days_left = "?"
+            days_color = C_RED if isinstance(days_left, int) and days_left <= 5 else TEXT
+            bg = CARD if i % 2 == 0 else "#FAFBFC"
+            lb = iss["le_book"]
+
+            issue_rows.append(html.Div([
+                html.Div([
+                    html.Span("●", style={"color": clr, "fontSize": "9px", "marginRight": "5px"}),
+                    html.Span((iss.get("institution_name") or lb).title(),
+                              style={"fontSize": "12px", "color": TEXT}),
+                ], style={"flex": "1", "display": "flex", "alignItems": "center",
+                          "padding": "7px 10px",
+                          "borderLeft": f"3px solid {clr}"}),
+                html.Span(iss["table_name"],  style={"width": "160px", "fontSize": "11px", "color": MUTED, "padding": "7px 10px"}),
+                html.Span(iss["rule_id"],     style={"width": "90px",  "fontSize": "11px", "fontWeight": "700", "color": TEXT, "padding": "7px 10px"}),
+                html.Span(iss["dimension"].title(), style={"width": "100px", "fontSize": "11px", "color": MUTED, "padding": "7px 10px"}),
+                html.Span(f"{iss['failing_rows']:,}", style={"width": "90px", "fontSize": "12px", "fontWeight": "700", "color": TEXT, "textAlign": "right", "padding": "7px 10px"}),
+                html.Span(iss["detected_at"], style={"width": "90px", "fontSize": "11px", "color": MUTED, "padding": "7px 10px"}),
+                html.Span(iss["sla_deadline"],style={"width": "90px", "fontSize": "11px", "color": MUTED, "padding": "7px 10px"}),
+                html.Span(f"{days_left}d",   style={"width": "76px", "fontSize": "12px", "fontWeight": "700", "color": days_color, "textAlign": "center", "padding": "7px 10px"}),
+                html.Div("🔔",
+                    id={"type": "notify-btn", "index": lb},
+                    n_clicks=0,
+                    title=f"Send reminder to {(iss.get('institution_name') or lb).title()}",
+                    style={"width": "52px", "textAlign": "center", "fontSize": "14px",
+                           "cursor": "pointer", "color": clr, "padding": "7px 0",
+                           "userSelect": "none"},
+                ),
+            ], style={
+                "display": "flex", "alignItems": "center", "background": bg,
+                "borderBottom": f"1px solid {DIVIDER}",
+            }))
+
+        issues_section = html.Div([hdr, *issue_rows],
+            style={"background": CARD, "borderRadius": "8px",
+                   "border": f"1px solid {DIVIDER}", "marginBottom": "24px"})
+
+    # ── penalties section ─────────────────────────────────────────────────────
+    if penalties:
+        pen_rows = []
+        for i, p in enumerate(penalties):
+            pen_rows.append(html.Div([
+                html.Span((p.get("institution_name") or p["le_book"]).title(),
+                          style={"flex": "1", "fontSize": "12px", "padding": "7px 10px"}),
+                html.Span(p["dimension"].title(),
+                          style={"width": "100px", "fontSize": "11px", "color": MUTED, "padding": "7px 10px"}),
+                html.Span(p["rule_id"],
+                          style={"width": "90px", "fontSize": "11px", "fontWeight": "700", "padding": "7px 10px"}),
+                html.Span(p["period"],
+                          style={"width": "80px", "fontSize": "11px", "color": MUTED, "padding": "7px 10px"}),
+                html.Span(f"{p['failing_rows']:,}",
+                          style={"width": "90px", "textAlign": "right", "fontSize": "12px", "padding": "7px 10px"}),
+                html.Span(f"−{p['penalty_pct']:.0f}%",
+                          style={"width": "60px", "textAlign": "center", "fontSize": "12px",
+                                 "fontWeight": "700", "color": C_RED, "padding": "7px 10px"}),
+                html.Span(p["applied_at"],
+                          style={"width": "90px", "fontSize": "11px", "color": MUTED, "padding": "7px 10px"}),
+            ], style={
+                "display": "flex", "alignItems": "center", "background": CARD if i % 2 == 0 else "#FAFBFC",
+                "borderBottom": f"1px solid {DIVIDER}",
+            }))
+
+        H2 = {"fontSize": "11px", "fontWeight": "900", "color": MUTED,
+              "textTransform": "uppercase", "letterSpacing": "0.05em", "padding": "8px 10px"}
+        pen_hdr = html.Div([
+            html.Span("Institution", style={**H2, "flex": "1"}),
+            html.Span("Dimension",   style={**H2, "width": "100px"}),
+            html.Span("Rule",        style={**H2, "width": "90px"}),
+            html.Span("Period",      style={**H2, "width": "80px"}),
+            html.Span("Rows",        style={**H2, "width": "90px", "textAlign": "right"}),
+            html.Span("Penalty",     style={**H2, "width": "60px", "textAlign": "center"}),
+            html.Span("Applied",     style={**H2, "width": "90px"}),
+        ], style={"display": "flex", "background": BG,
+                  "borderRadius": "8px 8px 0 0", "borderBottom": f"2px solid {DIVIDER}"})
+
+        penalty_section = html.Div([
+            html.H3("Compliance Penalties", style={
+                "fontSize": "14px", "fontWeight": "900", "color": C_RED,
+                "marginBottom": "10px", "marginTop": "0",
+            }),
+            html.Div([pen_hdr, *pen_rows],
+                style={"background": CARD, "borderRadius": "8px",
+                       "border": f"1px solid {DIVIDER}"}),
+        ])
+    else:
+        penalty_section = html.Div()
+
+    return html.Div([
+        html.H2("Alerts & Issue Tracker", style={
+            "fontSize": "18px", "fontWeight": "900", "color": TEXT,
+            "marginTop": "0", "marginBottom": "6px",
+        }),
+        html.P(
+            "Issues are detected when a dimension score falls below 70% for an institution. "
+            "They are tracked for 30 days — unresolved issues are penalised and logged. "
+            "Click 🔔 to send a reminder email to the institution.",
+            style={"fontSize": "12px", "color": MUTED, "marginBottom": "20px"},
+        ),
+        html.Div(id="notify-feedback", style={"marginBottom": "12px"}),
+        summary_bar,
+        html.H3(f"Open Issues ({len(issues)})", style={
+            "fontSize": "14px", "fontWeight": "900", "color": TEXT,
+            "marginBottom": "10px", "marginTop": "0",
+        }),
+        issues_section,
+        penalty_section,
+    ], style={"padding": "28px 32px", "maxWidth": "1300px", "margin": "0 auto"})
 
 
 # ── bootstrap values (rendered once at startup) ────────────────────────────────
@@ -1494,10 +1745,110 @@ app = dash.Dash(
     suppress_callback_exceptions=True,
 )
 server = app.server  # exposed for gunicorn: gunicorn dq_dashboard_dash:server
+server.secret_key = os.environ.get("SECRET_KEY", os.urandom(32))
+dq_auth.ensure_users_table()
+
+
+def _login_page(error: str = "") -> html.Div:
+    inp = {
+        "width": "100%", "padding": "10px 12px",
+        "border": f"1px solid {DIVIDER}", "borderRadius": "6px",
+        "fontSize": "14px", "fontFamily": FONT, "color": TEXT,
+        "boxSizing": "border-box", "outline": "none",
+    }
+    return html.Div([
+        html.Div([
+            # Card header
+            html.Div([
+                html.Img(src="/assets/bnr_img.png",
+                         style={"height": "48px", "marginBottom": "10px"}),
+                html.Div("DATA QUALITY MONITORING", style={
+                    "fontSize": "13px", "fontWeight": "900", "color": CARD,
+                    "letterSpacing": "0.07em",
+                }),
+                html.Div("National Bank of Rwanda", style={
+                    "fontSize": "11px", "color": "rgba(255,255,255,0.65)", "marginTop": "3px",
+                }),
+            ], style={
+                "background": BNR_NAVY, "padding": "28px 32px 22px",
+                "textAlign": "center", "borderRadius": "12px 12px 0 0",
+            }),
+
+            # Form body
+            html.Div([
+                html.Div("Sign in to your account", style={
+                    "fontSize": "15px", "fontWeight": "900", "color": TEXT,
+                    "marginBottom": "22px", "textAlign": "center",
+                }),
+
+                html.Div("Email", style={
+                    "fontSize": "11px", "fontWeight": "900", "color": MUTED,
+                    "textTransform": "uppercase", "letterSpacing": "0.05em",
+                    "marginBottom": "5px",
+                }),
+                dcc.Input(
+                    id="login-email", type="email",
+                    placeholder="you@bnr.rw",
+                    debounce=False, n_submit=0,
+                    style={**inp, "marginBottom": "16px"},
+                ),
+
+                html.Div("Password", style={
+                    "fontSize": "11px", "fontWeight": "900", "color": MUTED,
+                    "textTransform": "uppercase", "letterSpacing": "0.05em",
+                    "marginBottom": "5px",
+                }),
+                dcc.Input(
+                    id="login-password", type="password",
+                    placeholder="••••••••",
+                    debounce=False, n_submit=0,
+                    style={**inp, "marginBottom": "8px"},
+                ),
+
+                # Domain hint
+                html.Div("Only @bnr.rw accounts are accepted.", style={
+                    "fontSize": "11px", "color": MUTED, "marginBottom": "20px",
+                }),
+
+                # Error message
+                html.Div(
+                    error,
+                    id="login-error",
+                    style={
+                        "fontSize": "12px", "color": C_RED, "marginBottom": "14px",
+                        "minHeight": "16px", "textAlign": "center",
+                        "display": "block" if error else "none",
+                    },
+                ),
+
+                html.Div(
+                    "Sign In",
+                    id="login-btn",
+                    n_clicks=0,
+                    style={
+                        "width": "100%", "padding": "11px 0",
+                        "background": BNR_NAVY, "color": CARD,
+                        "fontSize": "14px", "fontWeight": "900",
+                        "textAlign": "center", "borderRadius": "6px",
+                        "cursor": "pointer", "userSelect": "none",
+                        "border": "none", "letterSpacing": "0.04em",
+                    },
+                ),
+            ], style={"padding": "28px 32px"}),
+
+        ], style={
+            "background": CARD, "borderRadius": "12px",
+            "boxShadow": "0 8px 32px rgba(0,0,0,0.14)",
+            "width": "380px",
+        }),
+    ], style={
+        "display": "flex", "alignItems": "center", "justifyContent": "center",
+        "minHeight": "100vh", "background": BG,
+    })
 
 
 def _nav_tabs(active: str) -> html.Div:
-    items = [("dashboard", "Dashboard"), ("validations", "Validations")]
+    items = [("dashboard", "Dashboard"), ("alerts", "Alerts"), ("validations", "Validations")]
     tabs = []
     for key, label in items:
         is_active = key == active
@@ -1536,13 +1887,13 @@ app.layout = html.Div([
                 style={"height": "50px", "marginRight": "16px", "flexShrink": "0"},
             ),
             html.Div([
-                html.Div("FINANCIAL SECTOR DATA QUALITY MONITORING", style={
+                html.Div("DATA QUALITY MONITORING", style={
                     "fontSize": "14px", "fontWeight": "700",
                     "color": CARD, "letterSpacing": "0.06em",
                     "lineHeight": "1.15",
                 }),
                 html.Div(
-                    "National Bank of Rwanda — BNR Data Quality Programme",
+                    "National Bank of Rwanda — Data Quality Program",
                     style={
                         "fontSize": "11px", "fontWeight": "400",
                         "color": "rgba(255,255,255,0.65)",
@@ -1551,9 +1902,12 @@ app.layout = html.Div([
                 ),
             ]),
         ], style={"display": "flex", "alignItems": "center"}),
-        html.Div(id="pipeline-status-banner", style={
-            "textAlign": "right", "lineHeight": "1.5",
-        }),
+        html.Div([
+            html.Div(id="pipeline-status-banner", style={
+                "textAlign": "right", "lineHeight": "1.5",
+            }),
+            html.Div(id="user-info-header"),
+        ], style={"display": "flex", "alignItems": "center", "gap": "20px"}),
     ], style={
         "background":     BNR_NAVY,
         "padding":        "14px 32px",
@@ -1582,6 +1936,8 @@ app.layout = html.Div([
     dcc.Store(id="active-page",  data="dashboard"),
     dcc.Store(id="rules-version", data=0),
     dcc.Store(id="gen-status",   data={}),
+    dcc.Store(id="notify-status", data={}),
+    dcc.Store(id="auth-store",   data={}),
     dcc.Interval(id="gen-poll",  interval=2000, n_intervals=0, disabled=True),
     dcc.Download(id="inst-download"),
     dcc.Download(id="gen-download"),
@@ -1662,8 +2018,13 @@ def _on_page_nav(_n_clicks):
     Input("nav-state",      "data"),
     Input("rules-version",  "data"),
     Input("gen-status",     "data"),
+    Input("auth-store",     "data"),
 )
-def _render_page(page: str, nav_state, _rv, gen_status):
+def _render_page(page: str, nav_state, _rv, gen_status, _auth):
+    # Gate every render on Flask session — login page if not authenticated
+    if not flask_session.get("user_email"):
+        return html.Div(), _login_page()
+
     page = page or "dashboard"
     nav  = nav_state or {"cat": None, "inst": None}
     cat  = nav.get("cat")
@@ -1673,6 +2034,9 @@ def _render_page(page: str, nav_state, _rv, gen_status):
 
     if page == "validations":
         return nav_bar, _validations_page()
+
+    if page == "alerts":
+        return nav_bar, _alerts_page()
 
     # Show landing page when no category has been selected
     if not cat:
@@ -2075,6 +2439,164 @@ def _poll_gen(n, current_status):
             dl_data = dcc.send_file(str(matches[0]))
 
     return updated, not still_running, dl_data
+
+
+# ── login callback ───────────────────────────────────────────────────────────
+
+@app.callback(
+    Output("auth-store",   "data"),
+    Output("login-error",  "children", allow_duplicate=True),
+    Output("login-error",  "style",    allow_duplicate=True),
+    Input("login-btn",     "n_clicks"),
+    Input("login-password","n_submit"),
+    State("login-email",   "value"),
+    State("login-password","value"),
+    prevent_initial_call=True,
+)
+def _do_login(n_clicks, n_submit, email, password):
+    if not (n_clicks or n_submit):
+        raise dash.exceptions.PreventUpdate
+
+    email    = (email    or "").strip().lower()
+    password = (password or "").strip()
+
+    # Domain check before hitting the DB
+    if not dq_auth.is_valid_bnr_email(email):
+        msg = "Only @bnr.rw email addresses are accepted."
+        return dash.no_update, msg, {"color": C_RED, "fontSize": "12px",
+                                     "marginBottom": "14px", "textAlign": "center"}
+
+    user = dq_auth.verify_credentials(email, password)
+    if not user:
+        msg = "Incorrect email or password."
+        return dash.no_update, msg, {"color": C_RED, "fontSize": "12px",
+                                     "marginBottom": "14px", "textAlign": "center"}
+
+    flask_session["user_email"] = user["email"]
+    flask_session["user_name"]  = user["name"]
+    flask_session["user_role"]  = user["role"]
+    flask_session.permanent     = True
+
+    return {"ts": datetime.now().isoformat()}, "", {"display": "none"}
+
+
+# ── logout callback ───────────────────────────────────────────────────────────
+
+@app.callback(
+    Output("auth-store", "data", allow_duplicate=True),
+    Input("logout-btn",  "n_clicks"),
+    prevent_initial_call=True,
+)
+def _do_logout(n):
+    if not n:
+        raise dash.exceptions.PreventUpdate
+    flask_session.clear()
+    return {"ts": datetime.now().isoformat()}
+
+
+# ── user info header ──────────────────────────────────────────────────────────
+
+@app.callback(
+    Output("user-info-header", "children"),
+    Input("auth-store", "data"),
+)
+def _update_user_header(_auth):
+    email = flask_session.get("user_email", "")
+    name  = flask_session.get("user_name",  "")
+    if not email:
+        return html.Div()
+    display = name.split()[0] if name else email.split("@")[0]
+    return html.Div([
+        html.Span(display, style={
+            "fontSize": "12px", "color": "rgba(255,255,255,0.85)",
+            "marginRight": "10px",
+        }),
+        html.Div(
+            "Sign out",
+            id="logout-btn",
+            n_clicks=0,
+            style={
+                "fontSize": "11px", "fontWeight": "700",
+                "color": "rgba(255,255,255,0.60)",
+                "cursor": "pointer", "userSelect": "none",
+                "border": "1px solid rgba(255,255,255,0.25)",
+                "borderRadius": "4px", "padding": "4px 10px",
+            },
+        ),
+    ], style={"display": "flex", "alignItems": "center"})
+
+
+# ── notify button callback ────────────────────────────────────────────────────
+
+@app.callback(
+    Output("notify-status", "data"),
+    Input({"type": "notify-btn", "index": ALL}, "n_clicks"),
+    State("notify-status", "data"),
+    prevent_initial_call=True,
+)
+def _on_notify(clicks, current):
+    if not any(c for c in (clicks or []) if c):
+        raise dash.exceptions.PreventUpdate
+    tid = ctx.triggered_id
+    if not isinstance(tid, dict) or tid.get("type") != "notify-btn":
+        raise dash.exceptions.PreventUpdate
+    if not ctx.triggered[0]["value"]:
+        raise dash.exceptions.PreventUpdate
+
+    lb = tid["index"]
+    try:
+        from dq_issue_tracker import (
+            get_open_issues, send_notification, get_contact,
+        )
+        issues = get_open_issues(lb)
+        if not issues:
+            result = "no_issues"
+        else:
+            inst_name = (issues[0].get("institution_name") or lb).title()
+            sent = send_notification(lb, inst_name, issues, force=True)
+            result = "sent" if sent else "no_email"
+    except Exception as exc:
+        log.error("Notify callback error: %s", exc)
+        result = "error"
+
+    updated = dict(current or {})
+    updated[lb] = result
+    return updated
+
+
+@app.callback(
+    Output("notify-feedback", "children"),
+    Input("notify-status", "data"),
+    prevent_initial_call=True,
+)
+def _show_notify_feedback(status_data):
+    if not status_data:
+        raise dash.exceptions.PreventUpdate
+
+    msgs = []
+    for lb, result in status_data.items():
+        if result == "sent":
+            msgs.append(html.Span(
+                f"✓ Reminder sent for institution {lb}.",
+                style={"color": C_GREEN, "fontSize": "12px", "marginRight": "12px"},
+            ))
+        elif result == "no_email":
+            msgs.append(html.Span(
+                f"⚠ No contact email configured for {lb}. "
+                "Set one in dq_institution_contacts (SQLite) or configure SMTP.",
+                style={"color": C_AMBER, "fontSize": "12px", "marginRight": "12px"},
+            ))
+        elif result == "no_issues":
+            msgs.append(html.Span(
+                f"No open issues found for {lb}.",
+                style={"color": MUTED, "fontSize": "12px", "marginRight": "12px"},
+            ))
+        elif result == "error":
+            msgs.append(html.Span(
+                f"Error sending notification for {lb}. Check logs.",
+                style={"color": C_RED, "fontSize": "12px", "marginRight": "12px"},
+            ))
+    return html.Div(msgs) if msgs else dash.no_update
 
 
 # ── dev server ─────────────────────────────────────────────────────────────────
