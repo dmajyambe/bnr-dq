@@ -300,7 +300,8 @@ def _write_institution_xlsx(
 ) -> None:
     inst_name = (cat_info.get("name") or le_book).title()
     safe      = re.sub(r"[^\w]", "_", inst_name)[:30].strip("_")
-    path      = output_dir / f"{le_book}_{safe}.xlsx"
+    run_date  = datetime.now().strftime("%Y-%m-%d")
+    path      = output_dir / f"{le_book}_{safe}_{run_date}.xlsx"
 
     comp_df   = _completeness_df(inst_frames)
     acc_df    = _rule_issues_df(inst_frames, accuracy_check,   ACC_TABLE_RULES, ACC_META)
@@ -388,6 +389,10 @@ def export_institution_issues(
             if valid_le_books and lb not in valid_le_books:
                 continue
             grouped.setdefault(lb, {})[table] = sub.reset_index(drop=True)
+
+    # Ensure every requested institution gets a file, even if their frames are empty
+    for lb in valid_le_books:
+        grouped.setdefault(lb, {})
 
     if not grouped:
         log.warning("No institution data found — no XLSX files written.")

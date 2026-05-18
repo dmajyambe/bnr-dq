@@ -26,6 +26,7 @@ from dq_pipeline_2m import (
     _load_env,
     _build_conn_string,
     _get_engine,
+    _load_watermarks,
     load_all_tables,
     load_parent_keys,
     fetch_le_book_categories,
@@ -66,25 +67,28 @@ def main() -> None:
     valid_le_books = frozenset({le_book})
 
     log.info("Loading table data …")
+    watermarks = _load_watermarks() if not (args.start_date and args.end_date) else {}
     dataframes, _ = load_all_tables(
         engine, args.schema, valid_le_books,
+        watermarks=watermarks,
         start_date=args.start_date,
         end_date=args.end_date,
     )
 
     total_rows = sum(len(df) for df in dataframes.values())
     log.info("Total rows loaded: %d", total_rows)
-
     if total_rows == 0:
-        log.error("No data found for le_book=%s. Check the date window or le_book code.", le_book)
-        sys.exit(1)
+        log.warning("No data found for le_book=%s in this date window — generating empty report.", le_book)
 
     # ACC-001 checks le_book against all valid institution codes — set the global
     # before export so the accuracy engine doesn't flag all rows as invalid
     accuracy_check.VALID_LE_BOOKS = frozenset(categories.keys())
 
-    log.info("Loading full parent key tables for accurate RI checks …")
-    parent_dataframes = load_parent_keys(engine, args.schema)
+    if total_rows > 0:
+        log.info("Loading full parent key tables for accurate RI checks …")
+        parent_dataframes = load_parent_keys(engine, args.schema)
+    else:
+        parent_dataframes = {}
 
     log.info("Generating issue report …")
     out_dir = SCRIPT_DIR / "reports"

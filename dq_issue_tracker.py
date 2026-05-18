@@ -32,7 +32,7 @@ log = logging.getLogger("dq_issue_tracker")
 
 SCRIPT_DIR       = Path(__file__).parent
 DB_PATH          = SCRIPT_DIR / "dq_rules.db"
-ISSUE_THRESHOLD  = 70.0    # score below this creates / keeps an issue
+ISSUE_THRESHOLD  = 85.0    # score below this creates / keeps an issue
 SLA_DAYS         = 30      # days until breach
 PENALTY_PCT      = 5.0     # % deducted per penalised issue (logged, not auto-applied to scores)
 

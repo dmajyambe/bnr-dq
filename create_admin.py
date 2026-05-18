@@ -1,12 +1,6 @@
-"""
-create_admin.py — One-time script to create the first admin account.
 
-Usage:
-    python3 create_admin.py
-    python3 create_admin.py --email admin@bnr.rw --name "Admin User"
+#script to create the first admin account.
 
-Only @bnr.rw addresses are accepted.
-"""
 import argparse
 import getpass
 import sys
@@ -44,8 +38,8 @@ def main() -> None:
 
     try:
         dq_auth.create_user(email, name, password, role=args.role)
-        print(f"\n✓ User created: {email} ({args.role})")
-        print("You can now log in to the BNR DQ Dashboard.")
+        print(f"\nUser created: {email} ({args.role})")
+        print("You can now log in.")
     except ValueError as exc:
         print(f"Error: {exc}")
         sys.exit(1)

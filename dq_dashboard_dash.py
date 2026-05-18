@@ -4,9 +4,6 @@ import io
 import json
 import logging
 import os
-import subprocess
-import sys
-import threading
 from datetime import datetime
 from pathlib import Path
 import dash
@@ -21,11 +18,6 @@ from dq_rules import (
 )
 log = logging.getLogger("dq_dashboard")
 
-# ── per-institution report generation state (server-side) ─────────────────────
-# le_book → subprocess.Popen while running, "done", or "error:<msg>"
-_gen_procs: dict = {}
-_gen_lock = threading.Lock()
-
 #file paths
 _DIR            = Path(__file__).parent
 HISTORY_FILE    = _DIR / "dq_history.json"
@@ -37,7 +29,7 @@ REPORTS_DIR     = _DIR / "reports"
 # design tokens
 BNR_GOLD = "#C8A42C"
 BNR_NAVY = "#1A3A6B"
-BG       = "#F4F6F9"
+BG       = "#e8d5a3"
 CARD     = "#FFFFFF"
 TEXT     = "#1A1A2E"
 MUTED    = "#6B7280"
@@ -49,10 +41,10 @@ FONT     = "'BentonSans','Franklin Gothic Medium','Arial Narrow',Arial,sans-seri
 
 # one color per dimension
 DIM_COLORS = {
-    "completeness": "#2563EB",
-    "accuracy":     "#16A34A",
-    "timeliness":   "#D97706",
-    "validity":     "#7C3AED",
+    "completeness": "#E8D5A3",
+    "accuracy":     "#2C1F14",
+    "timeliness":   "#7C3D1E",
+    "validity":     "#C9956C",
 }
 
 DIMS = ["completeness", "accuracy", "timeliness", "validity"]
@@ -80,21 +72,21 @@ LANDING_CATS = [
         "code":     "B",
         "label":    "Banks",
         "subtitle": "Commercial & savings banks",
-        "color":    "#2563EB",
+        "color":    "#6B3A2A",
         "types":    ["B"],
     },
     {
         "code":     "MF",
         "label":    "Microfinance",
         "subtitle": "Microfinance institutions",
-        "color":    "#16A34A",
+        "color":    "#B8860B",
         "types":    ["MF"],
     },
     {
         "code":     "SACCO",
         "label":    "SACCO",
         "subtitle": "Savings & credit cooperatives (incl. OSACCOs)",
-        "color":    "#D97706",
+        "color":    "#A0784A",
         "types":    ["SACCO", "OSACCO"],
     },
 ]
@@ -116,9 +108,9 @@ def _institution_issues(le_book: str) -> list:
         return []
 
 _URGENCY_COLORS = {
-    "new":       "#2563EB",
-    "attention": "#D97706",
-    "urgent":    "#EA580C",
+    "new":       "#E8D5A3",
+    "attention": "#FBBF24",
+    "urgent":    "#F97316",
     "critical":  "#DC2626",
 }
 _URGENCY_LABELS = {
@@ -403,8 +395,7 @@ def _trend_figure(trend: list, cat: str, inst_code: str | None = None) -> go.Fig
     return fig
 
 
-def _institution_table(institutions: dict, gen_status: dict | None = None,
-                       issue_summary: dict | None = None) -> html.Div:
+def _institution_table(institutions: dict, issue_summary: dict | None = None) -> html.Div:
     if not institutions:
         return html.Div(
             "No institution data for this category.",
@@ -490,50 +481,30 @@ def _institution_table(institutions: dict, gen_status: dict | None = None,
             "color": _score_color(overall), "lineHeight": "1.15",
         }))
 
-        report_exists = REPORTS_DIR.exists() and bool(list(REPORTS_DIR.glob(f"{lb}_*.xlsx")))
-        gen_st        = (gen_status or {}).get(lb)
-
-        if report_exists:
+        rpt_files = sorted(REPORTS_DIR.glob(f"{lb}_*.xlsx"), reverse=True) if REPORTS_DIR.exists() else []
+        if rpt_files:
+            # extract date from filename: {lb}_{name}_{YYYY-MM-DD}.xlsx
+            stem  = rpt_files[0].stem          # e.g. "040_Bank_Of_Kigali_2026-05-18"
+            parts = stem.rsplit("_", 3)
+            rpt_date = parts[-1] if len(parts) >= 2 and len(parts[-1]) == 10 else "—"
             dl_btn = html.Div(
-                "⬇",
+                [html.Span("⬇ ", style={"fontSize": "13px"}),
+                 html.Span(rpt_date, style={"fontSize": "9px", "opacity": "0.75"})],
                 id={"type": "inst-dl-btn", "index": lb},
                 n_clicks=0,
-                title=f"Download {name} issues report",
+                title=f"Download {name} report ({rpt_date})",
                 style={
                     "width": DL_W, "textAlign": "center", "flexShrink": "0",
-                    "fontSize": "15px", "lineHeight": "1.15",
+                    "display": "flex", "alignItems": "center", "justifyContent": "center",
                     "cursor": "pointer", "color": BNR_NAVY, "userSelect": "none",
-                },
-            )
-        elif gen_st == "running":
-            dl_btn = html.Div(
-                "generating…",
-                style={
-                    "width": DL_W, "textAlign": "center", "flexShrink": "0",
-                    "fontSize": "10px", "color": C_AMBER,
-                    "fontStyle": "italic", "lineHeight": "1.15",
+                    "lineHeight": "1.15",
                 },
             )
         else:
-            btn_title = "Generate issues report"
-            if gen_st and gen_st.startswith("error"):
-                btn_title = f"Error — click to retry"
-            dl_btn = html.Div(
-                "Generate",
-                id={"type": "gen-btn", "index": lb},
-                n_clicks=0,
-                title=btn_title,
-                style={
-                    "width": DL_W, "textAlign": "center", "flexShrink": "0",
-                    "fontSize": "10px", "fontWeight": "700", "lineHeight": "1.15",
-                    "cursor": "pointer",
-                    "color": C_RED if (gen_st and gen_st.startswith("error")) else BNR_NAVY,
-                    "background": "rgba(26,58,107,0.07)",
-                    "border": f"1px solid rgba(26,58,107,0.22)",
-                    "borderRadius": "4px", "padding": "3px 0",
-                    "userSelect": "none",
-                },
-            )
+            dl_btn = html.Span("—", style={
+                "width": DL_W, "textAlign": "center", "flexShrink": "0",
+                "fontSize": "11px", "color": MUTED, "lineHeight": "1.15",
+            })
         cells.append(dl_btn)
 
         # Notify button — shown when institution has open issues
@@ -720,7 +691,7 @@ def _landing_page(counts: dict) -> html.Div:
     ])
 
 
-def _dashboard_content(cat: str, inst: str | None, gen_status: dict | None = None) -> html.Div:
+def _dashboard_content(cat: str, inst: str | None) -> html.Div:
     """Renders the dashboard for a specific category, optionally filtered to one institution."""
     today        = _today_entry()
     yesterday    = _yesterday_entry()
@@ -887,7 +858,7 @@ def _dashboard_content(cat: str, inst: str | None, gen_status: dict | None = Non
                 "lineHeight":    "1.15",
             }),
             html.Div(id="inst-table", children=_institution_table(
-                display_insts, gen_status, _issue_summary())),
+                display_insts, _issue_summary())),
         ]),
     ])
 
@@ -897,13 +868,10 @@ def _dashboard_content(cat: str, inst: str | None, gen_status: dict | None = Non
 def _alerts_page() -> html.Div:
     from datetime import date as _date
     try:
-        from dq_issue_tracker import (
-            get_open_issues, get_penalties, URGENCY_COLORS,
-        )
-        issues   = get_open_issues()
-        penalties = get_penalties()
+        from dq_issue_tracker import get_open_issues, URGENCY_COLORS
+        issues = get_open_issues()
     except Exception:
-        issues, penalties = [], []
+        issues = []
 
     today = _date.today()
 
@@ -997,63 +965,13 @@ def _alerts_page() -> html.Div:
             style={"background": CARD, "borderRadius": "8px",
                    "border": f"1px solid {DIVIDER}", "marginBottom": "24px"})
 
-    # ── penalties section ─────────────────────────────────────────────────────
-    if penalties:
-        pen_rows = []
-        for i, p in enumerate(penalties):
-            pen_rows.append(html.Div([
-                html.Span((p.get("institution_name") or p["le_book"]).title(),
-                          style={"flex": "1", "fontSize": "12px", "padding": "7px 10px"}),
-                html.Span(p["dimension"].title(),
-                          style={"width": "100px", "fontSize": "11px", "color": MUTED, "padding": "7px 10px"}),
-                html.Span(p["rule_id"],
-                          style={"width": "90px", "fontSize": "11px", "fontWeight": "700", "padding": "7px 10px"}),
-                html.Span(p["period"],
-                          style={"width": "80px", "fontSize": "11px", "color": MUTED, "padding": "7px 10px"}),
-                html.Span(f"{p['failing_rows']:,}",
-                          style={"width": "90px", "textAlign": "right", "fontSize": "12px", "padding": "7px 10px"}),
-                html.Span(f"−{p['penalty_pct']:.0f}%",
-                          style={"width": "60px", "textAlign": "center", "fontSize": "12px",
-                                 "fontWeight": "700", "color": C_RED, "padding": "7px 10px"}),
-                html.Span(p["applied_at"],
-                          style={"width": "90px", "fontSize": "11px", "color": MUTED, "padding": "7px 10px"}),
-            ], style={
-                "display": "flex", "alignItems": "center", "background": CARD if i % 2 == 0 else "#FAFBFC",
-                "borderBottom": f"1px solid {DIVIDER}",
-            }))
-
-        H2 = {"fontSize": "11px", "fontWeight": "900", "color": MUTED,
-              "textTransform": "uppercase", "letterSpacing": "0.05em", "padding": "8px 10px"}
-        pen_hdr = html.Div([
-            html.Span("Institution", style={**H2, "flex": "1"}),
-            html.Span("Dimension",   style={**H2, "width": "100px"}),
-            html.Span("Rule",        style={**H2, "width": "90px"}),
-            html.Span("Period",      style={**H2, "width": "80px"}),
-            html.Span("Rows",        style={**H2, "width": "90px", "textAlign": "right"}),
-            html.Span("Penalty",     style={**H2, "width": "60px", "textAlign": "center"}),
-            html.Span("Applied",     style={**H2, "width": "90px"}),
-        ], style={"display": "flex", "background": BG,
-                  "borderRadius": "8px 8px 0 0", "borderBottom": f"2px solid {DIVIDER}"})
-
-        penalty_section = html.Div([
-            html.H3("Compliance Penalties", style={
-                "fontSize": "14px", "fontWeight": "900", "color": C_RED,
-                "marginBottom": "10px", "marginTop": "0",
-            }),
-            html.Div([pen_hdr, *pen_rows],
-                style={"background": CARD, "borderRadius": "8px",
-                       "border": f"1px solid {DIVIDER}"}),
-        ])
-    else:
-        penalty_section = html.Div()
-
     return html.Div([
         html.H2("Alerts & Issue Tracker", style={
             "fontSize": "18px", "fontWeight": "900", "color": TEXT,
             "marginTop": "0", "marginBottom": "6px",
         }),
         html.P(
-            "Issues are detected when a dimension score falls below 70% for an institution. "
+            "Issues are detected when a dimension score falls below 85% for an institution. "
             "They are tracked for 30 days — unresolved issues are penalised and logged. "
             "Click 🔔 to send a reminder email to the institution.",
             style={"fontSize": "12px", "color": MUTED, "marginBottom": "20px"},
@@ -1065,7 +983,6 @@ def _alerts_page() -> html.Div:
             "marginBottom": "10px", "marginTop": "0",
         }),
         issues_section,
-        penalty_section,
     ], style={"padding": "28px 32px", "maxWidth": "1300px", "margin": "0 auto"})
 
 
@@ -1754,7 +1671,7 @@ def _login_page(error: str = "") -> html.Div:
         "width": "100%", "padding": "10px 12px",
         "border": f"1px solid {DIVIDER}", "borderRadius": "6px",
         "fontSize": "14px", "fontFamily": FONT, "color": TEXT,
-        "boxSizing": "border-box", "outline": "none",
+        "boxSizing": "border-box", "outline": "none", "background": "#e8d5a3",
     }
     return html.Div([
         html.Div([
@@ -1762,7 +1679,7 @@ def _login_page(error: str = "") -> html.Div:
             html.Div([
                 html.Img(src="/assets/bnr_img.png",
                          style={"height": "48px", "marginBottom": "10px"}),
-                html.Div("DATA QUALITY MONITORING", style={
+                html.Div("DATA QUALITY PROGRAM", style={
                     "fontSize": "13px", "fontWeight": "900", "color": CARD,
                     "letterSpacing": "0.07em",
                 }),
@@ -1770,7 +1687,7 @@ def _login_page(error: str = "") -> html.Div:
                     "fontSize": "11px", "color": "rgba(255,255,255,0.65)", "marginTop": "3px",
                 }),
             ], style={
-                "background": BNR_NAVY, "padding": "28px 32px 22px",
+                "background": "#6B3A2A", "padding": "28px 32px 22px",
                 "textAlign": "center", "borderRadius": "12px 12px 0 0",
             }),
 
@@ -1827,14 +1744,14 @@ def _login_page(error: str = "") -> html.Div:
                     n_clicks=0,
                     style={
                         "width": "100%", "padding": "11px 0",
-                        "background": BNR_NAVY, "color": CARD,
+                        "background": "#6b3a2a", "color": CARD,
                         "fontSize": "14px", "fontWeight": "900",
                         "textAlign": "center", "borderRadius": "6px",
                         "cursor": "pointer", "userSelect": "none",
                         "border": "none", "letterSpacing": "0.04em",
                     },
                 ),
-            ], style={"padding": "28px 32px"}),
+            ], style={"padding": "28px 32px", "background": "#e8d5a3"}),
 
         ], style={
             "background": CARD, "borderRadius": "12px",
@@ -1909,7 +1826,7 @@ app.layout = html.Div([
             html.Div(id="user-info-header"),
         ], style={"display": "flex", "alignItems": "center", "gap": "20px"}),
     ], style={
-        "background":     BNR_NAVY,
+        "background":     "#6b3a2a",
         "padding":        "14px 32px",
         "display":        "flex",
         "alignItems":     "center",
@@ -1935,12 +1852,9 @@ app.layout = html.Div([
     dcc.Store(id="nav-state",    data={"cat": None, "inst": None}),
     dcc.Store(id="active-page",  data="dashboard"),
     dcc.Store(id="rules-version", data=0),
-    dcc.Store(id="gen-status",   data={}),
     dcc.Store(id="notify-status", data={}),
     dcc.Store(id="auth-store",   data={}),
-    dcc.Interval(id="gen-poll",  interval=2000, n_intervals=0, disabled=True),
     dcc.Download(id="inst-download"),
-    dcc.Download(id="gen-download"),
 
 ], style={"background": BG, "minHeight": "100vh", "fontFamily": FONT})
 
@@ -2017,13 +1931,14 @@ def _on_page_nav(_n_clicks):
     Input("active-page",    "data"),
     Input("nav-state",      "data"),
     Input("rules-version",  "data"),
-    Input("gen-status",     "data"),
     Input("auth-store",     "data"),
 )
-def _render_page(page: str, nav_state, _rv, gen_status, _auth):
-    # Gate every render on Flask session — login page if not authenticated
-    if not flask_session.get("user_email"):
-        return html.Div(), _login_page()
+def _render_page(page: str, nav_state, _rv, auth_data):
+    # Primary gate: auth-store is empty → show login page
+    # Secondary gate: cross-check flask_session so tampering with client store is caught
+    auth = auth_data or {}
+    if auth.get("error") or not auth.get("email"):
+        return html.Div(), _login_page(auth.get("error", ""))
 
     page = page or "dashboard"
     nav  = nav_state or {"cat": None, "inst": None}
@@ -2042,8 +1957,7 @@ def _render_page(page: str, nav_state, _rv, gen_status, _auth):
     if not cat:
         return nav_bar, _landing_page(_counts)
 
-    # Show category dashboard (gen_status drives Generate / ⬇ button states)
-    return nav_bar, _dashboard_content(cat, inst, gen_status or {})
+    return nav_bar, _dashboard_content(cat, inst)
 
 
 @app.callback(
@@ -2214,7 +2128,7 @@ def _on_inst_download(n_clicks):
     le_book = triggered["index"]
     if not REPORTS_DIR.exists():
         raise dash.exceptions.PreventUpdate
-    matches = sorted(REPORTS_DIR.glob(f"{le_book}_*.xlsx"))
+    matches = sorted(REPORTS_DIR.glob(f"{le_book}_*.xlsx"), reverse=True)
     if not matches:
         raise dash.exceptions.PreventUpdate
     return dcc.send_file(str(matches[0]))
@@ -2356,101 +2270,14 @@ def _submit_complex_rule(n_clicks, rule_id, dim, name,
     ]), (version or 0) + 1
 
 
-# ── on-demand report generation ────────────────────────────────────────────────
-
-@app.callback(
-    Output("gen-status", "data"),
-    Output("gen-poll",   "disabled"),
-    Input({"type": "gen-btn", "index": ALL}, "n_clicks"),
-    State("gen-status", "data"),
-    prevent_initial_call=True,
-)
-def _start_gen(clicks, current):
-    """Start background report generation for the clicked institution."""
-    if not any(c for c in (clicks or []) if c):
-        raise dash.exceptions.PreventUpdate
-    tid = ctx.triggered_id
-    triggered_val = ctx.triggered[0]["value"] if ctx.triggered else 0
-    if not isinstance(tid, dict) or tid.get("type") != "gen-btn":
-        raise dash.exceptions.PreventUpdate
-    if not triggered_val:
-        raise dash.exceptions.PreventUpdate
-
-    le_book = tid["index"]
-    status  = dict(current or {})
-
-    if status.get(le_book) == "running":
-        raise dash.exceptions.PreventUpdate
-
-    proc = subprocess.Popen(
-        [sys.executable, str(_DIR / "generate_one_report.py"), "--le-book", le_book],
-        cwd=str(_DIR),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
-    with _gen_lock:
-        _gen_procs[le_book] = proc
-
-    status[le_book] = "running"
-    return status, False   # enable the polling interval
-
-
-@app.callback(
-    Output("gen-status",   "data",     allow_duplicate=True),
-    Output("gen-poll",     "disabled", allow_duplicate=True),
-    Output("gen-download", "data"),
-    Input("gen-poll",      "n_intervals"),
-    State("gen-status",    "data"),
-    prevent_initial_call=True,
-)
-def _poll_gen(n, current_status):
-    """Every 2 s: check whether any running jobs finished; trigger download if so."""
-    if not current_status:
-        raise dash.exceptions.PreventUpdate
-
-    updated    = dict(current_status)
-    newly_done = []
-    changed    = False
-
-    with _gen_lock:
-        for lb, proc in _gen_procs.items():
-            if updated.get(lb) != "running":
-                continue
-            rc = proc.poll()
-            if rc is None:
-                continue   # still running
-            changed = True
-            if rc == 0:
-                updated[lb] = "done"
-                newly_done.append(lb)
-            else:
-                stderr = proc.stderr.read().decode(errors="replace")
-                updated[lb] = "error:" + (stderr[-120:] if stderr else str(rc))
-
-    if not changed:
-        raise dash.exceptions.PreventUpdate
-
-    still_running = any(v == "running" for v in updated.values())
-
-    dl_data = dash.no_update
-    if newly_done:
-        matches = sorted(REPORTS_DIR.glob(f"{newly_done[0]}_*.xlsx"))
-        if matches:
-            dl_data = dcc.send_file(str(matches[0]))
-
-    return updated, not still_running, dl_data
-
-
 # ── login callback ───────────────────────────────────────────────────────────
 
 @app.callback(
-    Output("auth-store",   "data"),
-    Output("login-error",  "children", allow_duplicate=True),
-    Output("login-error",  "style",    allow_duplicate=True),
-    Input("login-btn",     "n_clicks"),
-    Input("login-password","n_submit"),
-    State("login-email",   "value"),
-    State("login-password","value"),
+    Output("auth-store", "data"),
+    Input("login-btn",      "n_clicks"),
+    Input("login-password", "n_submit"),
+    State("login-email",    "value"),
+    State("login-password", "value"),
     prevent_initial_call=True,
 )
 def _do_login(n_clicks, n_submit, email, password):
@@ -2460,24 +2287,19 @@ def _do_login(n_clicks, n_submit, email, password):
     email    = (email    or "").strip().lower()
     password = (password or "").strip()
 
-    # Domain check before hitting the DB
     if not dq_auth.is_valid_bnr_email(email):
-        msg = "Only @bnr.rw email addresses are accepted."
-        return dash.no_update, msg, {"color": C_RED, "fontSize": "12px",
-                                     "marginBottom": "14px", "textAlign": "center"}
+        return {"error": "Only @bnr.rw email addresses are accepted."}
 
     user = dq_auth.verify_credentials(email, password)
     if not user:
-        msg = "Incorrect email or password."
-        return dash.no_update, msg, {"color": C_RED, "fontSize": "12px",
-                                     "marginBottom": "14px", "textAlign": "center"}
+        return {"error": "Incorrect email or password."}
 
     flask_session["user_email"] = user["email"]
     flask_session["user_name"]  = user["name"]
     flask_session["user_role"]  = user["role"]
     flask_session.permanent     = True
 
-    return {"ts": datetime.now().isoformat()}, "", {"display": "none"}
+    return {"email": user["email"], "name": user["name"], "role": user["role"]}
 
 
 # ── logout callback ───────────────────────────────────────────────────────────
@@ -2491,7 +2313,7 @@ def _do_logout(n):
     if not n:
         raise dash.exceptions.PreventUpdate
     flask_session.clear()
-    return {"ts": datetime.now().isoformat()}
+    return {}   # empty auth-store → triggers login page re-render
 
 
 # ── user info header ──────────────────────────────────────────────────────────
@@ -2499,10 +2321,12 @@ def _do_logout(n):
 @app.callback(
     Output("user-info-header", "children"),
     Input("auth-store", "data"),
+    prevent_initial_call=True,
 )
-def _update_user_header(_auth):
-    email = flask_session.get("user_email", "")
-    name  = flask_session.get("user_name",  "")
+def _update_user_header(auth_data):
+    auth  = auth_data or {}
+    email = auth.get("email", "")
+    name  = auth.get("name",  "")
     if not email:
         return html.Div()
     display = name.split()[0] if name else email.split("@")[0]

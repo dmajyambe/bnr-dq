@@ -1,15 +1,9 @@
-"""
-db_utils.py — Shared DB connection and institution-scope helpers.
 
-Imported by all DQ engine modules to eliminate duplication.
-"""
 from __future__ import annotations
 import logging
 import os
 import sys
-
 from sqlalchemy import create_engine, text
-
 log = logging.getLogger("dq_db_utils")
 
 CATEGORY_TYPES = ("MF", "SACCO", "OSACCO", "B")
@@ -26,7 +20,6 @@ def build_connection_string() -> str:
         sys.exit(1)
     u, pw, h, p, db = (os.environ[k] for k in required)
     return f"postgresql+psycopg2://{u}:{pw}@{h}:{p}/{db}"
-
 
 def get_engine(conn_str: str):
     try:

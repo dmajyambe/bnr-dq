@@ -406,35 +406,75 @@ def _inst_scores_from_report(report: dict, lb_score_key: str) -> dict[str, float
     }
 
 
-def _customer_dup_counts(engine, schema: str, valid_le_books: frozenset) -> dict[str, int]:
-    """Count distinct customer_ids with duplicates per le_book across the full table"""
+def _customer_dup_counts(
+    engine, schema: str, valid_le_books: frozenset
+) -> tuple[dict[str, int], dict[str, int]]:
+    """
+    Returns (per_lb, per_cat) where:
+      per_lb  — {le_book: distinct customers with dups in that institution}
+      per_cat — {category_type: DISTINCT customers with dups in that category}
+
+    per_cat uses COUNT(DISTINCT) so a customer with duplicates at multiple
+    institutions in the same category is counted only once.
+    """
     from sqlalchemy import text as _text
     lb_filter = ""
     if valid_le_books:
         codes     = ", ".join(f"'{lb}'" for lb in sorted(valid_le_books))
-        lb_filter = f"WHERE le_book IN ({codes})"
-    sql = _text(f"""
+        lb_filter = f"WHERE ce.le_book IN ({codes})"
+
+    filter_list = ", ".join(f"'{t}'" for t in CATEGORY_TYPES)
+
+    sql_lb = _text(f"""
         SELECT le_book, COUNT(*) AS dup_customers
         FROM (
             SELECT le_book, customer_id
             FROM "{schema}".customers_expanded
-            {lb_filter}
+            {lb_filter.replace("ce.", "")}
             GROUP BY le_book, customer_id
             HAVING COUNT(*) > 1
         ) sub
         GROUP BY le_book
     """)
+
+    sql_cat = _text(f"""
+        SELECT ast.category_type,
+               COUNT(DISTINCT dc.customer_id) AS dup_customers
+        FROM (
+            SELECT ce.le_book, ce.customer_id
+            FROM "{schema}".customers_expanded ce
+            {lb_filter}
+            GROUP BY ce.le_book, ce.customer_id
+            HAVING COUNT(*) > 1
+        ) dc
+        JOIN "{schema}".le_book lb
+            ON dc.le_book = lb.le_book
+        JOIN (
+            SELECT alpha_tab     AS category_type_at,
+                   alpha_sub_tab AS category_type
+            FROM   "{schema}".alpha_sub_tab
+        ) ast
+            ON lb.category_type_at = ast.category_type_at
+           AND lb.category_type    = ast.category_type
+        WHERE ast.category_type IN ({filter_list})
+        GROUP BY ast.category_type
+    """)
+
     try:
         with engine.connect() as conn:
-            rows = conn.execute(sql).fetchall()
-        return {str(r[0]).strip(): int(r[1]) for r in rows if r[0] is not None}
+            per_lb  = {str(r[0]).strip(): int(r[1])
+                       for r in conn.execute(sql_lb).fetchall() if r[0] is not None}
+            per_cat = {str(r[0]).strip(): int(r[1])
+                       for r in conn.execute(sql_cat).fetchall() if r[0] is not None}
+        return per_lb, per_cat
     except Exception as exc:
         log.warning("Could not compute customer duplicate counts: %s", exc)
-        return {}
+        return {}, {}
 
 
 def _build_history_entry(run_date: str, R: dict, categories: dict,
-                         dup_counts: dict | None = None) -> dict:
+                         dup_counts: dict | None = None,
+                         cat_dup_counts: dict | None = None) -> dict:
     """
     Aggregate engine results into a single history entry:
       overall        — one score per dimension (4 dims; RI averaged into accuracy)
@@ -458,7 +498,8 @@ def _build_history_entry(run_date: str, R: dict, categories: dict,
         lb_dim_scores[lb] = _merge_rel(lb_dim_scores[lb])
 
     # enrich with category metadata; compute per-institution overall (4 dims)
-    _dups = dup_counts or {}
+    _dups     = dup_counts or {}
+    _cat_dups = cat_dup_counts or {}
     by_institution: dict = {}
     for lb, dim_scores in lb_dim_scores.items():
         cat_info    = categories.get(lb, {})
@@ -496,7 +537,11 @@ def _build_history_entry(run_date: str, R: dict, categories: dict,
         for dim in DIMS:
             scores = [i[dim] for i in institutions if i.get(dim, 0) > 0]
             cat_scores[dim] = round(sum(scores) / len(scores), 2) if scores else 0.0
-        cat_scores["customer_duplicates"] = sum(i.get("customer_duplicates", 0) for i in institutions)
+        # Use pre-computed DISTINCT count when available to avoid
+        # double-counting customers with duplicates at multiple institutions.
+        cat_scores["customer_duplicates"] = _cat_dups.get(
+            ct, sum(i.get("customer_duplicates", 0) for i in institutions)
+        )
         by_category[ct] = cat_scores
 
     return {
@@ -737,9 +782,9 @@ def main() -> None:
     # ── build and append history entry ────────────────────────────────────────
     log.info("Building history entry for %s …", run_date)
     log.info("Counting customer duplicates across full table …")
-    dup_counts = _customer_dup_counts(engine, args.schema, valid_le_books)
+    dup_counts, cat_dup_counts = _customer_dup_counts(engine, args.schema, valid_le_books)
     log.info("Customer duplicate counts: %d institution(s) with duplicates", len(dup_counts))
-    entry = _build_history_entry(run_date, R, categories, dup_counts)
+    entry = _build_history_entry(run_date, R, categories, dup_counts, cat_dup_counts)
     _append_history(entry)
 
     # ── summary ───────────────────────────────────────────────────────────────
