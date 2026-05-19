@@ -27,24 +27,24 @@ PIPELINE_STATUS_FILE = _DIR / "pipeline_status.json"
 REPORTS_DIR     = _DIR / "reports"
 
 # design tokens
-BNR_GOLD = "#C8A42C"
-BNR_NAVY = "#1A3A6B"
-BG       = "#e8d5a3"
+BNR_GOLD = "#f7c35f"   # --thm-primary  (website gold accent)
+BG       = "#f2ede9"   # --thm-gray     (website light warm background)
 CARD     = "#FFFFFF"
-TEXT     = "#1A1A2E"
-MUTED    = "#6B7280"
-DIVIDER  = "#E2E8F0"
+TEXT     = "#1c1c27"   # --thm-black    (website near-black)
+MUTED    = "#68686f"   # --thm-color    (website body text / secondary)
+DIVIDER  = "#e7e1dc"   # --thm-border-color
 C_GREEN  = "#16A34A"
 C_AMBER  = "#D97706"
 C_RED    = "#DC2626"
-FONT     = "'BentonSans','Franklin Gothic Medium','Arial Narrow',Arial,sans-serif"
+BRAND    = "#753918"   # --thm-base     (website primary brand brown)
+FONT     = "'Inter','Franklin Gothic Medium',Arial,sans-serif"
 
 # one color per dimension
 DIM_COLORS = {
-    "completeness": "#E8D5A3",
-    "accuracy":     "#2C1F14",
-    "timeliness":   "#7C3D1E",
-    "validity":     "#C9956C",
+    "completeness": "#753918",   # brand primary
+    "accuracy":     "#B8860B",   # dark goldenrod
+    "timeliness":   "#7C3D1E",   # burnt rust
+    "validity":     "#C9956C",   # peach terra cotta
 }
 
 DIMS = ["completeness", "accuracy", "timeliness", "validity"]
@@ -72,7 +72,7 @@ LANDING_CATS = [
         "code":     "B",
         "label":    "Banks",
         "subtitle": "Commercial & savings banks",
-        "color":    "#6B3A2A",
+        "color":    "#753918",
         "types":    ["B"],
     },
     {
@@ -108,10 +108,10 @@ def _institution_issues(le_book: str) -> list:
         return []
 
 _URGENCY_COLORS = {
-    "new":       "#E8D5A3",
-    "attention": "#FBBF24",
-    "urgent":    "#F97316",
-    "critical":  "#DC2626",
+    "new":       "#A0784A",   # Mid Warm Tan — calm, not alarming
+    "attention": "#B8860B",   # Dark Goldenrod — caution
+    "urgent":    "#7C3D1E",   # Burnt Rust — stronger warning
+    "critical":  "#DC2626",   # Red — universal critical
 }
 _URGENCY_LABELS = {
     "new":       "New (1–3d)",
@@ -277,7 +277,7 @@ def _kpi_card(dim: str, score: float, delta: float, spark: list) -> html.Div:
         "flex":         "1",
         "minWidth":     "150px",
         "borderTop":    f"3px solid {col}",
-        "boxShadow":    "0 1px 4px rgba(26,58,107,0.08)",
+        "boxShadow":    "0 1px 4px rgba(117,57,24,0.08)",
     })
 
 
@@ -335,7 +335,7 @@ def _dup_card(count: int, delta: int, spark: list) -> html.Div:
         "flex":         "1",
         "minWidth":     "150px",
         "borderTop":    f"3px solid {col}",
-        "boxShadow":    "0 1px 4px rgba(26,58,107,0.08)",
+        "boxShadow":    "0 1px 4px rgba(117,57,24,0.08)",
     })
 
 
@@ -405,11 +405,6 @@ def _institution_table(institutions: dict, issue_summary: dict | None = None) ->
 
     rows = sorted(institutions.items(), key=lambda kv: kv[1].get("overall", 0))
 
-    n_critical = sum(
-        1 for _, d in rows
-        if any(d.get(dim, 100) < 75 for dim in DIMS)
-    )
-
     _isu  = issue_summary or {}
     H = {"fontSize": "11px", "fontWeight": "900", "color": MUTED,
          "textTransform": "uppercase", "letterSpacing": "0.05em",
@@ -428,7 +423,7 @@ def _institution_table(institutions: dict, issue_summary: dict | None = None) ->
     ], style={
         "display": "flex", "alignItems": "center", "gap": "4px",
         "padding": "9px 14px",
-        "borderBottom": f"2px solid {DIVIDER}",
+        "borderBottom": "2px solid rgba(117,57,24,0.18)",
         "background": BG, "borderRadius": "8px 8px 0 0",
     })
 
@@ -436,7 +431,7 @@ def _institution_table(institutions: dict, issue_summary: dict | None = None) ->
     for i, (lb, d) in enumerate(rows):
         name    = (d.get("name") or lb).title()
         overall = float(d.get("overall") or 0)
-        bg      = CARD if i % 2 == 0 else "#FAFBFC"
+        bg      = "#c9956c" if i % 2 == 0 else BG
 
         # urgency left-border based on tracked issues
         isu_info = _isu.get(lb, {})
@@ -496,7 +491,7 @@ def _institution_table(institutions: dict, issue_summary: dict | None = None) ->
                 style={
                     "width": DL_W, "textAlign": "center", "flexShrink": "0",
                     "display": "flex", "alignItems": "center", "justifyContent": "center",
-                    "cursor": "pointer", "color": BNR_NAVY, "userSelect": "none",
+                    "cursor": "pointer", "color": BRAND, "userSelect": "none",
                     "lineHeight": "1.15",
                 },
             )
@@ -528,29 +523,15 @@ def _institution_table(institutions: dict, issue_summary: dict | None = None) ->
         data_rows.append(html.Div(cells, className="inst-row", style={
             "display": "flex", "alignItems": "center", "gap": "4px",
             "padding": "7px 14px", "background": bg,
-            "borderBottom": f"1px solid {DIVIDER}",
+            "borderBottom": "1px solid rgba(117,57,24,0.12)",
         }))
-
-    alert = None
-    if n_critical:
-        alert = html.Div(
-            f"⚠  {n_critical} institution{'s' if n_critical > 1 else ''} "
-            "with at least one dimension below 75% — requires attention",
-            style={
-                "background": "rgba(220,38,38,.07)",
-                "border": "1px solid rgba(220,38,38,.25)",
-                "borderRadius": "6px", "padding": "9px 14px",
-                "fontSize": "12px", "color": C_RED,
-                "marginBottom": "12px", "lineHeight": "1.15",
-            },
-        )
 
     table = html.Div(
         [header] + data_rows,
         style={"border": f"1px solid {DIVIDER}", "borderRadius": "8px",
                "overflow": "hidden"},
     )
-    return html.Div([alert, table] if alert else [table])
+    return html.Div([table])
 
 
 def _stale_banner() -> html.Div | None:
@@ -652,7 +633,7 @@ def _landing_page(counts: dict) -> html.Div:
                 "cursor":       "pointer",
                 "flex":         "1",
                 "minWidth":     "220px",
-                "boxShadow":    "0 2px 8px rgba(26,58,107,0.07)",
+                "boxShadow":    "0 2px 8px rgba(117,57,24,0.07)",
                 "userSelect":   "none",
                 "textAlign":    "left",
                 "transition":   "box-shadow .15s",
@@ -755,7 +736,7 @@ def _dashboard_content(cat: str, inst: str | None) -> html.Div:
                 n_clicks=0,
                 style={
                     "cursor":     "pointer",
-                    "color":      BNR_NAVY,
+                    "color":      BRAND,
                     "fontSize":   "12px",
                     "fontWeight": "700",
                     "userSelect": "none",
@@ -814,7 +795,7 @@ def _dashboard_content(cat: str, inst: str | None) -> html.Div:
             "padding":        "16px 20px",
             "borderRadius":   "8px",
             "border":         f"1px solid {DIVIDER}",
-            "boxShadow":      "0 1px 4px rgba(26,58,107,0.06)",
+            "boxShadow":      "0 1px 4px rgba(117,57,24,0.06)",
         }),
 
         # KPI cards + trend chart
@@ -842,7 +823,7 @@ def _dashboard_content(cat: str, inst: str | None) -> html.Div:
             "background":   CARD,
             "padding":      "20px",
             "borderRadius": "8px",
-            "boxShadow":    "0 2px 8px rgba(26,58,107,0.07)",
+            "boxShadow":    "0 2px 8px rgba(117,57,24,0.07)",
             "border":       f"1px solid {DIVIDER}",
             "marginBottom": "20px",
         }),
@@ -930,7 +911,7 @@ def _alerts_page() -> html.Div:
             except Exception:
                 days_left = "?"
             days_color = C_RED if isinstance(days_left, int) and days_left <= 5 else TEXT
-            bg = CARD if i % 2 == 0 else "#FAFBFC"
+            bg = "#C9956C" if i % 2 == 0 else BG
             lb = iss["le_book"]
 
             issue_rows.append(html.Div([
@@ -972,8 +953,9 @@ def _alerts_page() -> html.Div:
         }),
         html.P(
             "Issues are detected when a dimension score falls below 85% for an institution. "
-            "They are tracked for 30 days — unresolved issues are penalised and logged. "
-            "Click 🔔 to send a reminder email to the institution.",
+            "They are tracked for 30 days. "
+            #"Click 🔔 to send a reminder email to the institution."
+            ,
             style={"fontSize": "12px", "color": MUTED, "marginBottom": "20px"},
         ),
         html.Div(id="notify-feedback", style={"marginBottom": "12px"}),
@@ -1001,25 +983,24 @@ _run_label = (
 # ── Validations page helpers ───────────────────────────────────────────────────
 
 _DIM_PILL_COLOR = {
-    "completeness": "#2563EB",
-    "accuracy":     "#16A34A",
-    "timeliness":   "#D97706",
-    "validity":     "#7C3AED",
+    "completeness": "#753918",
+    "accuracy":     "#B8860B",
+    "timeliness":   "#7C3D1E",
+    "validity":     "#C9956C",
 }
 
 
 def _dim_pill(dim: str) -> html.Span:
     color = _DIM_PILL_COLOR.get(dim, MUTED)
-    r = int(color[1:3], 16); g = int(color[3:5], 16); b = int(color[5:7], 16)
     return html.Span(dim.capitalize(), style={
-        "background":    f"rgba({r},{g},{b},0.12)",
-        "color":         color,
-        "border":        f"1px solid rgba({r},{g},{b},0.30)",
-        "borderRadius":  "4px",
-        "padding":       "2px 7px",
-        "fontSize":      "11px",
-        "fontWeight":    "700",
-        "whiteSpace":    "nowrap",
+        "background":   CARD,
+        "color":        color,
+        "border":       f"1px solid {color}",
+        "borderRadius": "4px",
+        "padding":      "2px 7px",
+        "fontSize":     "11px",
+        "fontWeight":   "700",
+        "whiteSpace":   "nowrap",
     })
 
 
@@ -1040,8 +1021,8 @@ _CHECK_TYPES = [
 ]
 
 _STATUS_STYLE = {
-    "draft":   {"color": "#6B21A8", "background": "rgba(107,33,168,.10)",
-                "border": "1px solid rgba(107,33,168,.30)"},
+    "draft":   {"color": "#4A3728", "background": "rgba(74,55,40,.12)",
+                "border": "1px solid rgba(74,55,40,.35)"},
     "pending": {"color": "#92400E", "background": "rgba(245,158,11,.12)",
                 "border": "1px solid rgba(245,158,11,.35)"},
     "active":  {"color": "#065F46", "background": "rgba(16,185,129,.12)",
@@ -1190,7 +1171,7 @@ def _rules_charts(builtin_rules: list[dict], user_rules: list[dict]) -> html.Div
             "flex": "1", "minWidth": "0",
             "background": CARD, "borderRadius": "8px",
             "padding": "16px 16px 8px",
-            "boxShadow": "0 1px 4px rgba(26,58,107,0.08)",
+            "boxShadow": "0 1px 4px rgba(117,57,24,0.08)",
             "border": f"1px solid {DIVIDER}",
         })
 
@@ -1288,7 +1269,7 @@ def _rule_form(next_id: str) -> html.Div:
                 "Submit Rule",
                 id="new-rule-submit", n_clicks=0,
                 style={
-                    "cursor": "pointer", "background": BNR_NAVY,
+                    "cursor": "pointer", "background": BRAND,
                     "color": CARD, "fontSize": "12px", "fontWeight": "700",
                     "padding": "9px 22px", "borderRadius": "6px",
                     "userSelect": "none", "display": "inline-block",
@@ -1301,7 +1282,7 @@ def _rule_form(next_id: str) -> html.Div:
         ], style={"display": "flex", "alignItems": "center"}),
 
     ], id="rule-form-panel", style={
-        "background":    BG,
+        "background":    CARD,
         "border":        f"1px solid {DIVIDER}",
         "borderRadius":  "8px",
         "padding":       "20px",
@@ -1311,13 +1292,13 @@ def _rule_form(next_id: str) -> html.Div:
 
 
 def _rules_table_row(r: dict, i: int, is_user: bool = False) -> html.Div:
-    bg     = CARD if i % 2 == 0 else "#FAFBFC"
+    bg     = "#C9956C" if i % 2 == 0 else BG
     status = r.get("status") if is_user else None
     cells  = [
         html.Span(r["rule_id"], style={
             "width": "80px", "flexShrink": "0",
             "fontSize": "12px", "fontWeight": "900",
-            "color": BNR_NAVY, "fontFamily": "monospace", "lineHeight": "1.4",
+            "color": BRAND, "fontFamily": "monospace", "lineHeight": "1.4",
         }),
         html.Div(_dim_pill(r["dimension"]), style={"width": "110px", "flexShrink": "0"}),
         html.Span(r.get("category") or "—", style={
@@ -1380,17 +1361,17 @@ def _draft_review_section(draft_rules: list[dict]) -> html.Div | None:
         "display": "flex", "alignItems": "center", "gap": "10px",
         "padding": "9px 14px",
         "borderBottom": f"2px solid {DIVIDER}",
-        "background": "rgba(107,33,168,.06)", "borderRadius": "8px 8px 0 0",
+        "background": "rgba(74,55,40,0.08)", "borderRadius": "8px 8px 0 0",
     })
 
     rows = []
     for i, r in enumerate(draft_rules):
         rid    = r["rule_id"]
-        bg     = CARD if i % 2 == 0 else "#FAFBFC"
+        bg     = "#C9956C" if i % 2 == 0 else BG
         rows.append(html.Div([
             html.Span(rid, style={
                 "width": "80px", "flexShrink": "0", "fontSize": "12px",
-                "fontWeight": "900", "color": "#6B21A8", "fontFamily": "monospace",
+                "fontWeight": "900", "color": "#4A3728", "fontFamily": "monospace",
             }),
             html.Div(_dim_pill(r["dimension"]), style={"width": "100px", "flexShrink": "0"}),
             html.Span(r["rule_name"], style={
@@ -1428,7 +1409,7 @@ def _draft_review_section(draft_rules: list[dict]) -> html.Div | None:
     return html.Div([
         html.Div([
             html.Div("PENDING ADMIN REVIEW", style={
-                "fontSize": "12px", "fontWeight": "900", "color": "#6B21A8",
+                "fontSize": "12px", "fontWeight": "900", "color": "#4A3728",
                 "letterSpacing": "0.04em",
             }),
             html.Div(
@@ -1440,13 +1421,13 @@ def _draft_review_section(draft_rules: list[dict]) -> html.Div | None:
         html.Div(
             [header] + rows,
             style={
-                "border": "1px solid rgba(107,33,168,.30)",
+                "border": "1px solid rgba(74,55,40,0.30)",
                 "borderRadius": "8px", "overflow": "hidden",
             },
         ),
     ], style={
-        "background": "rgba(107,33,168,.04)",
-        "border": "1px solid rgba(107,33,168,.20)",
+        "background": "rgba(74,55,40,0.04)",
+        "border": "1px solid rgba(74,55,40,0.18)",
         "borderRadius": "10px", "padding": "16px 16px 8px",
         "marginBottom": "20px",
     })
@@ -1533,7 +1514,7 @@ def _complex_rule_form(next_id: str) -> html.Div:
 
         html.Div([
             html.Div("Submit for Review", id="cx-rule-submit", n_clicks=0, style={
-                "cursor": "pointer", "background": BNR_NAVY, "color": CARD,
+                "cursor": "pointer", "background": BRAND, "color": CARD,
                 "fontSize": "12px", "fontWeight": "700", "padding": "9px 22px",
                 "borderRadius": "6px", "userSelect": "none", "display": "inline-block",
             }),
@@ -1543,7 +1524,7 @@ def _complex_rule_form(next_id: str) -> html.Div:
         ], style={"display": "flex", "alignItems": "center"}),
 
     ], id="complex-form-panel", style={
-        "background": BG, "border": f"1px solid {DIVIDER}", "borderRadius": "8px",
+        "background": CARD, "border": f"1px solid {DIVIDER}", "borderRadius": "8px",
         "padding": "20px", "marginBottom": "20px", "display": "none",
     })
 
@@ -1619,19 +1600,19 @@ def _validations_page() -> html.Div:
             ]),
             html.Div([
                 html.Div("+ Add Rule", id="form-toggle-btn", n_clicks=0, style={
-                    "cursor": "pointer", "background": CARD, "color": BNR_NAVY,
+                    "cursor": "pointer", "background": CARD, "color": BRAND,
                     "fontSize": "12px", "fontWeight": "700", "padding": "8px 16px",
-                    "borderRadius": "6px", "border": f"1px solid {BNR_NAVY}",
+                    "borderRadius": "6px", "border": f"1px solid {BRAND}",
                     "userSelect": "none", "marginRight": "8px",
                 }),
                 html.Div("+ Complex Rule", id="complex-form-toggle-btn", n_clicks=0, style={
-                    "cursor": "pointer", "background": CARD, "color": "#6B21A8",
+                    "cursor": "pointer", "background": CARD, "color": "#7C3D1E",
                     "fontSize": "12px", "fontWeight": "700", "padding": "8px 16px",
-                    "borderRadius": "6px", "border": "1px solid #6B21A8",
+                    "borderRadius": "6px", "border": "1px solid #7C3D1E",
                     "userSelect": "none", "marginRight": "8px",
                 }),
                 html.Div("Download CSV", id="rules-download-btn", n_clicks=0, style={
-                    "cursor": "pointer", "background": BNR_NAVY, "color": CARD,
+                    "cursor": "pointer", "background": BRAND, "color": CARD,
                     "fontSize": "12px", "fontWeight": "700", "padding": "8px 18px",
                     "borderRadius": "6px", "userSelect": "none",
                 }),
@@ -1671,7 +1652,7 @@ def _login_page(error: str = "") -> html.Div:
         "width": "100%", "padding": "10px 12px",
         "border": f"1px solid {DIVIDER}", "borderRadius": "6px",
         "fontSize": "14px", "fontFamily": FONT, "color": TEXT,
-        "boxSizing": "border-box", "outline": "none", "background": "#e8d5a3",
+        "boxSizing": "border-box", "outline": "none", "background": CARD,
     }
     return html.Div([
         html.Div([
@@ -1687,7 +1668,7 @@ def _login_page(error: str = "") -> html.Div:
                     "fontSize": "11px", "color": "rgba(255,255,255,0.65)", "marginTop": "3px",
                 }),
             ], style={
-                "background": "#6B3A2A", "padding": "28px 32px 22px",
+                "background": "#753918", "padding": "28px 32px 22px",
                 "textAlign": "center", "borderRadius": "12px 12px 0 0",
             }),
 
@@ -1744,14 +1725,14 @@ def _login_page(error: str = "") -> html.Div:
                     n_clicks=0,
                     style={
                         "width": "100%", "padding": "11px 0",
-                        "background": "#6b3a2a", "color": CARD,
+                        "background": "#753918", "color": CARD,
                         "fontSize": "14px", "fontWeight": "900",
                         "textAlign": "center", "borderRadius": "6px",
                         "cursor": "pointer", "userSelect": "none",
                         "border": "none", "letterSpacing": "0.04em",
                     },
                 ),
-            ], style={"padding": "28px 32px", "background": "#e8d5a3"}),
+            ], style={"padding": "28px 32px", "background": BG}),
 
         ], style={
             "background": CARD, "borderRadius": "12px",
@@ -1788,7 +1769,7 @@ def _nav_tabs(active: str) -> html.Div:
         ))
     return html.Div(tabs, style={
         "display":    "flex",
-        "background": BNR_NAVY,
+        "background": "#753918",
         "padding":    "0 32px",
         "borderTop":  "1px solid rgba(255,255,255,0.12)",
     })
@@ -1826,7 +1807,7 @@ app.layout = html.Div([
             html.Div(id="user-info-header"),
         ], style={"display": "flex", "alignItems": "center", "gap": "20px"}),
     ], style={
-        "background":     "#6b3a2a",
+        "background":     "#753918",
         "padding":        "14px 32px",
         "display":        "flex",
         "alignItems":     "center",
