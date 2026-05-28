@@ -39,6 +39,7 @@ WINDOW_DAYS    = 30
 WINDOW_DESC    = f"date_creation OR date_last_modified within last {WINDOW_DAYS} days"
 WATERMARK_FILE = SCRIPT_DIR / "watermark.json"
 HISTORY_FILE   = SCRIPT_DIR / "dq_history.json"
+ACTIVITY_FILE  = SCRIPT_DIR / "institution_activity.json"
 CATEGORY_TYPES = ("MF", "SACCO", "OSACCO", "B")
 
 
@@ -130,19 +131,20 @@ def _build_date_filter(conn, schema: str, table: str,
             parts.append(f'"date_last_modified" {range_clause}')
             labels.append("modified")
     else:
+        hwm    = (watermarks or {}).get(table)
+        anchor = f"'{hwm[:10]}'::date" if hwm else "CURRENT_DATE"
         if has_created:
             parts.append(
-                f'"date_creation" BETWEEN CURRENT_DATE - INTERVAL \'{WINDOW_DAYS} days\' AND CURRENT_DATE'
+                f'"date_creation" BETWEEN {anchor} - INTERVAL \'{WINDOW_DAYS} days\' AND {anchor}'
             )
-            labels.append("created")
+            labels.append(f"created≤{hwm[:10]}" if hwm else "created")
         if has_modified:
-            hwm = (watermarks or {}).get(table)
             if hwm:
                 parts.append(f'"date_last_modified" > \'{hwm}\'')
                 labels.append(f"modified>{hwm[:10]}")
             else:
                 parts.append(
-                    f'"date_last_modified" BETWEEN CURRENT_DATE - INTERVAL \'{WINDOW_DAYS} days\' AND CURRENT_DATE'
+                    f'"date_last_modified" BETWEEN {anchor} - INTERVAL \'{WINDOW_DAYS} days\' AND {anchor}'
                 )
                 labels.append("modified(init)")
 
@@ -239,10 +241,10 @@ def _needed_columns(table: str) -> set:
 
 
 #table loader
-
 def load_all_tables(engine, schema: str, valid_le_books: frozenset,
                     watermarks: dict | None = None,
-                    start_date: str = None, end_date: str = None) -> tuple[dict, dict]:
+                    start_date: str = None, end_date: str = None,
+                    row_limit: int = 0) -> tuple[dict, dict]:
     """
     Fetch all dimension tables within the date window into DataFrames.
     Only columns required by the DQ engines are selected.
@@ -288,6 +290,8 @@ def load_all_tables(engine, schema: str, valid_le_books: frozenset,
             else:
                 sql = f"SELECT {quoted} FROM {sq_tbl}"
                 log.warning("  %s: no date columns and no le_book filter — loading all rows.", table)
+            if row_limit > 0:
+                sql += f" LIMIT {row_limit}"
 
             try:
                 df = pd.read_sql(text(sql), conn)
@@ -304,7 +308,7 @@ def load_all_tables(engine, schema: str, valid_le_books: frozenset,
                 df["data_processed"] = processed_at
                 if "date_last_modified" in df.columns and not df.empty:
                     new_max = df["date_last_modified"].max()
-                    if pd.notna(new_max):
+                    if pd.notna(new_max) and str(new_max) > wm.get(table, ""):
                         wm[table] = str(new_max)
                 dataframes[table] = df
             except Exception as exc:
@@ -470,6 +474,57 @@ def _customer_dup_counts(
     except Exception as exc:
         log.warning("Could not compute customer duplicate counts: %s", exc)
         return {}, {}
+
+
+def _compute_institution_activity(engine, schema: str, valid_le_books: frozenset) -> dict:
+    """Return {le_book: {last_modified: "YYYY-MM-DD", last_created: "YYYY-MM-DD"}}
+    by querying max date columns across key tables (full scan, no watermark filter).
+    Used by the dashboard to surface when unscored institutions last had data changes."""
+    lb_filter = ""
+    if valid_le_books:
+        codes     = ", ".join(f"'{lb}'" for lb in sorted(valid_le_books))
+        lb_filter = f"AND le_book IN ({codes})"
+
+    results: dict[str, dict] = {}
+
+    for table in ("accounts", "customers_expanded", "contracts_expanded"):
+        try:
+            with engine.connect() as conn:
+                has_mod = _has_column(conn, schema, table, "date_last_modified")
+                has_cre = _has_column(conn, schema, table, "date_creation")
+                if not has_mod and not has_cre:
+                    continue
+                mod_expr = "MAX(date_last_modified)" if has_mod else "NULL"
+                cre_expr = "MAX(date_creation)"      if has_cre else "NULL"
+                sql = text(f"""
+                    SELECT le_book,
+                           {mod_expr} AS last_modified,
+                           {cre_expr} AS last_created
+                    FROM "{schema}".{table}
+                    WHERE le_book IS NOT NULL {lb_filter}
+                    GROUP BY le_book
+                """)
+                for row in conn.execute(sql).fetchall():
+                    lb = str(row[0]).strip() if row[0] else None
+                    if not lb:
+                        continue
+                    prev = results.get(lb, {})
+                    mod  = str(row[1])[:10] if row[1] else None
+                    cre  = str(row[2])[:10] if row[2] else None
+                    results[lb] = {
+                        "last_modified": max(
+                            (v for v in [prev.get("last_modified"), mod] if v),
+                            default=None,
+                        ),
+                        "last_created": max(
+                            (v for v in [prev.get("last_created"), cre] if v),
+                            default=None,
+                        ),
+                    }
+        except Exception as exc:
+            log.warning("Activity query failed for %s: %s", table, exc)
+
+    return results
 
 
 def _build_history_entry(run_date: str, R: dict, categories: dict,
@@ -658,20 +713,27 @@ def main() -> None:
                         help="Override window start date (e.g. 2026-01-01)")
     parser.add_argument("--end-date", default=None, metavar="YYYY-MM-DD",
                         help="Override window end date   (e.g. 2026-03-31)")
+    parser.add_argument("--test", action="store_true",
+                        help="Test mode: limit 1000 rows/table, skip relationship checks")
+    parser.add_argument("--reports", action="store_true",
+                        help="Reports-only stage: load frames, run RI, write XLSX (no issue tracker)")
     args = parser.parse_args()
 
     start_date = args.start_date
     end_date   = args.end_date
     run_date   = end_date or datetime.now().strftime("%Y-%m-%d")
+    test_limit = 1000 if args.test else 0
 
     if start_date:
         log.info("Fixed date range: %s → %s", start_date, end_date)
+    if args.test:
+        log.info("TEST MODE — row limit %d per table, relationship checks skipped", test_limit)
 
     log.info("Connecting to database …")
     engine = _get_engine(_build_conn_string())
 
     # ── verify-only mode
-    if not args.load:
+    if not args.load and not args.reports:
         log.info("Window verification across %d tables …", len(TABLES))
         results = verify_window(engine, args.schema, start_date, end_date)
         _print_report(results)
@@ -713,71 +775,137 @@ def main() -> None:
     import accuracy_check     as acc_eng
     import timeliness_check   as tim_eng
     import validity_check     as val_eng
-    import relationship_check as rel_eng
     import dq_issue_export    as issue_eng
 
     watermarks = _load_watermarks()
 
-    _dataframes_holder: dict = {}
+    # ══════════════════════════════════════════════════════════════════════════
+    # STAGE: --reports  (load frames → RI → XLSX only, no issue tracker)
+    # Run separately after --load has completed to avoid OOM during core run.
+    # ══════════════════════════════════════════════════════════════════════════
+    if args.reports:
+        import gc
+        import relationship_check as rel_eng
 
-    def _load_frames():
-        dfs, updated_wm = load_all_tables(engine, args.schema, valid_le_books,
-                                          watermarks, start_date, end_date)
-        _dataframes_holder["dfs"]        = dfs
-        _dataframes_holder["watermarks"] = updated_wm
-        return dfs
+        log.info("REPORTS STAGE — loading frames for RI + XLSX export …")
+        dataframes, updated_wm = load_all_tables(engine, args.schema, valid_le_books,
+                                                  watermarks, start_date, end_date)
+        _save_watermarks(updated_wm)
+        log.info("Watermarks saved → %s", WATERMARK_FILE)
 
+        log.info("Loading full parent key tables …")
+        parent_dataframes = load_parent_keys(engine, args.schema)
+
+        log.info("Running referential integrity checks …")
+        rel_report = rel_eng.evaluate_all_from_dataframes(dataframes, valid_le_books, parent_dataframes)
+        (SCRIPT_DIR / "dq_relationship_report.json").write_text(
+            json.dumps(rel_report, indent=2, default=str))
+
+        # Free parent frames — no longer needed after RI
+        del parent_dataframes
+        gc.collect()
+        log.info("Parent frames freed.")
+
+        log.info("Generating per-institution issue reports …")
+        issue_eng.export_institution_issues(
+            dataframes, categories, valid_le_books, SCRIPT_DIR / "reports"
+        )
+
+        # Free all frames
+        del dataframes
+        gc.collect()
+        log.info("Reports stage complete.")
+        return
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # STAGE: --load  (SQL engines only — no DataFrames, low memory)
+    # ══════════════════════════════════════════════════════════════════════════
     tasks = {
         "comp": partial(comp_eng.evaluate_from_sql, engine, args.schema, valid_le_books,
-                        WINDOW_DAYS, watermarks, str(SCRIPT_DIR / "dq_report.json")),
+                        WINDOW_DAYS, watermarks, str(SCRIPT_DIR / "dq_report.json"),
+                        row_limit=test_limit),
         "acc":  partial(acc_eng.evaluate_from_sql,  engine, args.schema, valid_le_books,
-                        WINDOW_DAYS, watermarks, str(SCRIPT_DIR / "dq_accuracy_report.json")),
+                        WINDOW_DAYS, watermarks, str(SCRIPT_DIR / "dq_accuracy_report.json"),
+                        row_limit=test_limit),
         "tim":  partial(tim_eng.evaluate_from_sql,  engine, args.schema, valid_le_books,
-                        WINDOW_DAYS, watermarks, str(SCRIPT_DIR / "dq_timeliness_report.json")),
+                        WINDOW_DAYS, watermarks, str(SCRIPT_DIR / "dq_timeliness_report.json"),
+                        row_limit=test_limit),
         "val":  partial(val_eng.evaluate_from_sql,  engine, args.schema, valid_le_books,
-                        WINDOW_DAYS, watermarks, str(SCRIPT_DIR / "dq_validity_report.json")),
-        "rel":  partial(rel_eng.evaluate_all, engine, args.schema, sample=0),
-        "frames": _load_frames,
+                        WINDOW_DAYS, watermarks, str(SCRIPT_DIR / "dq_validity_report.json"),
+                        row_limit=test_limit),
     }
 
-    log.info("Running %d engine tasks in parallel …", len(tasks))
-    t0 = time.perf_counter()
-    R  = _run_parallel(tasks)
-    log.info("All engines finished in %.1fs", time.perf_counter() - t0)
+    if args.test:
+        log.info("TEST MODE — row limit %d, skipping frames/RI/reports", test_limit)
+        R = _run_parallel(tasks)
+        R["rel"] = {}
+    else:
+        # Run SQL engines; load frames concurrently (needed for user-defined rules only)
+        import dq_user_rule_executor as usr_eng
 
-    # relationship engine returns the dict; pipeline writes the file
-    (SCRIPT_DIR / "dq_relationship_report.json").write_text(
-        json.dumps(R.get("rel") or {}, indent=2, default=str))
+        _dataframes_holder: dict = {}
 
-    # DataFrames were loaded in the "frames" task in parallel with SQL engines
-    dataframes = _dataframes_holder.get("dfs") or R.get("frames") or {}
+        def _load_frames():
+            dfs, updated_wm = load_all_tables(engine, args.schema, valid_le_books,
+                                              watermarks, start_date, end_date)
+            _dataframes_holder["dfs"]        = dfs
+            _dataframes_holder["watermarks"] = updated_wm
+            return dfs
 
-    # Persist watermarks once — updated_wm was built inside _load_frames
-    _save_watermarks(_dataframes_holder.get("watermarks") or watermarks)
-    log.info("Watermarks saved → %s", WATERMARK_FILE)
+        tasks["frames"] = _load_frames
+        log.info("Running %d engine tasks in parallel …", len(tasks))
+        t0 = time.perf_counter()
+        R  = _run_parallel(tasks)
+        log.info("All engines finished in %.1fs", time.perf_counter() - t0)
 
-    # ── user-defined rules ────────────────────────────────────────────────────
-    import dq_user_rule_executor as usr_eng
-    log.info("Running user-defined rules …")
-    usr_eng.run_all_user_rules(dataframes, valid_le_books)
+        dataframes = _dataframes_holder.get("dfs") or {}
+        _save_watermarks(_dataframes_holder.get("watermarks") or watermarks)
+        log.info("Watermarks saved → %s", WATERMARK_FILE)
 
-    # ── per-institution row-level issue reports ───────────────────────────────
-    log.info("Loading full parent key tables for accurate RI checks …")
-    parent_dataframes = load_parent_keys(engine, args.schema)
-    log.info("Generating per-institution issue reports …")
-    issue_eng.export_institution_issues(
-        dataframes, categories, valid_le_books, SCRIPT_DIR / "reports", parent_dataframes
-    )
+        log.info("Computing institution activity dates …")
+        activity_data = _compute_institution_activity(engine, args.schema, valid_le_books)
+        ACTIVITY_FILE.write_text(json.dumps(activity_data, indent=2, default=str))
+        log.info("Institution activity → %s  (%d institutions)", ACTIVITY_FILE.name, len(activity_data))
+
+        log.info("Running user-defined rules …")
+        usr_eng.run_all_user_rules(dataframes, valid_le_books)
+
+        # Load RI results from file if --reports already ran, else empty
+        ri_path = SCRIPT_DIR / "dq_relationship_report.json"
+        if ri_path.exists():
+            try:
+                R["rel"] = json.loads(ri_path.read_text())
+                log.info("RI results loaded from dq_relationship_report.json")
+            except Exception:
+                R["rel"] = {}
+        else:
+            R["rel"] = {}
+            log.info("No RI report found — run --reports to generate it.")
+
+        import gc
+        del dataframes
+        gc.collect()
 
     # ── issue tracking: detect, update urgency, apply penalties, notify ──────
     import dq_issue_tracker as tracker
     log.info("Updating issue tracker …")
     tracker.detect_and_update_issues(R, categories, run_date)
-    penalised = tracker.apply_penalties(run_date)
-    if penalised:
-        log.warning("%d issue(s) past SLA — penalties recorded.", penalised)
+
+    # PLACEHOLDER: uncomment once issues.* schema is ready (run_date + dimension columns confirmed)
+    # import dq_issues_ingest as ext_ingest
+    # updated_wm = ext_ingest.ingest_from_issues_schema(engine, TABLES, watermarks, run_date)
+    # _save_watermarks(updated_wm)
     log.info("Running notification sweep …")
     tracker.run_notification_sweep(categories)
+
+    # Portal SLA warnings (7-day ahead alert for inst_users)
+    try:
+        from dq_notifications import send_sla_warnings
+        warned = send_sla_warnings()
+        if warned:
+            log.info("SLA warning portal notifications sent: %d", warned)
+    except Exception as exc:
+        log.warning("SLA warning notifications failed: %s", exc)
 
     # ── build and append history entry ────────────────────────────────────────
     log.info("Building history entry for %s …", run_date)

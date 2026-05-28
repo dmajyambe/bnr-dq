@@ -367,39 +367,34 @@ def export_institution_issues(
 ) -> None:
     """
     Write one XLSX per institution with row-level DQ issues across all 5 dimensions.
-
-    Args:
-        dataframes:         Pre-loaded DataFrames from the pipeline window.
-        le_book_categories: {le_book: {"name": ..., "category_type": ...}}
-        valid_le_books:     frozenset of le_book codes in scope.
-        output_dir:         Directory to write XLSX files into (created if absent).
-        parent_dataframes:  Full-table parent key DataFrames (no date filter) for
-                            accurate RI checks. Falls back to dataframes if not given.
+    Processes one institution at a time to keep peak memory bounded.
     """
+    import gc
+
     output_dir = Path(output_dir)
     output_dir.mkdir(exist_ok=True)
 
-    # Group DataFrames by le_book once — avoids scanning each table N times
-    grouped: dict[str, dict[str, pd.DataFrame]] = {}
-    for table, df in dataframes.items():
-        if df.empty or "le_book" not in df.columns:
-            continue
-        for le_val, sub in df.groupby("le_book"):
-            lb = str(le_val)
-            if valid_le_books and lb not in valid_le_books:
-                continue
-            grouped.setdefault(lb, {})[table] = sub.reset_index(drop=True)
+    institutions = sorted(valid_le_books) if valid_le_books else sorted(
+        {str(v) for df in dataframes.values()
+         if not df.empty and "le_book" in df.columns
+         for v in df["le_book"].unique()}
+    )
 
-    # Ensure every requested institution gets a file, even if their frames are empty
-    for lb in valid_le_books:
-        grouped.setdefault(lb, {})
-
-    if not grouped:
+    if not institutions:
         log.warning("No institution data found — no XLSX files written.")
         return
 
-    log.info("Writing issue reports for %d institution(s) → %s", len(grouped), output_dir)
-    for le_book, inst_frames in sorted(grouped.items()):
+    log.info("Writing issue reports for %d institution(s) → %s", len(institutions), output_dir)
+    for le_book in institutions:
+        # Build this institution's frames on the fly — never hold all 490 at once
+        inst_frames: dict[str, pd.DataFrame] = {}
+        for table, df in dataframes.items():
+            if df.empty or "le_book" not in df.columns:
+                continue
+            sub = df[df["le_book"] == le_book]
+            if not sub.empty:
+                inst_frames[table] = sub.reset_index(drop=True)
+
         try:
             _write_institution_xlsx(
                 le_book,
@@ -411,5 +406,8 @@ def export_institution_issues(
             )
         except Exception as exc:
             log.error("  ✗ %s — %s", le_book, exc)
+        finally:
+            del inst_frames
+            gc.collect()
 
     log.info("Institution issue reports complete.")

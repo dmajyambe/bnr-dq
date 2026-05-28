@@ -172,7 +172,8 @@ def _maybe_resolve(con: sqlite3.Connection, le_book: str, table: str,
                    rule_id: str, run_date: str) -> None:
     iid = _issue_id(le_book, table, rule_id)
     row = con.execute(
-        "SELECT issue_id FROM dq_open_issues WHERE issue_id=? AND status='open'", (iid,)
+        "SELECT issue_id FROM dq_open_issues WHERE issue_id=? AND status IN ('open','penalized')",
+        (iid,)
     ).fetchone()
     if row:
         con.execute(
@@ -206,6 +207,36 @@ def detect_and_update_issues(R: dict, categories: dict, run_date: str) -> None:
 
     total = _count_open()
     log.info("Issue tracker: %d open issue(s) after run %s", total, run_date)
+
+
+def ingest_issues(issues: list[dict], run_date: str) -> None:
+    """
+    Accept a flat list of pre-detected issues from an external pipeline.
+
+    Each dict must have: le_book, table, rule_id, dimension, failing_rows, score.
+    Optional: institution_name.
+    """
+    ensure_tables()
+    con = _conn()
+    try:
+        for item in issues:
+            lb      = item["le_book"]
+            table   = item["table"]
+            rule_id = item["rule_id"]
+            score   = float(item.get("score", 0))
+            failing = int(item.get("failing_rows", 0))
+            inst    = item.get("institution_name") or lb.title()
+
+            if score < ISSUE_THRESHOLD and failing > 0:
+                _upsert_issue(con, lb, inst, table, rule_id,
+                              item["dimension"], failing, run_date)
+            else:
+                _maybe_resolve(con, lb, table, rule_id, run_date)
+        con.commit()
+    finally:
+        con.close()
+
+    log.info("ingest_issues: processed %d item(s) for %s", len(issues), run_date)
 
 
 def _inst_name(lb: str, categories: dict) -> str:
@@ -271,50 +302,50 @@ def _process_relationship(con, report: dict, categories: dict, run_date: str) ->
                     _maybe_resolve(con, lb, table, rule_id, run_date)
 
 
-# ── penalty sweep ──────────────────────────────────────────────────────────────
+# # ── penalty sweep ──────────────────────────────────────────────────────────────
 
-def apply_penalties(run_date: str) -> int:
-    """
-    Sweep open issues past their SLA deadline → mark penalized + write dq_penalties.
-    Returns count of newly penalised issues.
-    """
-    ensure_tables()
-    con = _conn()
-    penalised = 0
-    try:
-        breached = con.execute("""
-            SELECT * FROM dq_open_issues
-            WHERE status='open' AND sla_deadline < ?
-        """, (run_date,)).fetchall()
+# def apply_penalties(run_date: str) -> int:
+#     """
+#     Sweep open issues past their SLA deadline → mark penalized + write dq_penalties.
+#     Returns count of newly penalised issues.
+#     """
+#     ensure_tables()
+#     con = _conn()
+#     penalised = 0
+#     try:
+#         breached = con.execute("""
+#             SELECT * FROM dq_open_issues
+#             WHERE status='open' AND sla_deadline < ?
+#         """, (run_date,)).fetchall()
 
-        for row in breached:
-            period     = row["detected_at"][:7]   # YYYY-MM
-            penalty_id = _issue_id(row["le_book"], row["table_name"], row["rule_id"]) + "_pen"
+#         for row in breached:
+#             period     = row["detected_at"][:7]   # YYYY-MM
+#             penalty_id = _issue_id(row["le_book"], row["table_name"], row["rule_id"]) + "_pen"
 
-            con.execute("""
-                INSERT OR REPLACE INTO dq_penalties
-                    (penalty_id, le_book, institution_name, dimension, table_name, rule_id,
-                     period, failing_rows, penalty_pct, applied_at, original_detected_at)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?)
-            """, (penalty_id, row["le_book"], row["institution_name"],
-                  row["dimension"], row["table_name"], row["rule_id"],
-                  period, row["failing_rows"], PENALTY_PCT, run_date, row["detected_at"]))
+#             con.execute("""
+#                 INSERT OR REPLACE INTO dq_penalties
+#                     (penalty_id, le_book, institution_name, dimension, table_name, rule_id,
+#                      period, failing_rows, penalty_pct, applied_at, original_detected_at)
+#                 VALUES (?,?,?,?,?,?,?,?,?,?,?)
+#             """, (penalty_id, row["le_book"], row["institution_name"],
+#                   row["dimension"], row["table_name"], row["rule_id"],
+#                   period, row["failing_rows"], PENALTY_PCT, run_date, row["detected_at"]))
 
-            con.execute(
-                "UPDATE dq_open_issues SET status='penalized' WHERE issue_id=?",
-                (row["issue_id"],)
-            )
-            penalised += 1
-            log.warning("  PENALIZED  %s  %s / %s — SLA breached (deadline %s)",
-                        row["le_book"], row["table_name"], row["rule_id"], row["sla_deadline"])
+#             con.execute(
+#                 "UPDATE dq_open_issues SET status='penalized' WHERE issue_id=?",
+#                 (row["issue_id"],)
+#             )
+#             penalised += 1
+#             log.warning("  PENALIZED  %s  %s / %s — SLA breached (deadline %s)",
+#                         row["le_book"], row["table_name"], row["rule_id"], row["sla_deadline"])
 
-        con.commit()
-    finally:
-        con.close()
+#         con.commit()
+#     finally:
+#         con.close()
 
-    if penalised:
-        log.warning("Penalties applied: %d issue(s) past SLA", penalised)
-    return penalised
+#     if penalised:
+#         log.warning("Penalties applied: %d issue(s) past SLA", penalised)
+#     return penalised
 
 
 # ── query helpers (used by dashboard) ─────────────────────────────────────────
@@ -341,6 +372,25 @@ def get_open_issues(le_book: str | None = None) -> list[dict]:
             rows = con.execute(
                 "SELECT * FROM dq_open_issues WHERE status='open' ORDER BY sla_deadline"
             ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        con.close()
+
+
+def get_issues(status: str | None = None, le_book: str | None = None) -> list[dict]:
+    """Return issues filtered by status ('open','penalized','resolved') and/or le_book."""
+    ensure_tables()
+    con = _conn()
+    try:
+        clauses, params = [], []
+        if status:
+            clauses.append("status=?");  params.append(status)
+        if le_book:
+            clauses.append("le_book=?"); params.append(le_book)
+        where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+        rows  = con.execute(
+            f"SELECT * FROM dq_open_issues {where} ORDER BY sla_deadline", params
+        ).fetchall()
         return [dict(r) for r in rows]
     finally:
         con.close()
@@ -384,21 +434,21 @@ def get_institution_issue_summary() -> dict[str, dict]:
     return summary
 
 
-def get_penalties(le_book: str | None = None) -> list[dict]:
-    ensure_tables()
-    con = _conn()
-    try:
-        if le_book:
-            rows = con.execute(
-                "SELECT * FROM dq_penalties WHERE le_book=? ORDER BY applied_at DESC", (le_book,)
-            ).fetchall()
-        else:
-            rows = con.execute(
-                "SELECT * FROM dq_penalties ORDER BY applied_at DESC"
-            ).fetchall()
-        return [dict(r) for r in rows]
-    finally:
-        con.close()
+# def get_penalties(le_book: str | None = None) -> list[dict]:
+#     ensure_tables()
+#     con = _conn()
+#     try:
+#         if le_book:
+#             rows = con.execute(
+#                 "SELECT * FROM dq_penalties WHERE le_book=? ORDER BY applied_at DESC", (le_book,)
+#             ).fetchall()
+#         else:
+#             rows = con.execute(
+#                 "SELECT * FROM dq_penalties ORDER BY applied_at DESC"
+#             ).fetchall()
+#         return [dict(r) for r in rows]
+#     finally:
+#         con.close()
 
 
 def get_contact(le_book: str) -> dict:

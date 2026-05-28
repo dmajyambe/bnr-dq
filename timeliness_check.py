@@ -562,7 +562,8 @@ def _tim_rule_sql(rule_id: str, existing: set,
 
 
 def evaluate_from_sql(engine, schema: str, valid_le_books: frozenset,
-                       window_days: int, watermarks: dict, output_path: str) -> dict:
+                       window_days: int, watermarks: dict, output_path: str,
+                       row_limit: int = 0) -> dict:
     """Run timeliness checks in pure SQL — one query per table, no DataFrames."""
     from sqlalchemy import text as _text
 
@@ -608,16 +609,17 @@ def evaluate_from_sql(engine, schema: str, valid_le_books: frozenset,
                 report["warnings"][table] = "No applicable timeliness columns found."
                 continue
 
+            wm     = watermarks.get(table)
+            anchor = f"'{wm[:10]}'::date" if wm else "CURRENT_DATE"
             date_parts = []
             if "date_creation" in existing:
                 date_parts.append(
-                    f'"date_creation" BETWEEN CURRENT_DATE - INTERVAL \'{window_days} days\' AND CURRENT_DATE'
+                    f'"date_creation" BETWEEN {anchor} - INTERVAL \'{window_days} days\' AND {anchor}'
                 )
             if "date_last_modified" in existing:
-                wm = watermarks.get(table)
                 date_parts.append(
                     f'"date_last_modified" > \'{wm}\'' if wm else
-                    f'"date_last_modified" BETWEEN CURRENT_DATE - INTERVAL \'{window_days} days\' AND CURRENT_DATE'
+                    f'"date_last_modified" BETWEEN {anchor} - INTERVAL \'{window_days} days\' AND {anchor}'
                 )
             date_clause = "(" + " OR ".join(date_parts) + ")" if date_parts else "TRUE"
 
@@ -631,12 +633,14 @@ def evaluate_from_sql(engine, schema: str, valid_le_books: frozenset,
                 rkey = rid.lower().replace("-", "")
                 rule_selects.append(f"{tot_expr} AS {rkey}_total,\n       {val_expr} AS {rkey}_valid")
 
+            limit_clause = f"LIMIT {row_limit}" if row_limit > 0 else ""
             sql = f"""
                 WITH scope AS (
                     SELECT {", ".join(f'"{c}"' for c in scope_cols)}
                     FROM   {sq}
                     WHERE  {date_clause}
                     {lb_clause}
+                    {limit_clause}
                 )
                 SELECT {lb_select}COUNT(*) AS total_rows,
                        {chr(10) + '       ,'.join(rule_selects)}

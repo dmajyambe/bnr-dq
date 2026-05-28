@@ -26,7 +26,6 @@ for _rid, _m in RULE_META.items():
 
 
 
-
 def get_valid_le_books(conn, schema: str) -> frozenset:
     """Return le_book codes whose category_type is in CATEGORY_TYPES."""
     filter_list = ", ".join(f"'{t}'" for t in CATEGORY_TYPES)
@@ -86,7 +85,6 @@ def run_rule(
     child_c  = meta["child_col"]
     parent_t = meta["parent_table"]
     parent_c = meta["parent_col"]
-
     lb_filter    = ""
     if valid_le_books:
         codes     = ", ".join(f"'{lb}'" for lb in sorted(valid_le_books))
@@ -147,7 +145,6 @@ def run_rule(
             "total":      lb_total,
             "ri_score":   round(lb_valid / lb_total * 100, 2) if lb_total else 100.0,
         }
-
     return {
         "valid":             valid,
         "invalid":           orphan_rows,
@@ -159,6 +156,9 @@ def run_rule(
 
 
 # ── orchestration ─────────────────────────────────────────────────────────────
+
+_RI_WORK_MEM = "512MB"
+
 
 def evaluate_all(engine, schema: str, sample: int) -> dict:
     """Run all RI rules; group results by child table; return report dict."""
@@ -176,82 +176,84 @@ def evaluate_all(engine, schema: str, sample: int) -> dict:
     with engine.connect() as conn:
         valid_le_books = get_valid_le_books(conn, schema)
 
-        for table_name, rule_ids in sorted(_TABLE_RULES.items()):
-            log.info("━━  Table: %s  (%d rule(s))", table_name, len(rule_ids))
+    for table_name, rule_ids in sorted(_TABLE_RULES.items()):
+        log.info("━━  Table: %s  (%d rule(s))", table_name, len(rule_ids))
 
-            rules_out:       dict                   = {}
-            rule_scores:     list[float]             = []
-            # accumulate per-le_book rule scores to compute table-level averages
-            lb_rule_scores:  dict[str, list[float]]  = {}
+        rules_out:       dict                   = {}
+        rule_scores:     list[float]             = []
+        # accumulate per-le_book rule scores to compute table-level averages
+        lb_rule_scores:  dict[str, list[float]]  = {}
 
-            for rule_id in rule_ids:
-                meta   = RULE_META[rule_id]
+        for rule_id in rule_ids:
+            meta = RULE_META[rule_id]
+            with engine.connect() as conn:
+                conn.execute(text(f"SET work_mem = '{_RI_WORK_MEM}'"))
                 result = run_rule(rule_id, meta, conn, schema, valid_le_books, sample)
 
-                if result is None:
-                    report["warnings"][rule_id] = f"Rule {rule_id} could not be evaluated."
-                    continue
-
-                score = result["ri_score"]
-                rule_scores.append(score)
-                all_le_books.update(result["le_book_breakdown"].keys())
-
-                for lb_code, lb_data in result["le_book_breakdown"].items():
-                    lb_rule_scores.setdefault(lb_code, []).append(lb_data["ri_score"])
-
-                rules_out[rule_id] = {
-                    "rule_name":         meta["name"],
-                    "category":          meta["category"],
-                    "child_table":       meta["child_table"],
-                    "child_col":         meta["child_col"],
-                    "parent_table":      meta["parent_table"],
-                    "parent_col":        meta["parent_col"],
-                    "nullable":          meta["nullable"],
-                    "valid":             result["valid"],
-                    "invalid":           result["invalid"],
-                    "total":             result["total"],
-                    "orphan_keys":       result["orphan_keys"],
-                    "ri_score":          score,
-                    "le_book_breakdown": result["le_book_breakdown"],
-                }
-                log.info(
-                    "  %s  score=%.2f%%  orphan_rows=%d  orphan_keys=%d  (of %d checked)",
-                    rule_id, score,
-                    result["invalid"], result["orphan_keys"], result["total"],
-                )
-
-            if not rule_scores:
+            if result is None:
+                report["warnings"][rule_id] = f"Rule {rule_id} could not be evaluated."
                 continue
 
-            # table-level le_book breakdown: average ri_score across rules per institution
-            table_lb_out: dict = {}
-            for lb_code, lb_scores in lb_rule_scores.items():
-                # row_count: take the max across rules (avoids double-counting
-                # when two rules check different nullable columns on the same table)
-                lb_row_count = max(
-                    rules_out[rid]["le_book_breakdown"].get(lb_code, {}).get("row_count", 0)
-                    for rid in rules_out
-                )
-                table_lb_out[lb_code] = {
-                    "row_count": lb_row_count,
-                    "ri_score":  round(sum(lb_scores) / len(lb_scores), 2),
-                }
+            score = result["ri_score"]
+            rule_scores.append(score)
+            all_le_books.update(result["le_book_breakdown"].keys())
 
-            table_score = round(sum(rule_scores) / len(rule_scores), 2)
-            all_scores.append(table_score)
+            for lb_code, lb_data in result["le_book_breakdown"].items():
+                lb_rule_scores.setdefault(lb_code, []).append(lb_data["ri_score"])
 
-            # row_count at table level: max total across rules (see above reasoning)
-            table_row_count = max(r["total"] for r in rules_out.values())
-
-            report["tables"][table_name] = {
-                "status":            "evaluated",
-                "row_count":         table_row_count,
-                "rules_applied":     len(rules_out),
-                "ri_score":          table_score,
-                "rules":             rules_out,
-                "le_book_breakdown": table_lb_out,
+            rules_out[rule_id] = {
+                "rule_name":         meta["name"],
+                "category":          meta["category"],
+                "child_table":       meta["child_table"],
+                "child_col":         meta["child_col"],
+                "parent_table":      meta["parent_table"],
+                "parent_col":        meta["parent_col"],
+                "nullable":          meta["nullable"],
+                "valid":             result["valid"],
+                "invalid":           result["invalid"],
+                "total":             result["total"],
+                "orphan_keys":       result["orphan_keys"],
+                "ri_score":          score,
+                "le_book_breakdown": result["le_book_breakdown"],
             }
-            log.info("  Table RI score: %.2f%%  (%d rule(s))", table_score, len(rules_out))
+            log.info(
+                "  %s  score=%.2f%%  orphan_rows=%d  orphan_keys=%d  (of %d checked)",
+                rule_id, score,
+                result["invalid"], result["orphan_keys"], result["total"],
+            )
+
+        if not rule_scores:
+            continue
+
+        # table-level le_book breakdown: average ri_score across rules per institution
+        table_lb_out: dict = {}
+        for lb_code, lb_scores in lb_rule_scores.items():
+            # row_count: take the max across rules (avoids double-counting
+            # when two rules check different nullable columns on the same table)
+            lb_row_count = max(
+                rules_out[rid]["le_book_breakdown"].get(lb_code, {}).get("row_count", 0)
+                for rid in rules_out
+            )
+            table_lb_out[lb_code] = {
+                "row_count": lb_row_count,
+                "ri_score":  round(sum(lb_scores) / len(lb_scores), 2),
+            }
+
+        table_score = round(sum(rule_scores) / len(rule_scores), 2)
+        all_scores.append(table_score)
+
+        # row_count at table level: max total across rules (see above reasoning)
+        table_row_count = max(r["total"] for r in rules_out.values())
+
+        report["tables"][table_name] = {
+            "status":            "evaluated",
+            "row_count":         table_row_count,
+            "rules_applied":     len(rules_out),
+            "ri_score":          table_score,
+            "rules":             rules_out,
+            "le_book_breakdown": table_lb_out,
+        }
+        log.info("  Table RI score: %.2f%%  (%d rule(s))", table_score, len(rules_out))
 
     overall = round(sum(all_scores) / len(all_scores), 2) if all_scores else 0.0
     evaluated = [v for v in report["tables"].values() if v.get("status") == "evaluated"]
@@ -306,13 +308,12 @@ def _run_rule_pandas(rule_id: str, meta: dict, dataframes: dict,
     if child_df.empty:
         return None
 
-    parent_keys        = frozenset(parent_df[parent_c].dropna().astype(str))
-    child_df["_fk"]    = child_df[child_c].astype(str)
-    child_df["_valid"] = child_df["_fk"].isin(parent_keys)
+    parent_keys        = parent_df[parent_c].dropna()
+    child_df["_valid"] = child_df[child_c].isin(parent_keys)
 
     total       = len(child_df)
     orphan_rows = int((~child_df["_valid"]).sum())
-    orphan_keys = int(child_df.loc[~child_df["_valid"], "_fk"].nunique())
+    orphan_keys = int(child_df.loc[~child_df["_valid"], child_c].nunique())
     valid       = total - orphan_rows
     score       = round(valid / total * 100, 2) if total else 100.0
 
