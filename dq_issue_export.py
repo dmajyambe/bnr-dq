@@ -1,413 +1,375 @@
 """
-Generate per-institution DQ issue XLSX reports from the 7-day DataFrame window.
+Generate per-institution DQ issue CSV reports.
 
-Called from dq_pipeline_2m.py after the DQ engines finish.
-Output: dashboard/reports/{le_book}_{name}.xlsx — one file per institution.
+Called from dq_pipeline_2m.py --reports stage.
 
-Each XLSX has 7 sheets:
-  Info          — institution metadata + run timestamp
-  Summary       — issue counts per dimension
-  Completeness  — rows with NULL mandatory fields
-  Accuracy      — rows failing accuracy rules
-  Timeliness    — rows failing timeliness rules
-  Validity      — rows failing validity rules
-  Relationship  — child rows with orphaned FK values
+Output:
+  reports/{table}_{le_book}_{YYYY-MM}.csv  -- one file per institution per table.
+
+  Each CSV follows the BNR template format:
+    le_book | stakeholder_name | category_type | <table columns> | issue_type
+  One row per failing record.  issue_type = rule name (filterable column).
 """
 from __future__ import annotations
-
 import logging
-import re
 from datetime import datetime
 from pathlib import Path
-
 import pandas as pd
-
 import accuracy_check
-import timeliness_check
-import validity_check
+#import timeliness_check
+# import validity_check
 from completeness_check import MANDATORY_COLUMNS
-from accuracy_check    import RULE_META as ACC_META,  TABLE_RULES as ACC_TABLE_RULES
-from timeliness_check  import RULE_META as TIM_META,  TABLE_RULES as TIM_TABLE_RULES
-from validity_check    import RULE_META as VAL_META,  TABLE_RULES as VAL_TABLE_RULES
+#from accuracy_check    import RULE_META as ACC_META,  TABLE_RULES as ACC_TABLE_RULES
+#from timeliness_check  import RULE_META as TIM_META,  TABLE_RULES as TIM_TABLE_RULES
+# from validity_check    import RULE_META as VAL_META,  TABLE_RULES as VAL_TABLE_RULES
 from relationship_check import RULE_META as REL_META
+from dq_rules import REL_RULE_META
 
 log = logging.getLogger("dq_issue_export")
 
-# ── primary key per table ─────────────────────────────────────────────────────
-TABLE_PK: dict[str, str] = {
-    "customers_expanded":    "customer_id",
-    "accounts":              "account_no",
-    "contracts_expanded":    "contract_sequence_number",
-    "contracts_disburse":    "contract_id",
-    "contract_loans":        "contract_sequence_number",
-    "contract_schedules":    "contract_sequence_number",
-    "loan_applications_2":   "loan_application_id",
-    "prev_loan_applications": "loan_application_id",
+# -- table ordering ------------------------------------------------------------
+ALL_TABLES = [
+    "accounts", "contract_loans", "contract_schedules",
+    "contracts_disburse", "contracts_expanded",
+    "customers_expanded", "loan_applications_2", "prev_loan_applications",
+]
+
+# -- primary key per table -----------------------------------------------------
+TABLE_PK: dict[str, list[str]] = {
+    "customers_expanded":    ["customer_id", "le_book"],
+    "accounts":              ["account_no", "le_book"],
+    "contracts_expanded":    ["contract_sequence_number", "contract_id"],
+    "contracts_disburse":    ["contract_id", "business_date"],
+    "contract_loans":        ["contract_sequence_number", "year_month"],
+    "contract_schedules":    ["contract_sequence_number", "schedule_date"],
+    "loan_applications_2":   ["loan_application_id"],
+    "prev_loan_applications": ["loan_application_id"],
 }
 
-# ── human-readable context columns per table ──────────────────────────────────
-# Each entry is (column_label, df_column_name).  These appear in the "Record Info"
-# column so the reader can identify the record without a DB lookup.
-TABLE_CONTEXT: dict[str, list[tuple[str, str]]] = {
-    "customers_expanded":    [("Name",         "customer_name"),
-                              ("Opened",        "customer_open_date")],
-    "accounts":              [("Account Name",  "account_name"),
-                              ("Customer ID",   "customer_id")],
-    "contracts_expanded":    [("Customer ID",   "customer_id"),
-                              ("Start Date",    "start_date")],
-    "contracts_disburse":    [("Business Date", "business_date")],
-    "contract_loans":        [("Perf. Class",   "performance_class"),
-                              ("Created",       "date_creation")],
-    "contract_schedules":    [("Schedule Date", "schedule_date")],
-    "loan_applications_2":   [("Customer Name", "customer_name"),
-                              ("Applied",       "application_date")],
-    "prev_loan_applications": [("Business Date","business_date")],
+# -- human-readable context columns per table ----------------------------------
+TABLE_CONTEXT: dict[str, list[str]] = {
+    "customers_expanded":    ["customer_name", "customer_open_date"],
+    "accounts":              ["account_name", "customer_id", "account_open_date"],
+    "contracts_expanded":    ["customer_id", "start_date", "deal_type", "deal_sub_type"],
+    "contracts_disburse":    ["business_date", "currency"],
+    "contract_loans":        ["performance_class", "date_creation"],
+    "contract_schedules":    ["schedule_date", "payment_date"],
+    "loan_applications_2":   ["customer_name", "application_date", "application_status"],
+    "prev_loan_applications": ["business_date"],
 }
 
-# ── plain-English issue labels for RI rules ───────────────────────────────────
-REL_ISSUE_LABELS: dict[str, str] = {
-    "REL-001": "Account has no matching Customer",
-    "REL-002": "Contract has no matching Customer",
-    "REL-003": "Loan Application has no matching Customer",
-    "REL-004": "Contract-Loan has no matching Contract",
-    "REL-005": "Payment Schedule has no matching Contract",
-    "REL-006": "Disbursement has no matching Contract",
-    "REL-007": "Previous Application has no matching current Loan Application",
-    "REL-008": "Contract references unknown Loan Application",
+# -- template column sets (matches BNR reference Excel files) ------------------
+# Order: institution metadata | record identifiers | context | technical | issue_type
+# Columns that don't exist in a given DataFrame are silently skipped.
+
+TABLE_CSV_COLS: dict[str, list[str]] = {
+    "accounts": [
+        "le_book", "stakeholder_name", "category_type",
+        "account_no", "customer_id", "account_name",
+        "account_type", "account_type_desc",
+        "vision_ouc", "currency",
+        "account_status_date", "account_open_date", "account_closing_date",
+        "performance_class", "performance_class_desc",
+        "vision_sbu", "vision_sbu_desc",
+        "account_status", "account_status_desc",
+        "last_tran_date", "date_last_modified", "date_creation",
+        "issue_type",
+    ],
+    "customers_expanded": [
+        "le_book", "stakeholder_name", "category_type",
+        "customer_id", "salutation", "salutation_desc",
+        "customer_name", "surname", "forename_1", "forename_2",
+        "customer_gender", "customer_gender_desc",
+        "customer_acronym", "vision_ouc", "vision_sbu", "vision_sbu_desc",
+        "customer_open_date", "customer_tin", "passport_number",
+        "national_id_type", "national_id_type_desc", "national_id_number",
+        "customer_status", "customer_status_desc",
+        "date_of_birth", "place_of_birth",
+        "email_id", "work_telephone", "home_telephone",
+        "legal_status", "legal_status_desc",
+        "date_last_modified", "date_creation",
+        "issue_type",
+    ],
+    "contract_loans": [
+        "le_book", "stakeholder_name", "category_type",
+        "contract_sequence_number", "year_month",
+        "performance_class", "date_past_due",
+        "outstanding_amount_lcy", "disbursed_amount",
+        "emi_amount", "num_of_instalments", "num_instalments_paid",
+        "prin_outstanding_amt_lcy",
+        "date_last_modified", "date_creation",
+        "issue_type",
+    ],
+    "contract_schedules": [
+        "le_book", "stakeholder_name", "category_type",
+        "contract_sequence_number", "schedule_date", "payment_date",
+        "emi_amount", "due_amount", "outstanding_amount",
+        "principal_amount_due", "int_amount_due",
+        "date_last_modified", "date_creation",
+        "issue_type",
+    ],
+    "contracts_disburse": [
+        "le_book", "stakeholder_name", "category_type",
+        "contract_id", "business_date", "currency",
+        "current_disbursed_amt", "previous_disbursed_amt",
+        "first_payment_date", "contract_status",
+        "date_last_modified", "date_creation",
+        "issue_type",
+    ],
+    "contracts_expanded": [
+        "le_book", "stakeholder_name", "category_type",
+        "contract_sequence_number", "contract_id", "customer_id",
+        "deal_type", "deal_sub_type",
+        "start_date", "maturity_date",
+        "performance_class", "contract_status",
+        "outstanding_amount_lcy", "principal_amount_lcy",
+        "date_last_modified", "date_creation",
+        "issue_type",
+    ],
+    "loan_applications_2": [
+        "le_book", "stakeholder_name", "category_type",
+        "loan_application_id", "customer_id", "customer_name",
+        "customer_gender", "application_date", "application_status",
+        "currency", "applied_amount_lcy", "approved_amount_lcy",
+        "rejection_reason",
+        "date_last_modified", "date_creation",
+        "issue_type",
+    ],
+    "prev_loan_applications": [
+        "le_book", "stakeholder_name", "category_type",
+        "loan_application_id", "prev_contract_id",
+        "prev_loan_app_status", "record_indicator",
+        "date_last_modified", "date_creation",
+        "issue_type",
+    ],
 }
 
-_HDR_FILL = "1A3A6B"   # BNR navy
-_HDR_FONT = "FFFFFF"
-_ALT_FILL = "F4F6F9"
+
+# -- mask cache ----------------------------------------------------------------
+
+def _build_mask_cache(table: str, df: pd.DataFrame) -> dict:
+    """Pre-compute all accuracy and timeliness masks for one table. Keyed by rule_id."""
+    cache: dict = {}
+    # for rule_id in ACC_TABLE_RULES.get(table, []):
+    #     try:
+    #         cache[rule_id] = accuracy_check.run_rule_mask(rule_id, df)
+    #     except Exception:
+    #         log.exception("Rule failed: %s", rule_id)
+    # for rule_id in TIM_TABLE_RULES.get(table, []):
+    #     try:
+    #         cache[rule_id] = timeliness_check.run_rule_mask(rule_id, df)
+    #     except Exception:
+    #         log.exception("Rule failed: %s", rule_id)
+    return cache
 
 
-def _pk(df: pd.DataFrame, table: str) -> pd.Series:
-    col = TABLE_PK.get(table, "")
-    return df[col].astype(str) if (col and col in df.columns) else pd.Series("—", index=df.index)
-
-def _make_record_info(df: pd.DataFrame, table: str) -> pd.Series:
+def build_mask_caches(dataframes: dict, valid_le_books: frozenset) -> dict:
     """
-    Return a Series of 'Label: value | Label: value' strings for each row.
-    Uses TABLE_CONTEXT to pick which columns to surface per table.
+    Pre-compute rule masks for every table. Returns {table: {rule_id: mask}}.
+    Pass to both export functions to avoid recomputing masks across the two calls.
     """
-    context = [(lbl, col) for lbl, col in TABLE_CONTEXT.get(table, [])
-               if col in df.columns]
-    if not context:
-        return pd.Series("—", index=df.index)
-
-    pieces = []
-    for lbl, col in context:
-        s     = df[col].fillna("").astype(str).str.strip()
-        valid = ~s.isin(["", "nan", "NaT", "None", "NaN"])
-        pieces.append((lbl + ": " + s).where(valid, ""))
-
-    combined = pd.concat(pieces, axis=1)
-    return combined.apply(
-        lambda row: " | ".join(v for v in row if v) or "—",
-        axis=1,
-    )
-
-
-# ── per-dimension issue collectors ────────────────────────────────────────────
-
-def _completeness_df(inst_frames: dict) -> pd.DataFrame:
-    COLS = ["Row ID", "Record Info", "Table", "Field", "Issue"]
-    chunks = []
-    for table, df in inst_frames.items():
+    valid_lb_strs = {str(lb) for lb in valid_le_books} if valid_le_books else None
+    caches: dict = {}
+    for table in ALL_TABLES:
+        df = dataframes.get(table, pd.DataFrame())
         if df.empty:
             continue
-        pk   = _pk(df, table)
-        info = _make_record_info(df, table)
-        for col in MANDATORY_COLUMNS.get(table, []):
-            if col not in df.columns:
-                continue
-            mask = df[col].isna()
-            if not mask.any():
-                continue
-            chunks.append(pd.DataFrame({
-                "Row ID":      pk[mask].values,
-                "Record Info": info[mask].values,
-                "Table":       table,
-                "Field":       col,
-                "Issue":       "Missing value (NULL)",
-            }))
-    return pd.concat(chunks, ignore_index=True) if chunks else pd.DataFrame(columns=COLS)
-
-
-def _rule_issues_df(inst_frames: dict, engine_mod, table_rules: dict,
-                    rule_meta: dict) -> pd.DataFrame:
-    COLS = ["Row ID", "Record Info", "Table", "Rule", "Rule Name", "Field(s)", "Bad Value"]
-    chunks = []
-    for table, df in inst_frames.items():
+        if valid_lb_strs and "le_book" in df.columns:
+            df = df[df["le_book"].astype(str).isin(valid_lb_strs)]
         if df.empty:
             continue
-        pk   = _pk(df, table)
-        info = _make_record_info(df, table)
-        for rule_id in table_rules.get(table, []):
-            mask = engine_mod.run_rule_mask(rule_id, df)
-            if not mask.any():
-                continue
-            meta   = rule_meta[rule_id]
-            fields = [f for f in meta["fields"] if f in df.columns]
-            bad    = df[mask]
-            chunks.append(pd.DataFrame({
-                "Row ID":      pk[mask].values,
-                "Record Info": info[mask].values,
-                "Table":       table,
-                "Rule":        rule_id,
-                "Rule Name":   meta["name"],
-                "Field(s)":    ", ".join(meta["fields"]),
-                "Bad Value":   (bad[fields].astype(str).agg(" | ".join, axis=1).values
-                                if fields else ""),
-            }))
-    return pd.concat(chunks, ignore_index=True) if chunks else pd.DataFrame(columns=COLS)
+        caches[table] = _build_mask_cache(table, df)
+    return caches
 
 
-def _relationship_df(le_book: str, dataframes: dict,
-                     parent_dataframes: dict | None = None) -> pd.DataFrame:
-    COLS = ["Row ID", "Record Info", "Issue",
-            "Checked Table", "FK Column", "Orphaned Value (not found in parent)",
-            "Expected In Table", "Rule"]
-    chunks = []
-    _parents = parent_dataframes or dataframes
-    for rule_id, meta in REL_META.items():
-        child_t  = meta["child_table"]
-        child_c  = meta["child_col"]
-        parent_t = meta["parent_table"]
-        parent_c = meta["parent_col"]
+# -- CSV report generation -----------------------------------------------------
 
-        child_full = dataframes.get(child_t,  pd.DataFrame())
-        parent_df  = _parents.get(parent_t, pd.DataFrame())
-        if child_full.empty or parent_df.empty:
-            continue
-        if child_c not in child_full.columns or parent_c not in parent_df.columns:
-            continue
-
-        # filter child to this institution; parent used unfiltered to avoid false orphans
-        child_df = (child_full[child_full["le_book"].astype(str) == le_book].copy()
-                    if "le_book" in child_full.columns else child_full.copy())
-        child_df = child_df[child_df[child_c].notna()].copy()
-        if child_df.empty:
-            continue
-
-        parent_keys     = frozenset(parent_df[parent_c].dropna().astype(str))
-        child_df["_fk"] = child_df[child_c].astype(str)
-        orphan_mask     = ~child_df["_fk"].isin(parent_keys)
-        if not orphan_mask.any():
-            continue
-
-        bad    = child_df[orphan_mask]
-        pk_col = TABLE_PK.get(child_t, child_c)
-        info   = _make_record_info(bad, child_t)
-        chunks.append(pd.DataFrame({
-            "Row ID":                            (bad[pk_col].astype(str).values
-                                                  if pk_col in bad.columns else "—"),
-            "Record Info":                       info.values,
-            "Issue":                             REL_ISSUE_LABELS.get(rule_id, meta["name"]),
-            "Checked Table":                     child_t,
-            "FK Column":                         child_c,
-            "Orphaned Value (not found in parent)": bad["_fk"].values,
-            "Expected In Table":                 parent_t,
-            "Rule":                              rule_id,
-        }))
-    return pd.concat(chunks, ignore_index=True) if chunks else pd.DataFrame(columns=COLS)
-
-
-# ── XLSX styling ──────────────────────────────────────────────────────────────
-
-def _style_sheet(ws, n_cols: int) -> None:
-    from openpyxl.styles import Font, PatternFill, Alignment
-    from openpyxl.utils  import get_column_letter
-
-    hdr_fill = PatternFill("solid", fgColor=_HDR_FILL)
-    alt_fill = PatternFill("solid", fgColor=_ALT_FILL)
-    wht_fill = PatternFill("solid", fgColor="FFFFFF")
-
-    for cell in ws[1]:
-        cell.font      = Font(bold=True, color=_HDR_FONT, size=10)
-        cell.fill      = hdr_fill
-        cell.alignment = Alignment(horizontal="left", vertical="center")
-
-    for row_idx, row in enumerate(ws.iter_rows(min_row=2), start=2):
-        fill = alt_fill if row_idx % 2 == 0 else wht_fill
-        for cell in row:
-            cell.fill      = fill
-            cell.alignment = Alignment(horizontal="left", vertical="center")
-            cell.font      = Font(size=9)
-
-    for col_idx in range(1, n_cols + 1):
-        max_len = max(
-            (len(str(ws.cell(row=r, column=col_idx).value or ""))
-             for r in range(1, min(ws.max_row + 1, 102))),
-            default=8,
-        )
-        ws.column_dimensions[get_column_letter(col_idx)].width = min(max_len + 4, 55)
-
-    ws.freeze_panes  = "A2"
-    ws.row_dimensions[1].height = 18
-
-
-# ── single-institution XLSX writer ────────────────────────────────────────────
-
-def _open_issues_df(le_book: str) -> pd.DataFrame:
+def _collect_failing_df(table: str, df: pd.DataFrame,
+                        all_frames: dict, parent_frames: dict | None = None,
+                        categories: dict = None,
+                        mask_cache: dict | None = None,
+                        output_cols: list | None = None) -> pd.DataFrame:
     """
-    Return a DataFrame of tracked open issues for this institution from SQLite.
-    This sheet is the bridge between the alert email and the row-level evidence
-    sheets — it lists exactly the (dimension, table, rule) combinations referenced
-    in any notification sent to this institution.
+    Collect ALL failing records for this table across every dimension,
+    tagged with issue_type = rule_name.  Returns a single concatenated DataFrame.
+
+    output_cols: if provided, each chunk is trimmed to these columns immediately
+    after the mask is applied — avoids holding wide full-column copies in RAM
+    for large tables.  Must include 'le_book'.
     """
-    try:
-        from dq_issue_tracker import get_open_issues
-        from datetime import date
-        issues = get_open_issues(le_book)
-    except Exception:
-        issues = []
+    chunks: list[pd.DataFrame] = []
 
-    if not issues:
-        return pd.DataFrame(columns=[
-            "Dimension", "Table", "Rule ID", "Failing Rows",
-            "Detected", "SLA Deadline", "Days Remaining", "Urgency", "Status",
-        ])
+    def _tag(sdf: pd.DataFrame, issue_name: str) -> pd.DataFrame:
+        if sdf.empty:
+            return sdf
+        out = sdf if output_cols is None else sdf[[c for c in output_cols if c in sdf.columns]]
+        out = out.copy()
+        out["issue_type"] = issue_name
+        return out
 
-    today = date.today()
-    rows  = []
-    for iss in issues:
-        try:
-            days_left = (date.fromisoformat(iss["sla_deadline"]) - today).days
-        except Exception:
-            days_left = ""
-        rows.append({
-            "Dimension":     iss["dimension"].title(),
-            "Table":         iss["table_name"],
-            "Rule ID":       iss["rule_id"],
-            "Failing Rows":  iss["failing_rows"],
-            "Detected":      iss["detected_at"],
-            "SLA Deadline":  iss["sla_deadline"],
-            "Days Remaining": days_left,
-            "Urgency":       iss.get("urgency_band", "").title(),
-            "Status":        iss.get("status", "open").title(),
-        })
-    return pd.DataFrame(rows)
+    # -- completeness ----------------------------------------------------------
+    for col in MANDATORY_COLUMNS.get(table, []):
+        if col not in df.columns:
+            continue
+        mask = df[col].isna()
+        if mask.any():
+            chunks.append(_tag(df[mask], f"Missing {col}"))
 
+    # -- accuracy --------------------------------------------------------------
+    # for rule_id in ACC_TABLE_RULES.get(table, []):
+    #     if mask_cache is not None:
+    #         mask = mask_cache.get(rule_id)
+    #         if mask is None:
+    #             continue  # rule failed during cache build -- already logged
+    #     else:
+    #         try:
+    #             mask = accuracy_check.run_rule_mask(rule_id, df)
+    #         except Exception:
+    #             log.exception("Rule failed: %s", rule_id)
+    #             continue
+    #     if mask.any():
+    #         chunks.append(_tag(df[mask],
+    #                            ACC_META.get(rule_id, {}).get("name", rule_id)))
 
-def _write_institution_xlsx(
-    le_book: str,
-    cat_info: dict,
-    inst_frames: dict,
-    dataframes: dict,
-    output_dir: Path,
-    parent_dataframes: dict | None = None,
-) -> None:
-    inst_name = (cat_info.get("name") or le_book).title()
-    safe      = re.sub(r"[^\w]", "_", inst_name)[:30].strip("_")
-    run_date  = datetime.now().strftime("%Y-%m-%d")
-    path      = output_dir / f"{le_book}_{safe}_{run_date}.xlsx"
+    # -- timeliness ------------------------------------------------------------
+    # for rule_id in TIM_TABLE_RULES.get(table, []):
+    #     if mask_cache is not None:
+    #         mask = mask_cache.get(rule_id)
+    #         if mask is None:
+    #             continue  # rule failed during cache build -- already logged
+        # else:
+        #     try:
+        #         mask = timeliness_check.run_rule_mask(rule_id, df)
+        #     except Exception:
+        #         log.exception("Rule failed: %s", rule_id)
+        #         continue
+        # if mask.any():
+        #     chunks.append(_tag(df[mask],
+        #                        TIM_META.get(rule_id, {}).get("name", rule_id)))
 
-    comp_df   = _completeness_df(inst_frames)
-    acc_df    = _rule_issues_df(inst_frames, accuracy_check,   ACC_TABLE_RULES, ACC_META)
-    tim_df    = _rule_issues_df(inst_frames, timeliness_check, TIM_TABLE_RULES, TIM_META)
-    val_df    = _rule_issues_df(inst_frames, validity_check,   VAL_TABLE_RULES, VAL_META)
-    rel_df    = _relationship_df(le_book, dataframes, parent_dataframes)
-    issues_df = _open_issues_df(le_book)
+    # -- validity (commented out) ----------------------------------------------
+    # for rule_id in VAL_TABLE_RULES.get(table, []):
+    #     try:
+    #         mask = validity_check.run_rule_mask(rule_id, df)
+    #         if mask.any():
+    #             chunks.append(_tag(df[mask].copy(),
+    #                                VAL_META.get(rule_id, {}).get("name", rule_id)))
+    #     except Exception:
+    #         pass
 
-    run_ts = datetime.now().strftime("%Y-%m-%d %H:%M UTC")
+    # -- relationship (child table only; commented out) ------------------------
+    # for rule_id, meta in REL_RULE_META.items():
+    #     if meta["child_table"] != table:
+    #         continue
+    #     try:
+    #         sdf = _rel_sheet(table, rule_id, df, all_frames, parent_frames, categories)
+    #         if not sdf.empty:
+    #             sdf["issue_type"] = REL_META.get(rule_id, {}).get("name", rule_id)
+    #             chunks.append(sdf)
+    #     except Exception:
+    #         pass
 
-    # Info sheet — includes SLA note so the report is self-contained evidence
-    info_rows = [
-        ("Institution",  inst_name),
-        ("LE Book",      le_book),
-        ("Category",     cat_info.get("category_type", "")),
-        ("Generated At", run_ts),
-        ("", ""),
-        ("EVIDENCE NOTE",
-         "The 'Open Issues' sheet lists every tracked DQ issue for this institution. "
-         "Each row matches a rule/table combination referenced in BNR alert emails. "
-         "The dimension sheets below contain the exact failing records for those rules."),
-    ]
-    info_df = pd.DataFrame(info_rows, columns=["Item", "Value"])
+    if not chunks:
+        return pd.DataFrame()
 
-    summary_df = pd.DataFrame({
-        "Dimension":   ["Completeness", "Accuracy", "Timeliness", "Validity",
-                        "Accuracy (Referential)", "Tracked Open Issues"],
-        "Issue Count": [len(comp_df), len(acc_df), len(tim_df), len(val_df),
-                        len(rel_df), len(issues_df)],
-    })
-
-    sheets = [
-        ("Info",          info_df),
-        ("Summary",       summary_df),
-        ("Open Issues",   issues_df),   # ← matches alert email exactly
-        ("Completeness",  comp_df),
-        ("Accuracy",      acc_df),
-        ("Timeliness",    tim_df),
-        ("Validity",      val_df),
-        ("Relationship",  rel_df),
-    ]
-
-    with pd.ExcelWriter(path, engine="openpyxl") as writer:
-        for sheet_name, df in sheets:
-            df.to_excel(writer, sheet_name=sheet_name, index=False)
-
-        wb = writer.book
-        for sheet_name, df in sheets:
-            _style_sheet(wb[sheet_name], len(df.columns))
-
-    total = len(comp_df) + len(acc_df) + len(tim_df) + len(val_df) + len(rel_df)
-    log.info("  ✓ %-6s  %-30s  %d issues → %s", le_book, inst_name[:30], total, path.name)
+    combined = pd.concat(chunks, ignore_index=True)
+    return combined
 
 
-# ── main entry point ──────────────────────────────────────────────────────────
+def _enrich_csv_df(df: pd.DataFrame, table: str, categories: dict) -> pd.DataFrame:
+    """
+    Add stakeholder_name + category_type columns (from le_book_categories),
+    then reorder to match TABLE_CSV_COLS template order.
+    """
+    if df.empty:
+        return df
 
-def export_institution_issues(
+    cat_name = {str(lb): (info.get("name") or str(lb)).title()
+                for lb, info in categories.items()}
+    cat_type = {str(lb): (info.get("category_type") or "")
+                for lb, info in categories.items()}
+
+    df = df.copy()
+    df["stakeholder_name"] = df["le_book"].astype(str).map(
+        lambda lb: cat_name.get(lb, lb))
+    df["category_type"]    = df["le_book"].astype(str).map(
+        lambda lb: cat_type.get(lb, ""))
+
+    # reorder: keep only columns in the template set, in template order;
+    # append any extra columns before issue_type
+    template = TABLE_CSV_COLS.get(table, [])
+    fixed    = [c for c in template if c != "issue_type" and c in df.columns]
+    extra    = [c for c in df.columns
+                if c not in set(template) and c not in ("institution", "issue_type")]
+    ordered  = fixed + extra + (["issue_type"] if "issue_type" in df.columns else [])
+    return df[[c for c in ordered if c in df.columns]]
+
+
+def export_csv_reports(
     dataframes: dict,
     le_book_categories: dict,
     valid_le_books: frozenset,
     output_dir: Path,
     parent_dataframes: dict | None = None,
-) -> None:
+    mask_caches: dict | None = None,
+) -> int:
     """
-    Write one XLSX per institution with row-level DQ issues across all 5 dimensions.
-    Processes one institution at a time to keep peak memory bounded.
+    Write one CSV per institution per table following the BNR template format.
+
+    Filename: {table}_{le_book}_{YYYY-MM}.csv
+    Columns:  le_book | stakeholder_name | category_type | <table cols> | issue_type
+
+    Returns total number of CSV files written.
     """
     import gc
 
-    output_dir = Path(output_dir)
-    output_dir.mkdir(exist_ok=True)
+    csv_dir = Path(output_dir)
+    csv_dir.mkdir(parents=True, exist_ok=True)
 
-    institutions = sorted(valid_le_books) if valid_le_books else sorted(
-        {str(v) for df in dataframes.values()
-         if not df.empty and "le_book" in df.columns
-         for v in df["le_book"].unique()}
-    )
+    parent_frames   = parent_dataframes or dataframes
+    run_month       = datetime.now().strftime("%Y-%m")
+    categories      = le_book_categories
+    n_files         = 0
+    valid_lb_strs   = {str(lb) for lb in valid_le_books} if valid_le_books else None
 
-    if not institutions:
-        log.warning("No institution data found — no XLSX files written.")
-        return
+    if not dataframes:
+        log.warning("No dataframes -- skipping CSV export.")
+        return 0
 
-    log.info("Writing issue reports for %d institution(s) → %s", len(institutions), output_dir)
-    for le_book in institutions:
-        # Build this institution's frames on the fly — never hold all 490 at once
-        inst_frames: dict[str, pd.DataFrame] = {}
-        for table, df in dataframes.items():
-            if df.empty or "le_book" not in df.columns:
-                continue
-            sub = df[df["le_book"] == le_book]
-            if not sub.empty:
-                inst_frames[table] = sub.reset_index(drop=True)
+    log.info("Writing per-institution CSV reports -> %s", csv_dir)
 
-        try:
-            _write_institution_xlsx(
-                le_book,
-                le_book_categories.get(le_book, {}),
-                inst_frames,
-                dataframes,
-                output_dir,
-                parent_dataframes,
-            )
-        except Exception as exc:
-            log.error("  ✗ %s — %s", le_book, exc)
-        finally:
-            del inst_frames
-            gc.collect()
+    for table in ALL_TABLES:
+        df = dataframes.get(table, pd.DataFrame())
+        if df.empty:
+            continue
 
-    log.info("Institution issue reports complete.")
+        if valid_lb_strs and "le_book" in df.columns:
+            df = df[df["le_book"].astype(str).isin(valid_lb_strs)].copy()
+        if df.empty:
+            continue
+
+        tbl_cache = mask_caches.get(table) if mask_caches is not None else None
+        combined  = _collect_failing_df(table, df, dataframes, parent_frames,
+                                        categories, mask_cache=tbl_cache)
+        if combined.empty:
+            log.info("  -- %-30s  no failing records", table)
+            continue
+
+        combined = _enrich_csv_df(combined, table, categories)
+
+        # split by institution and write one CSV per le_book
+        for lb, inst_df in combined.groupby("le_book"):
+            lb_str = str(lb).strip()
+            fname  = f"{table}_{lb_str}_{run_month}.csv"
+            path   = csv_dir / fname
+            inst_df.to_csv(path, index=False, encoding="utf-8-sig")
+            n_issues = len(inst_df["issue_type"].unique()) if "issue_type" in inst_df else 0
+            n_files += 1
+            log.info("  \u2713 %-6s  %-28s  %5d rows  %d issue type(s)  -> %s",
+                     lb_str, table, len(inst_df), n_issues, fname)
+
+        gc.collect()
+
+    log.info("CSV export complete -- %d file(s) written.", n_files)
+    return n_files
+

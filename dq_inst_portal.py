@@ -415,93 +415,60 @@ def inst_dashboard_page(le_books: list[str], categories: dict) -> html.Div:
     ], style={"padding": "28px 32px", "maxWidth": "1200px", "margin": "0 auto"})
 
 
+_TABLE_PRETTY = {
+    "accounts":               "Accounts",
+    "contract_loans":         "Contract Loans",
+    "contract_schedules":     "Contract Schedules",
+    "contracts_disburse":     "Contracts Disburse",
+    "contracts_expanded":     "Contracts",
+    "customers_expanded":     "Customers",
+    "loan_applications_2":    "Loan Applications",
+    "prev_loan_applications": "Prev Loan Apps",
+}
+
+
 def inst_issues_page(le_books: list[str]) -> html.Div:
-    """Issues filtered to this user's institutions — same filter UI as BNR alerts."""
+    """Institution-facing issues page — filterable CSV download."""
     from dq_issue_tracker import get_issues
 
-    lb_set = set(le_books)
+    lb_set = set(str(lb) for lb in le_books)
 
-    def _filtered(status):
-        return [i for i in get_issues(status=status) if i["le_book"] in lb_set]
-
-    open_issues = _filtered("open")
-    band_counts = {"new": 0, "attention": 0, "urgent": 0, "critical": 0}
+    # ── urgency summary chips ─────────────────────────────────────────────────
+    open_issues = [i for i in get_issues(status="open") if i["le_book"] in lb_set]
+    band_counts = {"new": 0, "attention": 0, "urgent": 0, "critical": 0, "overdue": 0}
     for iss in open_issues:
         b = iss.get("urgency_band", "new")
         if b in band_counts:
             band_counts[b] += 1
 
-    summary_chips = []
-    for band, label in [("critical", "About to Breach"), ("urgent", "Urgent"),
-                        ("attention", "Needs Attention"), ("new", "New")]:
-        n   = band_counts[band]
-        clr = _URGENCY_COLORS[band]
-        summary_chips.append(html.Div([
+    chips = []
+    for band, label in [("overdue", "⚠ SLA Overdue"), ("critical", "Critical"),
+                         ("urgent", "Urgent"), ("attention", "Attention"), ("new", "New")]:
+        n   = band_counts.get(band, 0)
+        clr = _URGENCY_COLORS.get(band, MUTED)
+        chips.append(html.Div([
             html.Span(str(n), style={"fontWeight": "900", "fontSize": "22px", "color": clr}),
             html.Span(label,  style={"fontSize": "11px", "color": MUTED, "marginTop": "2px"}),
         ], style={
             "display": "flex", "flexDirection": "column", "alignItems": "center",
-            "background": CARD, "borderRadius": "8px", "padding": "14px 22px",
-            "border": f"2px solid {clr}", "minWidth": "110px",
+            "background": CARD, "borderRadius": "8px", "padding": "12px 20px",
+            "border": f"2px solid {clr}", "minWidth": "100px",
         }))
 
-    # Full pipeline report download button(s) — one per le_book
-    dl_btns = []
-    for lb in sorted(le_books):
-        rpt_files = sorted(REPORTS_DIR.glob(f"{lb}_*.xlsx"), reverse=True) if REPORTS_DIR.exists() else []
-        if rpt_files:
-            stem     = rpt_files[0].stem
-            parts    = stem.rsplit("_", 3)
-            rpt_date = parts[-1] if len(parts) >= 2 and len(parts[-1]) == 10 else "—"
-            dl_btns.append(html.Div(
-                [html.Span("⬇ ", style={"fontSize": "13px"}),
-                 html.Span(f"Full Report  {rpt_date}", style={"fontSize": "11px"})],
-                id={"type": "inst-dl-btn", "index": lb},
-                n_clicks=0,
-                title=f"Download full DQ report ({rpt_date})",
-                style={
-                    "display":      "inline-flex",
-                    "alignItems":   "center",
-                    "gap":          "4px",
-                    "cursor":       "pointer",
-                    "background":   BRAND,
-                    "color":        CARD,
-                    "fontSize":     "12px",
-                    "fontWeight":   "700",
-                    "padding":      "7px 16px",
-                    "borderRadius": "6px",
-                    "userSelect":   "none",
-                    "whiteSpace":   "nowrap",
-                },
-            ))
+    # available table options (only tables that have any issues for this institution)
+    active_tables = sorted({i["table_name"] for i in open_issues})
+    table_options = [
+        {"label": _TABLE_PRETTY.get(t, t.replace("_", " ").title()), "value": t}
+        for t in active_tables
+    ]
 
-    return html.Div([
+    # ── filter bar ────────────────────────────────────────────────────────────
+    filter_bar = html.Div([
+        # status toggle
         html.Div([
-            html.Div([
-                html.H2("My Issues", style={
-                    "fontSize": "18px", "fontWeight": "900", "color": TEXT,
-                    "margin": "0",
-                }),
-                html.P(
-                    "Issues detected when a dimension score falls below 85%. "
-                    "Create a Change Request via the Remediation tab to track corrections.",
-                    style={"fontSize": "12px", "color": MUTED,
-                           "margin": "4px 0 0", "lineHeight": "1.5"},
-                ),
-            ]),
-            html.Div(dl_btns, style={"display": "flex", "gap": "8px",
-                                     "flexShrink": "0", "marginLeft": "auto"}),
-        ], style={
-            "display": "flex", "alignItems": "flex-start",
-            "justifyContent": "space-between", "flexWrap": "wrap",
-            "gap": "12px", "marginBottom": "20px",
-        }),
-        html.Div(summary_chips, style={
-            "display": "flex", "gap": "12px", "flexWrap": "wrap", "marginBottom": "24px",
-        }),
-        html.Div([
-            html.Span("Filter: ", style={"fontSize": "12px", "color": MUTED,
-                                         "marginRight": "10px", "alignSelf": "center"}),
+            html.Span("Status:", style={"fontSize": "12px", "color": MUTED,
+                                         "marginRight": "8px", "alignSelf": "center",
+                                         "whiteSpace": "nowrap"}),
             dcc.RadioItems(
                 id="inst-issue-filter",
                 options=[
@@ -512,12 +479,71 @@ def inst_issues_page(le_books: list[str]) -> html.Div:
                 value="open",
                 inline=True,
                 inputStyle={"marginRight": "4px"},
-                labelStyle={"marginRight": "12px", "fontSize": "12px",
+                labelStyle={"marginRight": "14px", "fontSize": "12px",
                             "fontWeight": "700", "cursor": "pointer"},
             ),
-        ], style={"display": "flex", "alignItems": "center", "marginBottom": "12px"}),
+        ], style={"display": "flex", "alignItems": "center"}),
+
+        html.Span(style={"width": "1px", "background": DIVIDER,
+                          "alignSelf": "stretch", "margin": "0 16px"}),
+
+        # table multi-select
+        html.Div([
+            html.Span("Tables:", style={"fontSize": "12px", "color": MUTED,
+                                         "marginRight": "8px", "whiteSpace": "nowrap",
+                                         "alignSelf": "center"}),
+            dcc.Dropdown(
+                id="inst-table-filter",
+                options=table_options,
+                value=None,
+                multi=True,
+                placeholder="All tables…",
+                clearable=True,
+                style={"fontSize": "12px", "fontFamily": FONT, "minWidth": "280px"},
+            ),
+        ], style={"display": "flex", "alignItems": "center", "flex": "1"}),
+
+        html.Span(style={"width": "1px", "background": DIVIDER,
+                          "alignSelf": "stretch", "margin": "0 16px"}),
+
+        # CSV download button
+        html.Div([
+            html.Span("⬇ ", style={"fontSize": "13px"}),
+            html.Span("Download CSV", style={"fontSize": "12px"}),
+        ], id="inst-csv-dl-btn", n_clicks=0,
+           title="Download filtered issues as CSV",
+           style={
+               "display": "inline-flex", "alignItems": "center", "gap": "4px",
+               "cursor": "pointer", "background": BRAND, "color": CARD,
+               "fontSize": "12px", "fontWeight": "700",
+               "padding": "7px 16px", "borderRadius": "6px",
+               "userSelect": "none", "whiteSpace": "nowrap",
+           }),
+
+        dcc.Download(id="inst-csv-download"),
+    ], style={
+        "display": "flex", "alignItems": "center", "flexWrap": "wrap",
+        "gap": "6px", "background": CARD, "borderRadius": "8px",
+        "padding": "10px 14px", "border": f"1px solid {DIVIDER}",
+        "marginBottom": "16px",
+    })
+
+    return html.Div([
+        html.Div([
+            html.H2("My Issues", style={"fontSize": "18px", "fontWeight": "900",
+                                         "color": TEXT, "margin": "0 0 4px"}),
+            html.P(
+                "Filter by table, then download as CSV. "
+                "Each row in the table below is a data category with open issues.",
+                style={"fontSize": "12px", "color": MUTED, "margin": "0"},
+            ),
+        ], style={"marginBottom": "20px"}),
+
+        html.Div(chips, style={"display": "flex", "gap": "10px",
+                                "flexWrap": "wrap", "marginBottom": "20px"}),
+        filter_bar,
         html.Div(id="inst-issue-list"),
-    ], style={"padding": "28px 32px", "maxWidth": "1300px", "margin": "0 auto"})
+    ], style={"padding": "28px 32px", "maxWidth": "1000px", "margin": "0 auto"})
 
 
 def inst_remediation_page(le_books: list[str], role: str = "inst_user") -> html.Div:

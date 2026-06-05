@@ -168,6 +168,13 @@ def _result(valid: int, total: int) -> dict:
             "total": total, "score": _pct(valid, total)}
 
 
+def get_active_rules(db_path: Path | None = None) -> list[dict]:
+    """Return pending user rules that have a condition (need DataFrames to run)."""
+    from dq_rules import get_user_rules
+    return [r for r in get_user_rules(status="pending", db_path=db_path)
+            if (r.get("condition") or "").strip()]
+
+
 def run_all_user_rules(dataframes: dict, valid_le_books: frozenset,
                        db_path: Path | None = None) -> dict:
     """

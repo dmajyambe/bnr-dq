@@ -30,13 +30,11 @@ from pathlib import Path
 
 log = logging.getLogger("dq_issue_tracker")
 
-SCRIPT_DIR       = Path(__file__).parent
-DB_PATH          = SCRIPT_DIR / "dq_rules.db"
-ISSUE_THRESHOLD  = 85.0    # score below this creates / keeps an issue
-SLA_DAYS         = 30      # days until breach
-PENALTY_PCT      = 5.0     # % deducted per penalised issue (logged, not auto-applied to scores)
+SCRIPT_DIR  = Path(__file__).parent
+DB_PATH     = SCRIPT_DIR / "dq_rules.db"
+SLA_DAYS    = 30   # days before SLA warning escalates to overdue
 
-# Urgency: (max_days_inclusive, band_name)
+# Urgency bands — days since detected_at; overdue = past SLA (no penalization, just warning)
 _URGENCY_STEPS = [(3, "new"), (15, "attention"), (20, "urgent"), (30, "critical")]
 
 URGENCY_COLORS = {
@@ -44,10 +42,11 @@ URGENCY_COLORS = {
     "attention": "#D97706",
     "urgent":    "#EA580C",
     "critical":  "#DC2626",
+    "overdue":   "#7C3D1E",
 }
 
 # Notification cadence per urgency band (minimum days between emails)
-_NOTIFY_INTERVAL = {"new": None, "attention": 7, "urgent": 3, "critical": 1}
+_NOTIFY_INTERVAL = {"new": None, "attention": 7, "urgent": 3, "critical": 1, "overdue": 1}
 
 # Completeness: one COMP rule per table (matches dq_rules.py _COMP_TABLE_NAMES)
 _COMP_TABLE_RULE: dict[str, str] = {
@@ -77,20 +76,24 @@ def ensure_tables() -> None:
     try:
         con.executescript("""
             CREATE TABLE IF NOT EXISTS dq_open_issues (
-                issue_id          TEXT PRIMARY KEY,
-                le_book           TEXT NOT NULL,
-                institution_name  TEXT,
-                table_name        TEXT NOT NULL,
-                rule_id           TEXT NOT NULL,
-                dimension         TEXT NOT NULL,
-                failing_rows      INTEGER NOT NULL DEFAULT 0,
-                detected_at       TEXT NOT NULL,
-                sla_deadline      TEXT NOT NULL,
-                urgency_band      TEXT NOT NULL DEFAULT 'new',
-                assigned_to       TEXT,
-                notified_at       TEXT,
-                resolved_at       TEXT,
-                status            TEXT NOT NULL DEFAULT 'open'
+                issue_id           TEXT PRIMARY KEY,
+                le_book            TEXT NOT NULL,
+                institution_name   TEXT,
+                table_name         TEXT NOT NULL,
+                rule_id            TEXT NOT NULL,
+                rule_name          TEXT,
+                dimension          TEXT NOT NULL,
+                failing_rows       INTEGER NOT NULL DEFAULT 0,
+                last_failing_rows  INTEGER,
+                detected_at        TEXT NOT NULL,
+                sla_deadline       TEXT NOT NULL,
+                urgency_band       TEXT NOT NULL DEFAULT 'new',
+                assigned_to        TEXT,
+                notified_at        TEXT,
+                resolved_at        TEXT,
+                resolution_run_id  TEXT,
+                recurrence_count   INTEGER NOT NULL DEFAULT 0,
+                status             TEXT NOT NULL DEFAULT 'open'
             );
 
             CREATE TABLE IF NOT EXISTS dq_penalties (
@@ -114,18 +117,41 @@ def ensure_tables() -> None:
                 updated_at     TEXT
             );
         """)
+        _migrate_schema(con)
         con.commit()
     finally:
         con.close()
 
 
+def _migrate_schema(con: sqlite3.Connection) -> None:
+    """Add columns introduced after initial deploy (idempotent)."""
+    existing = {row[1] for row in
+                con.execute("PRAGMA table_info(dq_open_issues)").fetchall()}
+    additions = {
+        "rule_name":          "TEXT",
+        "last_failing_rows":  "INTEGER",
+        "resolution_run_id":  "TEXT",
+        "recurrence_count":   "INTEGER NOT NULL DEFAULT 0",
+    }
+    for col, defn in additions.items():
+        if col not in existing:
+            con.execute(f"ALTER TABLE dq_open_issues ADD COLUMN {col} {defn}")
+
+
 # ── urgency helpers ────────────────────────────────────────────────────────────
 
-def _urgency_band(detected_at: str) -> str:
+def _urgency_band(detected_at: str, sla_deadline: str | None = None) -> str:
     try:
         days = (date.today() - date.fromisoformat(detected_at)).days
     except Exception:
         return "critical"
+    # Past SLA → overdue warning (no penalization, just escalated label)
+    if sla_deadline:
+        try:
+            if date.today() > date.fromisoformat(sla_deadline):
+                return "overdue"
+        except Exception:
+            pass
     for max_days, band in _URGENCY_STEPS:
         if days <= max_days:
             return band
@@ -139,48 +165,206 @@ def _issue_id(le_book: str, table: str, rule_id: str) -> str:
 
 # ── issue upsert / resolve ─────────────────────────────────────────────────────
 
+def _lookup_rule_name(rule_id: str) -> str:
+    """Return the human-readable rule name from the registry, or the rule_id itself."""
+    try:
+        from dq_rules import (ACC_RULE_META, TIM_RULE_META, VAL_RULE_META,
+                               COMP_RULE_META, REL_RULE_META)
+        all_meta = {**COMP_RULE_META, **ACC_RULE_META, **TIM_RULE_META,
+                    **VAL_RULE_META, **REL_RULE_META}
+        return all_meta.get(rule_id, {}).get("name") or rule_id
+    except Exception:
+        return rule_id
+
+
 def _upsert_issue(con: sqlite3.Connection, le_book: str, inst_name: str,
                   table: str, rule_id: str, dimension: str,
                   failing_rows: int, run_date: str) -> None:
-    iid   = _issue_id(le_book, table, rule_id)
-    today = run_date
+    iid  = _issue_id(le_book, table, rule_id)
+    name = _lookup_rule_name(rule_id)
 
-    row = con.execute(
-        "SELECT issue_id, detected_at FROM dq_open_issues WHERE issue_id=? AND status='open'",
-        (iid,)
+    # ── currently open/penalized → just refresh count ─────────────────────────
+    open_row = con.execute(
+        "SELECT issue_id, detected_at FROM dq_open_issues "
+        "WHERE issue_id=? AND status IN ('open','penalized')",
+        (iid,),
     ).fetchone()
-
-    if row:
-        band = _urgency_band(row["detected_at"])
+    if open_row:
+        band = _urgency_band(open_row["detected_at"])
         con.execute("""
             UPDATE dq_open_issues
-               SET failing_rows=?, urgency_band=?, institution_name=?
+               SET failing_rows=?, last_failing_rows=failing_rows,
+                   urgency_band=?, institution_name=?, rule_name=?
              WHERE issue_id=?
-        """, (failing_rows, band, inst_name, iid))
-    else:
-        deadline = (date.fromisoformat(today) + timedelta(days=SLA_DAYS)).isoformat()
+        """, (failing_rows, band, inst_name, name, iid))
+        return
+
+    # ── recently resolved (≤60 days) → reopen with incremented recurrence ─────
+    resolved_row = con.execute("""
+        SELECT issue_id, recurrence_count FROM dq_open_issues
+        WHERE issue_id=? AND status='resolved'
+          AND resolved_at >= date(?, '-60 days')
+        ORDER BY resolved_at DESC LIMIT 1
+    """, (iid, run_date)).fetchone()
+    if resolved_row:
+        new_recurrence = (resolved_row["recurrence_count"] or 0) + 1
+        deadline = (date.fromisoformat(run_date) + timedelta(days=SLA_DAYS)).isoformat()
         con.execute("""
-            INSERT INTO dq_open_issues
-                (issue_id, le_book, institution_name, table_name, rule_id, dimension,
-                 failing_rows, detected_at, sla_deadline, urgency_band, status)
-            VALUES (?,?,?,?,?,?,?,?,?,'new','open')
-        """, (iid, le_book, inst_name, table, rule_id, dimension, failing_rows, today, deadline))
-        log.info("  NEW ISSUE  %s  %s / %s / %s  (%d failing rows)", le_book, table, rule_id, dimension, failing_rows)
+            UPDATE dq_open_issues
+               SET status='open', failing_rows=?, last_failing_rows=NULL,
+                   detected_at=?, sla_deadline=?, urgency_band='new',
+                   resolved_at=NULL, resolution_run_id=NULL,
+                   recurrence_count=?, institution_name=?, rule_name=?
+             WHERE issue_id=?
+        """, (failing_rows, run_date, deadline, new_recurrence, inst_name, name, iid))
+        log.warning("  REOPENED   %s  %s / %s  (recurrence #%d, %d rows)",
+                    le_book, table, rule_id, new_recurrence, failing_rows)
+        return
+
+    # ── brand new issue ────────────────────────────────────────────────────────
+    deadline = (date.fromisoformat(run_date) + timedelta(days=SLA_DAYS)).isoformat()
+    con.execute("""
+        INSERT OR REPLACE INTO dq_open_issues
+            (issue_id, le_book, institution_name, table_name, rule_id, rule_name,
+             dimension, failing_rows, detected_at, sla_deadline,
+             urgency_band, status, recurrence_count)
+        VALUES (?,?,?,?,?,?,?,?,?,?,'new','open',0)
+    """, (iid, le_book, inst_name, table, rule_id, name,
+          dimension, failing_rows, run_date, deadline))
+    log.info("  NEW ISSUE  %s  %s / %s  (%d rows)", le_book, table, rule_id, failing_rows)
 
 
 def _maybe_resolve(con: sqlite3.Connection, le_book: str, table: str,
                    rule_id: str, run_date: str) -> None:
+    """Pipeline 1 watermark-based tentative resolve — Pipeline 2 confirms."""
     iid = _issue_id(le_book, table, rule_id)
     row = con.execute(
-        "SELECT issue_id FROM dq_open_issues WHERE issue_id=? AND status IN ('open','penalized')",
-        (iid,)
+        "SELECT issue_id FROM dq_open_issues "
+        "WHERE issue_id=? AND status IN ('open','penalized')",
+        (iid,),
     ).fetchone()
     if row:
+        # Mark as pending_resolution so Pipeline 2 does the full-scan confirmation.
         con.execute(
-            "UPDATE dq_open_issues SET status='resolved', resolved_at=? WHERE issue_id=?",
-            (run_date, iid)
+            "UPDATE dq_open_issues SET status='pending_resolution' WHERE issue_id=?",
+            (iid,),
         )
-        log.info("  RESOLVED   %s  %s / %s", le_book, table, rule_id)
+        log.info("  PENDING    %s  %s / %s  (awaiting full-scan confirmation)", le_book, table, rule_id)
+
+
+# ── public resolution API (called by dq_resolution_pipeline.py) ───────────────
+
+def resolve_issue(issue_id: str, run_id: str) -> None:
+    """Mark one issue as resolved after a full-scan confirms zero failing rows."""
+    ensure_tables()
+    today = date.today().isoformat()
+    con   = _conn()
+    try:
+        con.execute("""
+            UPDATE dq_open_issues
+               SET status='resolved', resolved_at=?, resolution_run_id=?
+             WHERE issue_id=? AND status IN ('open','penalized','pending_resolution')
+        """, (today, run_id, issue_id))
+        con.commit()
+    finally:
+        con.close()
+
+
+def reopen_issue(issue_id: str) -> None:
+    """Revert a pending_resolution back to open (full-scan still failing)."""
+    ensure_tables()
+    con = _conn()
+    try:
+        con.execute("""
+            UPDATE dq_open_issues
+               SET status='open'
+             WHERE issue_id=? AND status='pending_resolution'
+        """, (issue_id,))
+        con.commit()
+    finally:
+        con.close()
+
+
+def update_issue_count(issue_id: str, new_failing_rows: int) -> None:
+    """Update the failing row count after a re-scan (partial fix or unchanged)."""
+    ensure_tables()
+    con = _conn()
+    try:
+        con.execute("""
+            UPDATE dq_open_issues
+               SET last_failing_rows = failing_rows,
+                   failing_rows      = ?,
+                   status            = CASE WHEN status='pending_resolution'
+                                            THEN 'open' ELSE status END
+             WHERE issue_id=?
+        """, (new_failing_rows, issue_id))
+        con.commit()
+    finally:
+        con.close()
+
+
+def get_pending_resolution() -> list[dict]:
+    """Return all issues in pending_resolution state (awaiting full-scan)."""
+    ensure_tables()
+    con = _conn()
+    try:
+        rows = con.execute(
+            "SELECT * FROM dq_open_issues WHERE status='pending_resolution'"
+            " ORDER BY table_name, le_book"
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        con.close()
+
+
+def get_issue_by_id(issue_id: str) -> dict | None:
+    """Fetch one issue by primary key, any status."""
+    ensure_tables()
+    con = _conn()
+    try:
+        row = con.execute(
+            "SELECT * FROM dq_open_issues WHERE issue_id=?", (issue_id,)
+        ).fetchone()
+        return dict(row) if row else None
+    finally:
+        con.close()
+
+
+def sync_cr_failing_rows() -> None:
+    """
+    Recompute each active CR's failing_rows as the sum of its linked issues'
+    current counts.  Called at the end of each detection run so the CR list
+    always reflects the latest pipeline numbers.
+    """
+    import json as _json
+    try:
+        import dq_change_request as _cr
+        active_crs = [c for c in _cr.get_crs()
+                      if c["status"] not in ("closed",)]
+        if not active_crs:
+            return
+        con = _conn()
+        try:
+            for cr in active_crs:
+                iids = _json.loads(cr.get("issue_ids") or "[]")
+                if not iids:
+                    continue
+                placeholders = ",".join("?" * len(iids))
+                row = con.execute(
+                    f"SELECT COALESCE(SUM(failing_rows),0) FROM dq_open_issues"
+                    f" WHERE issue_id IN ({placeholders})", iids
+                ).fetchone()
+                total = int(row[0])
+                con.execute(
+                    "UPDATE dq_change_requests SET failing_rows=?, updated_at=?"
+                    " WHERE cr_id=?",
+                    (total, date.today().isoformat(), cr["cr_id"]),
+                )
+            con.commit()
+        finally:
+            con.close()
+    except Exception as exc:
+        log.warning("sync_cr_failing_rows failed: %s", exc)
 
 
 # ── main detection logic ───────────────────────────────────────────────────────
@@ -189,24 +373,25 @@ def detect_and_update_issues(R: dict, categories: dict, run_date: str) -> None:
     """
     Parse engine results (R) and write/update dq_open_issues.
 
-    R keys used: comp, acc, tim, val, rel.
-    An issue is created when a (le_book, table, rule_id) score < ISSUE_THRESHOLD.
-    Issues that are now ≥ threshold are marked resolved.
+    Any rule with invalid > 0 for a given le_book immediately becomes an open issue.
+    Issues where invalid == 0 are marked resolved.
+    No score threshold — one failing row is enough.
     """
     ensure_tables()
     con = _conn()
     try:
         _process_completeness(con, R.get("comp") or {}, categories, run_date)
-        _process_rule_dimension(con, R.get("acc") or {},  "accuracy",   "accuracy_score",   categories, run_date)
-        _process_rule_dimension(con, R.get("tim") or {},  "timeliness", "timeliness_score",  categories, run_date)
-        _process_rule_dimension(con, R.get("val") or {},  "validity",   "validity_score",    categories, run_date)
+        _process_rule_dimension(con, R.get("acc") or {},  "accuracy",    "accuracy_score",   categories, run_date)
+        _process_rule_dimension(con, R.get("val") or {},  "validity",    "validity_score",    categories, run_date)
         _process_relationship(con, R.get("rel") or {}, categories, run_date)
+        _refresh_urgency_bands(con)
         con.commit()
     finally:
         con.close()
 
     total = _count_open()
     log.info("Issue tracker: %d open issue(s) after run %s", total, run_date)
+    sync_cr_failing_rows()
 
 
 def ingest_issues(issues: list[dict], run_date: str) -> None:
@@ -223,15 +408,15 @@ def ingest_issues(issues: list[dict], run_date: str) -> None:
             lb      = item["le_book"]
             table   = item["table"]
             rule_id = item["rule_id"]
-            score   = float(item.get("score", 0))
             failing = int(item.get("failing_rows", 0))
             inst    = item.get("institution_name") or lb.title()
 
-            if score < ISSUE_THRESHOLD and failing > 0:
+            if failing > 0:
                 _upsert_issue(con, lb, inst, table, rule_id,
                               item["dimension"], failing, run_date)
             else:
                 _maybe_resolve(con, lb, table, rule_id, run_date)
+        _refresh_urgency_bands(con)
         con.commit()
     finally:
         con.close()
@@ -243,6 +428,17 @@ def _inst_name(lb: str, categories: dict) -> str:
     return (categories.get(lb, {}).get("name") or lb).title()
 
 
+def _refresh_urgency_bands(con: sqlite3.Connection) -> None:
+    """Recompute urgency_band for all open issues (picks up overdue once SLA passes)."""
+    rows = con.execute(
+        "SELECT issue_id, detected_at, sla_deadline FROM dq_open_issues WHERE status='open'"
+    ).fetchall()
+    for row in rows:
+        band = _urgency_band(row["detected_at"], row["sla_deadline"])
+        con.execute("UPDATE dq_open_issues SET urgency_band=? WHERE issue_id=?",
+                    (band, row["issue_id"]))
+
+
 def _process_completeness(con, report: dict, categories: dict, run_date: str) -> None:
     for table, tdata in report.get("tables", {}).items():
         if tdata.get("status") != "evaluated":
@@ -251,9 +447,8 @@ def _process_completeness(con, report: dict, categories: dict, run_date: str) ->
         if not rule_id:
             continue
         for lb, lb_data in tdata.get("le_book_breakdown", {}).items():
-            score        = float(lb_data.get("completeness_score") or 100.0)
             failing_rows = int(lb_data.get("null_cells") or 0)
-            if score < ISSUE_THRESHOLD and failing_rows > 0:
+            if failing_rows > 0:
                 _upsert_issue(con, lb, _inst_name(lb, categories), table,
                               rule_id, "completeness", failing_rows, run_date)
             else:
@@ -269,19 +464,16 @@ def _process_rule_dimension(con, report: dict, dimension: str, score_key: str,
             inst  = _inst_name(lb, categories)
             rules = lb_data.get("rules", {})
             if not rules:
-                # Older report format without per-rule breakdown — use table-level score
-                score   = float(lb_data.get(score_key) or 100.0)
                 failing = int(lb_data.get("invalid") or lb_data.get("null_cells") or 0)
                 rule_id = f"{dimension[:3].upper()}-ALL"
-                if score < ISSUE_THRESHOLD and failing > 0:
+                if failing > 0:
                     _upsert_issue(con, lb, inst, table, rule_id, dimension, failing, run_date)
                 else:
                     _maybe_resolve(con, lb, table, rule_id, run_date)
                 continue
             for rule_id, rule_data in rules.items():
-                score   = float(rule_data.get(score_key) or 100.0)
                 failing = int(rule_data.get("invalid") or 0)
-                if score < ISSUE_THRESHOLD and failing > 0:
+                if failing > 0:
                     _upsert_issue(con, lb, inst, table, rule_id, dimension, failing, run_date)
                 else:
                     _maybe_resolve(con, lb, table, rule_id, run_date)
@@ -293,9 +485,8 @@ def _process_relationship(con, report: dict, categories: dict, run_date: str) ->
             continue
         for rule_id, rule_data in tdata.get("rules", {}).items():
             for lb, lb_data in rule_data.get("le_book_breakdown", {}).items():
-                score   = float(lb_data.get("ri_score") or 100.0)
                 failing = int(lb_data.get("invalid") or 0)
-                if score < ISSUE_THRESHOLD and failing > 0:
+                if failing > 0:
                     _upsert_issue(con, lb, _inst_name(lb, categories),
                                   table, rule_id, "relationship", failing, run_date)
                 else:
@@ -358,19 +549,31 @@ def _count_open() -> int:
         con.close()
 
 
-def get_open_issues(le_book: str | None = None) -> list[dict]:
-    """Return open issues, optionally filtered to one institution."""
+def get_open_issues(le_book: str | None = None,
+                    include_pending: bool = True) -> list[dict]:
+    """
+    Return actionable issues: open + (optionally) pending_resolution.
+    pending_resolution issues are included by default so callers (CR form,
+    emails, alerts) see the full picture — they are flagged with
+    status='pending_resolution' so the UI can render them differently.
+    """
     ensure_tables()
+    statuses = "('open','penalized','pending_resolution')" if include_pending \
+               else "('open','penalized')"
     con = _conn()
     try:
         if le_book:
             rows = con.execute(
-                "SELECT * FROM dq_open_issues WHERE status='open' AND le_book=? ORDER BY sla_deadline",
-                (le_book,)
+                f"SELECT * FROM dq_open_issues"
+                f" WHERE status IN {statuses} AND le_book=?"
+                f" ORDER BY sla_deadline",
+                (le_book,),
             ).fetchall()
         else:
             rows = con.execute(
-                "SELECT * FROM dq_open_issues WHERE status='open' ORDER BY sla_deadline"
+                f"SELECT * FROM dq_open_issues"
+                f" WHERE status IN {statuses}"
+                f" ORDER BY sla_deadline"
             ).fetchall()
         return [dict(r) for r in rows]
     finally:
@@ -398,7 +601,7 @@ def get_issues(status: str | None = None, le_book: str | None = None) -> list[di
 
 def get_institution_issue_summary() -> dict[str, dict]:
     """
-    Return {le_book: {worst_urgency, total, new, attention, urgent, critical, expiring_in_5}}
+    Return {le_book: {worst_urgency, total, new, attention, urgent, critical, overdue}}
     for all institutions with open issues.
     """
     ensure_tables()
@@ -410,28 +613,135 @@ def get_institution_issue_summary() -> dict[str, dict]:
     finally:
         con.close()
 
-    today    = date.today()
+    today  = date.today()
     summary: dict[str, dict] = {}
-    _order   = ["new", "attention", "urgent", "critical"]
+    _order = ["new", "attention", "urgent", "critical", "overdue"]
 
     for row in rows:
         lb   = row["le_book"]
-        band = _urgency_band(row["detected_at"])
-        days_left = (date.fromisoformat(row["sla_deadline"]) - today).days
+        band = _urgency_band(row["detected_at"], row["sla_deadline"])
 
         if lb not in summary:
             summary[lb] = {"total": 0, "new": 0, "attention": 0,
-                           "urgent": 0, "critical": 0, "expiring_in_5": 0,
+                           "urgent": 0, "critical": 0, "overdue": 0,
                            "worst_urgency": "new"}
         s = summary[lb]
-        s["total"]     += 1
-        s[band]        += 1
-        if days_left <= 5:
-            s["expiring_in_5"] += 1
+        s["total"] += 1
+        s[band]    += 1
         if _order.index(band) > _order.index(s["worst_urgency"]):
             s["worst_urgency"] = band
 
     return summary
+
+
+def get_issues_by_table(
+    status: str = "open",
+    le_book: str | None = None,
+    include_pending: bool = True,
+) -> dict[str, list[dict]]:
+    """
+    Return open (+ pending_resolution) issues grouped by table → rule_id.
+
+    inst_rec fields include: le_book, institution_name, failing_rows,
+    urgency_band, detected_at, sla_deadline, days_left, issue_id,
+    recurrence_count, rule_name, pending (bool — True if pending_resolution).
+    """
+    ensure_tables()
+    statuses = (f"('{status}','pending_resolution')" if include_pending
+                else f"('{status}')")
+    con = _conn()
+    try:
+        clauses = [f"status IN {statuses}"]
+        params: list = []
+        if le_book:
+            clauses.append("le_book=?")
+            params.append(le_book)
+        where = "WHERE " + " AND ".join(clauses)
+        rows  = con.execute(
+            f"SELECT * FROM dq_open_issues {where} ORDER BY sla_deadline", params
+        ).fetchall()
+    finally:
+        con.close()
+
+    today = date.today()
+
+    try:
+        from dq_rules import (ACC_RULE_META, TIM_RULE_META, VAL_RULE_META,
+                               UNI_RULE_META, REL_RULE_META, COMP_RULE_META)
+        _all_meta = {**COMP_RULE_META, **ACC_RULE_META, **TIM_RULE_META,
+                     **VAL_RULE_META, **UNI_RULE_META, **REL_RULE_META}
+    except Exception:
+        _all_meta = {}
+
+    _band_order = ["new", "attention", "urgent", "critical", "overdue"]
+
+    table_rule: dict[str, dict[str, list]] = {}
+    for row in rows:
+        tbl  = row["table_name"]
+        rid  = row["rule_id"]
+        band = _urgency_band(row["detected_at"], row["sla_deadline"])
+        try:
+            days_left = (date.fromisoformat(row["sla_deadline"]) - today).days
+        except Exception:
+            days_left = 0
+
+        # rule_name: stored on the row (from our schema), fall back to registry
+        rname = (row["rule_name"] if row["rule_name"]
+                 else _all_meta.get(rid, {}).get("name", rid))
+
+        inst_rec = {
+            "le_book":          row["le_book"],
+            "institution_name": (row["institution_name"] or row["le_book"]).title(),
+            "failing_rows":     row["failing_rows"],
+            "urgency_band":     band,
+            "detected_at":      row["detected_at"],
+            "sla_deadline":     row["sla_deadline"],
+            "days_left":        days_left,
+            "issue_id":         row["issue_id"],
+            "recurrence_count": int(row["recurrence_count"] or 0),
+            "rule_name":        rname,
+            "pending":          row["status"] == "pending_resolution",
+        }
+        table_rule.setdefault(tbl, {}).setdefault(rid, []).append(inst_rec)
+
+    # Build final structure
+    result: dict[str, list[dict]] = {}
+    for tbl, rules in table_rule.items():
+        rule_list = []
+        for rid, inst_list in rules.items():
+            meta       = _all_meta.get(rid, {})
+            all_bands  = [i["urgency_band"] for i in inst_list]
+            worst      = max(all_bands, key=lambda b: _band_order.index(b)
+                             if b in _band_order else 0)
+            days_vals  = [i["days_left"] for i in inst_list]
+            rule_list.append({
+                "rule_id":            rid,
+                "rule_name":          inst_list[0].get("rule_name") or meta.get("name", rid),
+                "dimension":          inst_list[0].get("dimension",
+                                       rows[0]["dimension"] if rows else ""),
+                "worst_urgency":      worst,
+                "institution_count":  len(inst_list),
+                "total_failing_rows": sum(i["failing_rows"] for i in inst_list),
+                "min_sla_days":       min(days_vals),
+                "sla_overdue":        any(i["urgency_band"] == "overdue" for i in inst_list),
+                "any_pending":        any(i.get("pending") for i in inst_list),
+                "institutions":       sorted(inst_list,
+                                             key=lambda i: _band_order.index(i["urgency_band"])
+                                             if i["urgency_band"] in _band_order else 0,
+                                             reverse=True),
+            })
+
+        # Sort rules: worst urgency first, then most failing rows
+        rule_list.sort(
+            key=lambda r: (_band_order.index(r["worst_urgency"])
+                           if r["worst_urgency"] in _band_order else 0,
+                           r["total_failing_rows"]),
+            reverse=True,
+        )
+        result[tbl] = rule_list
+
+    # Sort tables: most rules first
+    return dict(sorted(result.items(), key=lambda kv: len(kv[1]), reverse=True))
 
 
 # def get_penalties(le_book: str | None = None) -> list[dict]:
@@ -556,8 +866,8 @@ def _build_email(inst_name: str, lb: str, issues: list[dict]) -> tuple[str, str,
         "The report lists every failing row under the same dimension and",
         "rule referenced above — it is your evidence document.",
         "",
-        "Issues not resolved within 30 days of detection attract a",
-        f"{int(PENALTY_PCT)}% compliance score penalty per unresolved issue.",
+        "Issues past their SLA deadline are flagged as OVERDUE and escalate",
+        "to daily notifications until resolved.",
         "",
         "This is an automated notification from the BNR Data Quality",
         "Monitoring System. Do not reply to this message.",
@@ -608,8 +918,8 @@ def _build_email(inst_name: str, lb: str, issues: list[dict]) -> tuple[str, str,
         it is your official evidence document.
       </div>
       <p style="color:#DC2626;font-size:13px">
-        Issues not resolved within 30 days of detection attract a
-        <strong>{int(PENALTY_PCT)}% compliance score penalty</strong> per unresolved issue.
+        Issues past their SLA deadline are flagged as <strong>OVERDUE</strong>
+        and escalate to daily notifications until resolved.
       </p>
     </div>
     <div style="background:#F4F6F9;padding:14px 32px;font-size:11px;color:#6B7280">

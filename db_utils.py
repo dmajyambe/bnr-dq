@@ -1,4 +1,4 @@
-
+#utility module
 from __future__ import annotations
 import logging
 import os
@@ -51,6 +51,7 @@ def get_valid_le_books(engine, schema: str) -> frozenset:
         ) ast ON lb.category_type_at = ast.category_type_at
              AND lb.category_type    = ast.category_type
         WHERE ast.category_type IN ({filter_list})
+        ;
     """)
     try:
         with engine.connect() as conn:
@@ -61,3 +62,4 @@ def get_valid_le_books(engine, schema: str) -> frozenset:
     except Exception as exc:
         log.warning("Could not fetch valid le_books: %s — no filter applied.", exc)
         return frozenset()
+    

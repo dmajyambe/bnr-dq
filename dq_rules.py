@@ -209,183 +209,133 @@ VALID_ACCOUNT_TYPE      = frozenset({
     "CAA", "SBA", "TDA", "SED", "LAA", "OAB", "IP", "TRUSTAC",
     "MPSDC", "MPSDB", "VCOPSDC", "VCOPSDB", "VPPSDC", "VPPSDB",
 })
-CORPORATE_LEGAL_STATUS  = frozenset({3, 4, 5, 6, 7})
-PENSION_ACCOUNT_TYPES   = frozenset({
+CORPORATE_LEGAL_STATUS     = frozenset({3, 4, 5, 6, 7})
+ALL_CORPORATE_LEGAL_STATUS = frozenset({1, 2, 3, 4, 5, 6, 7})
+PENSION_ACCOUNT_TYPES      = frozenset({
     "MPSDC", "MPSDB", "VCOPSDC", "VCOPSDB", "VPPSDC", "VPPSDB",
 })
+INSURANCE_ACCOUNT_TYPES    = frozenset({"IP", "OAB"})
+INSURANCE_STATUS_VALID     = frozenset({0, 1, 2, 4})          # valid for insurance accounts
+VALID_CORP_VISION_SBU      = frozenset({                       # valid SBU codes for corporates
+    "MCEOTHR", "SMLOTHR", "MEDOTHR", "LRGOTHR", "NGO", "SAGRP",
+})
+INSURANCE_LE_BOOKS_GI      = frozenset({                       # general-insurance LE_BOOKs
+    101, 103, 105, 109, 110, 111, 114, 115, 116, 117,
+})
+INSURANCE_LE_BOOKS_LI      = frozenset({102, 104, 106, 117})   # life-insurance LE_BOOKs
+VALID_GI_DEAL_SUB_TYPES    = frozenset({
+    "CMOTINS", "PMOTINS", "ACTHINS", "MEDICL", "LIBINS", "ENGINB",
+    "GUARTE",  "WRKCMP",  "AGRINS",  "LIVSTINS", "OTHMINSP",
+    "MISCEL",  "PROINB",  "TRPINSE", "TRPINSI",
+})
+VALID_LI_DEAL_SUB_TYPES    = frozenset({
+    "TRDLIP", "TRMLIF",  "CRDLIF",   "ENDPLY",    "ANUITY",
+    "DEPPLN", "UNILIF",  "UNTINS",   "TRDPEND",   "UNTEND",
+    "MINSP",  "OTHSAVP", "OTHCLLIFE",
+})
+VALID_INS_CONTRACT_STATUS  = frozenset({0, 1, 2})              # Active/Pre-Matured/Matured
+VALID_LOAN_DEAL_SUB_TYPES  = frozenset({"SHTLON", "MEDLON", "LNGLON"})
+VALID_DEP_DEAL_SUB_TYPES   = frozenset({"SHTDEP", "MEDDEP", "LNGDEP"})
+DORMANCY_DAYS              = 180
+NATIONAL_ID_COMPANY_CODE   = 6                                 # Registration Number — companies only
+REGISTRATION_NUMBER_CODE   = frozenset({6})
 
-ACC_RULE_META: dict[str, dict] = {
-    "ACC-001": {
-        "name":     "LE Book must be a valid BNR-registered institution code",
-        "category": "Code Domain Validity",
-        "fields":   ["le_book"],
-    },
-    "ACC-002": {
-        "name":     "Account Status must be within allowed numeric codes (0–9)",
-        "category": "Code Domain Validity",
-        "fields":   ["account_status"],
-    },
-    "ACC-003": {
-        "name":     "Performance Class must match BNR loan classification codes",
-        "category": "Code Domain Validity",
-        "fields":   ["performance_class"],
-    },
-    "ACC-004": {
-        "name":     "Customer Gender must be M, F, or C only",
-        "category": "Code Domain Validity",
-        "fields":   ["customer_gender"],
-    },
-    "ACC-005": {
-        "name":     "Account Type must be a valid BNR product code",
-        "category": "Code Domain Validity",
-        "fields":   ["account_type"],
-    },
-    "ACC-010": {
-        "name":     "Gender must be C when Legal Status indicates a corporate entity",
-        "category": "Cross-field Consistency",
-        "fields":   ["customer_gender", "legal_status"],
-    },
-    "ACC-011": {
-        "name":     "Pension account types must not appear for RETL segment",
-        "category": "Cross-field Consistency",
-        "fields":   ["account_type", "vision_sbu"],
-    },
-    "ACC-012": {
-        "name":     "Marital Status must be NA for corporate customers",
-        "category": "Cross-field Consistency",
-        "fields":   ["marital_status", "customer_gender"],
-    },
-    "ACC-013": {
-        "name":     "LE Book code must be exactly 3 characters, zero-padded numeric",
-        "category": "Format and Type",
-        "fields":   ["le_book"],
-    },
-}
+# ACC_RULE_META: dict[str, dict] = {
+#     "ACC-004": {
+#         "name":     "Customer Gender must be M, F, or C only",
+#         "category": "Code Domain Validity",
+#         "fields":   ["customer_gender"],
+#     },
+#     "ACC-010": {
+#         "name":     "Gender must be C when Legal Status indicates a corporate entity",
+#         "category": "Cross-field Consistency",
+#         "fields":   ["customer_gender", "legal_status"],
+#     },
+#     "ACC-012": {
+#         "name":     "Marital Status must be NA for corporate customers",
+#         "category": "Cross-field Consistency",
+#         "fields":   ["marital_status", "customer_gender"],
+#     },
+#     "ACC-026": {
+#         "name":     "Individual customers must have a valid marital status (not NA)",
+#         "category": "Cross-field Consistency",
+#         "fields":   ["customer_gender", "marital_status"],
+#     },
+# }
 
-ACCURACY_COLUMNS: dict[str, list[str]] = {
-    "customers_expanded":     ["le_book", "customer_gender", "legal_status", "marital_status"],
-    "accounts":               ["le_book", "account_status", "account_type", "vision_sbu"],
-    "contracts_expanded":     ["le_book", "performance_class"],
-    "contract_loans":         ["le_book", "performance_class"],
-    "contracts_disburse":     ["le_book"],
-    "contract_schedules":     ["le_book"],
-    "loan_applications_2":    ["le_book", "customer_gender"],
-    "prev_loan_applications": ["le_book"],
-}
+# ACCURACY_COLUMNS: dict[str, list[str]] = {
+#     "customers_expanded": [
+#         "le_book", "customer_gender", "legal_status", "marital_status",
+#     ],
+#     "loan_applications_2": ["le_book", "customer_gender"],
+# }
 
-ACC_TABLE_RULES: dict[str, list[str]] = {
-    "customers_expanded":     ["ACC-001", "ACC-004", "ACC-010", "ACC-012", "ACC-013"],
-    "accounts":               ["ACC-001", "ACC-002", "ACC-005", "ACC-011", "ACC-013"],
-    "contracts_expanded":     ["ACC-001", "ACC-003", "ACC-013"],
-    "contract_loans":         ["ACC-001", "ACC-003", "ACC-013"],
-    "contracts_disburse":     ["ACC-001", "ACC-013"],
-    "contract_schedules":     ["ACC-001", "ACC-013"],
-    "loan_applications_2":    ["ACC-001", "ACC-004", "ACC-013"],
-    "prev_loan_applications": ["ACC-001", "ACC-013"],
-}
+# ACC_TABLE_RULES: dict[str, list[str]] = {
+#     "customers_expanded": ["ACC-004", "ACC-010", "ACC-012", "ACC-026"],
+#     "loan_applications_2": ["ACC-004"],
+# }
 
-# ── TIMELINESS ─────────────────────────────────────────────────────────────────
+# timeliness
 
 FRESHNESS_WINDOW_DAYS = 90
 MIN_AGE_AT_OPEN       = 18
 
-TIM_RULE_META: dict[str, dict] = {
-    "TIM-001": {
-        "name":     "Customer open date must not be in the future",
-        "category": "No Future Dates",
-        "fields":   ["customer_open_date"],
-    },
-    "TIM-002": {
-        "name":     "Date of birth must be between 1900-01-01 and today",
-        "category": "No Future Dates",
-        "fields":   ["date_of_birth"],
-    },
-    "TIM-003": {
-        "name":     "Account open date must not be in the future",
-        "category": "No Future Dates",
-        "fields":   ["account_open_date"],
-    },
-    "TIM-004": {
-        "name":     "Record creation date must not be in the future",
-        "category": "No Future Dates",
-        "fields":   ["date_creation"],
-    },
-    "TIM-005": {
-        "name":     "Business date must not be in the future",
-        "category": "No Future Dates",
-        "fields":   ["business_date"],
-    },
-    "TIM-006": {
-        "name":     "Loan approval date must not be in the future",
-        "category": "No Future Dates",
-        "fields":   ["approval_date"],
-    },
-    "TIM-007": {
-        "name":     "Loan application date must not be in the future",
-        "category": "No Future Dates",
-        "fields":   ["application_date"],
-    },
-    "TIM-010": {
-        "name":     "Record creation date must be on or before last modification date",
-        "category": "Logical Date Order",
-        "fields":   ["date_creation", "date_last_modified"],
-    },
-    "TIM-011": {
-        "name":     "Contract start date must be strictly before maturity date",
-        "category": "Logical Date Order",
-        "fields":   ["start_date", "maturity_date"],
-    },
-    "TIM-012": {
-        "name":     "Payment date must be on or after schedule date when payment is recorded",
-        "category": "Logical Date Order",
-        "fields":   ["schedule_date", "payment_date"],
-    },
-    "TIM-013": {
-        "name":     "Insurance commence date must be on or before benefit expiry date",
-        "category": "Logical Date Order",
-        "fields":   ["commence_date", "benefit_expiry_date"],
-    },
-    "TIM-014": {
-        "name":     "Insurance commence date must be on or before insurance expiry date",
-        "category": "Logical Date Order",
-        "fields":   ["commence_date", "ins_expiry_date"],
-    },
-    "TIM-020": {
-        "name":     f"Record must have been modified within the past {FRESHNESS_WINDOW_DAYS} days",
-        "category": "Data Freshness",
-        "fields":   ["date_last_modified"],
-    },
-}
+APPLICATION_SLA_DAYS = 30   # threshold for long-processing / long-response rules
 
-TIMELINESS_COLUMNS: dict[str, list[str]] = {
-    "customers_expanded":     ["le_book", "customer_open_date", "date_of_birth",
-                               "date_creation", "date_last_modified"],
-    "accounts":               ["le_book", "account_open_date",
-                               "date_creation", "date_last_modified"],
-    "contracts_disburse":     ["le_book", "business_date",
-                               "date_creation", "date_last_modified"],
-    "contract_loans":         ["le_book", "approval_date",
-                               "date_creation", "date_last_modified"],
-    "contract_schedules":     ["le_book", "schedule_date", "payment_date",
-                               "date_creation", "date_last_modified"],
-    "contracts_expanded":     ["le_book", "start_date", "maturity_date",
-                               "commence_date", "benefit_expiry_date", "ins_expiry_date",
-                               "date_creation", "date_last_modified"],
-    "loan_applications_2":    ["le_book", "business_date", "application_date"],
-    "prev_loan_applications": ["le_book", "business_date",
-                               "date_creation", "date_last_modified"],
-}
+# TIM_RULE_META: dict[str, dict] = {
+#     "TIM-001": {
+#         "name":     "Customer open date must not be in the future",
+#         "category": "No Future Dates",
+#         "fields":   ["customer_open_date"],
+#     },
+#     "TIM-003": {
+#         "name":     "Account open date must not be in the future",
+#         "category": "No Future Dates",
+#         "fields":   ["account_open_date"],
+#     },
+#     "TIM-004": {
+#         "name":     "Record creation date must not be in the future",
+#         "category": "No Future Dates",
+#         "fields":   ["date_creation"],
+#     },
+#     "TIM-007": {
+#         "name":     "Loan application date must not be in the future",
+#         "category": "No Future Dates",
+#         "fields":   ["application_date"],
+#     },
+#     "TIM-011": {
+#         "name":     "Contract start date must be strictly before maturity date",
+#         "category": "Logical Date Order",
+#         "fields":   ["start_date", "maturity_date"],
+#     },
+#     "TIM-012": {
+#         "name":     "Payment date must be on or after schedule date when payment is recorded",
+#         "category": "Logical Date Order",
+#         "fields":   ["schedule_date", "payment_date"],
+#     },
+# }
 
-TIM_TABLE_RULES: dict[str, list[str]] = {
-    "customers_expanded":     ["TIM-001", "TIM-002", "TIM-004", "TIM-010", "TIM-020"],
-    "accounts":               ["TIM-003", "TIM-004", "TIM-010", "TIM-020"],
-    "contracts_disburse":     ["TIM-004", "TIM-005", "TIM-010", "TIM-020"],
-    "contract_loans":         ["TIM-004", "TIM-006", "TIM-010", "TIM-020"],
-    "contract_schedules":     ["TIM-004", "TIM-010", "TIM-012", "TIM-020"],
-    "contracts_expanded":     ["TIM-004", "TIM-010", "TIM-011", "TIM-013", "TIM-014", "TIM-020"],
-    "loan_applications_2":    ["TIM-005", "TIM-007"],
-    "prev_loan_applications": ["TIM-004", "TIM-005", "TIM-010", "TIM-020"],
-}
+# TIMELINESS_COLUMNS: dict[str, list[str]] = {
+#     "customers_expanded":     ["le_book", "customer_open_date", "date_creation"],
+#     "accounts":               ["le_book", "account_open_date", "date_creation"],
+#     "contracts_disburse":     ["le_book", "date_creation"],
+#     "contract_loans":         ["le_book", "date_creation"],
+#     "contract_schedules":     ["le_book", "schedule_date", "payment_date", "date_creation"],
+#     "contracts_expanded":     ["le_book", "start_date", "maturity_date", "date_creation"],
+#     "loan_applications_2":    ["le_book", "application_date"],
+#     "prev_loan_applications": ["le_book", "date_creation"],
+# }
+
+# TIM_TABLE_RULES: dict[str, list[str]] = {
+#     "customers_expanded":     ["TIM-001", "TIM-004"],
+#     "accounts":               ["TIM-003", "TIM-004"],
+#     "contracts_disburse":     ["TIM-004"],
+#     "contract_loans":         ["TIM-004"],
+#     "contract_schedules":     ["TIM-004", "TIM-012"],
+#     "contracts_expanded":     ["TIM-004", "TIM-011"],
+#     "loan_applications_2":    ["TIM-007"],
+#     "prev_loan_applications": ["TIM-004"],
+# }
 
 # ── VALIDITY ───────────────────────────────────────────────────────────────────
 
@@ -393,46 +343,14 @@ MIN_PHONE_DIGITS  = 7
 MIN_NATIONAL_ID   = 5
 INTEREST_RATE_MAX = 100
 
+MIN_PRINCIPAL_AMOUNT       = 1000
+MAX_CONTRACT_DURATION_DAYS = 366
+
 VAL_RULE_META: dict[str, dict] = {
-    "VAL-001": {
-        "name":     "Email address must match a valid email format",
-        "category": "Format Validity",
-        "fields":   ["email_id"],
-    },
-    "VAL-002": {
-        "name":     f"Phone number must contain at least {MIN_PHONE_DIGITS} digits",
-        "category": "Format Validity",
-        "fields":   ["work_telephone", "home_telephone"],
-    },
-    "VAL-003": {
-        "name":     "Currency code must be a 3-letter uppercase ISO 4217 code",
-        "category": "Format Validity",
-        "fields":   ["currency", "mis_currency"],
-    },
-    "VAL-004": {
-        "name":     f"National ID number must be at least {MIN_NATIONAL_ID} characters when ID type is set",
-        "category": "Format Validity",
-        "fields":   ["national_id_number", "national_id_type"],
-    },
-    "VAL-010": {
-        "name":     f"Debit interest rate must be between 0 and {INTEREST_RATE_MAX}%",
-        "category": "Range Validity",
-        "fields":   ["interest_rate_dr"],
-    },
-    "VAL-011": {
-        "name":     f"Credit interest rate must be between 0 and {INTEREST_RATE_MAX}%",
-        "category": "Range Validity",
-        "fields":   ["interest_rate_cr"],
-    },
     "VAL-012": {
         "name":     "Disbursement amounts must be non-negative",
         "category": "Range Validity",
         "fields":   ["current_disbursed_amt", "previous_disbursed_amt"],
-    },
-    "VAL-013": {
-        "name":     "EMI / scheduled payment amount must be greater than zero",
-        "category": "Range Validity",
-        "fields":   ["emi_amount"],
     },
     "VAL-014": {
         "name":     "Outstanding and due amounts must be non-negative",
@@ -461,117 +379,103 @@ VAL_RULE_META: dict[str, dict] = {
         "category": "Cross-field Validity",
         "fields":   ["approved_amount_lcy", "applied_amount_lcy"],
     },
-    "VAL-022": {
-        "name":     f"Customer must be at least {MIN_AGE_AT_OPEN} years old at account open date",
+    "VAL-025": {
+        "name":     "Principal outstanding must not exceed disbursed amount",
         "category": "Cross-field Validity",
-        "fields":   ["date_of_birth", "customer_open_date"],
+        "fields":   ["prin_outstanding_amt_lcy", "disbursed_amount"],
+    },
+    "VAL-026": {
+        "name":     "Non-normal loans must have a valid past-due date (year > 1900)",
+        "category": "Cross-field Validity",
+        "fields":   ["performance_class", "date_past_due"],
     },
 }
 
 VALIDITY_COLUMNS: dict[str, list[str]] = {
-    "customers_expanded":  ["le_book", "email_id", "work_telephone", "home_telephone",
-                            "national_id_number", "national_id_type",
-                            "date_of_birth", "customer_open_date"],
-    "accounts":            ["le_book", "currency", "interest_rate_dr", "interest_rate_cr"],
-    "contracts_disburse":  ["le_book", "currency",
-                            "current_disbursed_amt", "previous_disbursed_amt"],
-    "contract_loans":      ["le_book", "interest_rate_dr", "emi_amount",
-                            "outstanding_amount_lcy", "num_of_instalments",
-                            "num_instalments_paid"],
-    "contract_schedules":  ["le_book", "emi_amount", "due_amount", "outstanding_amount",
-                            "principal_amount_due", "int_amount_due"],
-    "contracts_expanded":  ["le_book", "currency", "mis_currency",
-                            "interest_rate_dr", "interest_rate_cr",
-                            "principal_amount_lcy"],
-    "loan_applications_2": ["le_book", "currency",
-                            "applied_amount_lcy", "approved_amount_lcy"],
+    "contracts_disburse": [
+        "le_book", "current_disbursed_amt", "previous_disbursed_amt",
+    ],
+    "contract_loans": [
+        "le_book", "outstanding_amount_lcy", "due_amount",
+        "num_of_instalments", "num_instalments_paid",
+        "prin_outstanding_amt_lcy", "disbursed_amount",
+        "performance_class", "date_past_due",
+    ],
+    "contract_schedules": [
+        "le_book", "outstanding_amount", "principal_amount_due", "int_amount_due",
+    ],
+    "contracts_expanded": [
+        "le_book", "outstanding_amount_lcy", "outstanding_amount", "principal_amount_lcy",
+    ],
+    "loan_applications_2": [
+        "le_book", "applied_amount_lcy", "approved_amount_lcy",
+    ],
 }
 
 VAL_TABLE_RULES: dict[str, list[str]] = {
-    "customers_expanded":  ["VAL-001", "VAL-002", "VAL-004", "VAL-022"],
-    "accounts":            ["VAL-003", "VAL-010", "VAL-011"],
-    "contracts_disburse":  ["VAL-003", "VAL-012"],
-    "contract_loans":      ["VAL-010", "VAL-013", "VAL-014", "VAL-016", "VAL-020"],
-    "contract_schedules":  ["VAL-013", "VAL-014"],
-    "contracts_expanded":  ["VAL-003", "VAL-010", "VAL-011", "VAL-014"],
-    "loan_applications_2": ["VAL-003", "VAL-015", "VAL-021"],
+    "contracts_disburse":  ["VAL-012"],
+    "contract_loans":      ["VAL-014", "VAL-016", "VAL-020", "VAL-025", "VAL-026"],
+    "contract_schedules":  ["VAL-014"],
+    "contracts_expanded":  ["VAL-014"],
+    "loan_applications_2": ["VAL-015", "VAL-021"],
 }
+
+# ── UNIQUENESS ─────────────────────────────────────────────────────────────────
+
+UNI_RULE_META: dict[str, dict] = {}
+
+UNIQUENESS_COLUMNS: dict[str, list[str]] = {}
+
+UNI_TABLE_RULES: dict[str, list[str]] = {}
 
 # ── RELATIONSHIP ───────────────────────────────────────────────────────────────
 
 REL_RULE_META: dict[str, dict] = {
-    "REL-001": {
-        "name":         "Every account must reference a known customer",
-        "category":     "Referential Integrity",
-        "child_table":  "accounts",
-        "child_col":    "customer_id",
-        "parent_table": "customers_expanded",
-        "parent_col":   "customer_id",
-        "nullable":     False,
-    },
-    "REL-002": {
-        "name":         "Every contract must reference a known customer",
-        "category":     "Referential Integrity",
-        "child_table":  "contracts_expanded",
-        "child_col":    "customer_id",
-        "parent_table": "customers_expanded",
-        "parent_col":   "customer_id",
-        "nullable":     False,
-    },
-    "REL-003": {
-        "name":         "Every loan application must reference a known customer",
-        "category":     "Referential Integrity",
-        "child_table":  "loan_applications_2",
-        "child_col":    "customer_id",
-        "parent_table": "customers_expanded",
-        "parent_col":   "customer_id",
-        "nullable":     False,
-    },
-    "REL-004": {
-        "name":         "Every contract-loan detail must reference a known contract",
-        "category":     "Referential Integrity",
-        "child_table":  "contract_loans",
-        "child_col":    "contract_sequence_number",
-        "parent_table": "contracts_expanded",
-        "parent_col":   "contract_sequence_number",
-        "nullable":     False,
-    },
-    "REL-005": {
-        "name":         "Every payment schedule must reference a known contract",
-        "category":     "Referential Integrity",
-        "child_table":  "contract_schedules",
-        "child_col":    "contract_sequence_number",
-        "parent_table": "contracts_expanded",
-        "parent_col":   "contract_sequence_number",
-        "nullable":     False,
-    },
-    "REL-006": {
-        "name":         "Every disbursement record must reference a known contract",
-        "category":     "Referential Integrity",
-        "child_table":  "contracts_disburse",
-        "child_col":    "contract_id",
-        "parent_table": "contracts_expanded",
-        "parent_col":   "contract_id",
-        "nullable":     False,
-    },
-    "REL-007": {
-        "name":         "Every previous-application record must reference a known current application",
-        "category":     "Referential Integrity",
-        "child_table":  "prev_loan_applications",
-        "child_col":    "loan_application_id",
-        "parent_table": "loan_applications_2",
-        "parent_col":   "loan_application_id",
-        "nullable":     False,
-    },
-    "REL-008": {
-        "name":         "Contract linked application ID, when present, must reference a known loan application",
-        "category":     "Optional Reference",
-        "child_table":  "contracts_expanded",
-        "child_col":    "loan_application_id",
-        "parent_table": "loan_applications_2",
-        "parent_col":   "loan_application_id",
-        "nullable":     True,
-    },
+    # "REL-001": {
+    #     "name":         "Every account must reference a known customer",
+    #     "category":     "Referential Integrity",
+    #     "child_table":  "accounts",
+    #     "child_col":    "customer_id",
+    #     "parent_table": "customers_expanded",
+    #     "parent_col":   "customer_id",
+    #     "nullable":     False,
+    # },
+    # "REL-002": {
+    #     "name":         "Every contract must reference a known customer",
+    #     "category":     "Referential Integrity",
+    #     "child_table":  "contracts_expanded",
+    #     "child_col":    "customer_id",
+    #     "parent_table": "customers_expanded",
+    #     "parent_col":   "customer_id",
+    #     "nullable":     False,
+    # },
+    # "REL-003": {
+    #     "name":         "Every loan application must reference a known customer",
+    #     "category":     "Referential Integrity",
+    #     "child_table":  "loan_applications_2",
+    #     "child_col":    "customer_id",
+    #     "parent_table": "customers_expanded",
+    #     "parent_col":   "customer_id",
+    #     "nullable":     False,
+    # },
+    # "REL-006": {
+    #     "name":         "Every disbursement record must reference a known contract",
+    #     "category":     "Referential Integrity",
+    #     "child_table":  "contracts_disburse",
+    #     "child_col":    "contract_id",
+    #     "parent_table": "contracts_expanded",
+    #     "parent_col":   "contract_id",
+    #     "nullable":     False,
+    # },
+    # "REL-007": {
+    #     "name":         "Every previous-application record must reference a known current application",
+    #     "category":     "Referential Integrity",
+    #     "child_table":  "prev_loan_applications",
+    #     "child_col":    "loan_application_id",
+    #     "parent_table": "loan_applications_2",
+    #     "parent_col":   "loan_application_id",
+    #     "nullable":     False,
+    # },
 }
 
 # ── FLAT TABLE ─────────────────────────────────────────────────────────────────
@@ -592,28 +496,28 @@ def _build_rows() -> list[dict]:
         })
 
     # accuracy
-    for rid, meta in ACC_RULE_META.items():
-        tables = sorted({t for t, rules in ACC_TABLE_RULES.items() if rid in rules})
-        rows.append({
-            "rule_id":   rid,
-            "dimension": "accuracy",
-            "category":  meta["category"],
-            "rule_name": meta["name"],
-            "tables":    ", ".join(tables),
-            "fields":    ", ".join(meta["fields"]),
-        })
+    # for rid, meta in ACC_RULE_META.items():
+    #     tables = sorted({t for t, rules in ACC_TABLE_RULES.items() if rid in rules})
+    #     rows.append({
+    #         "rule_id":   rid,
+    #         "dimension": "accuracy",
+    #         "category":  meta["category"],
+    #         "rule_name": meta["name"],
+    #         "tables":    ", ".join(tables),
+    #         "fields":    ", ".join(meta["fields"]),
+    #     })
 
     # timeliness
-    for rid, meta in TIM_RULE_META.items():
-        tables = sorted({t for t, rules in TIM_TABLE_RULES.items() if rid in rules})
-        rows.append({
-            "rule_id":   rid,
-            "dimension": "timeliness",
-            "category":  meta["category"],
-            "rule_name": meta["name"],
-            "tables":    ", ".join(tables),
-            "fields":    ", ".join(meta["fields"]),
-        })
+    # for rid, meta in TIM_RULE_META.items():
+    #     tables = sorted({t for t, rules in TIM_TABLE_RULES.items() if rid in rules})
+    #     rows.append({
+    #         "rule_id":   rid,
+    #         "dimension": "timeliness",
+    #         "category":  meta["category"],
+    #         "rule_name": meta["name"],
+    #         "tables":    ", ".join(tables),
+    #         "fields":    ", ".join(meta["fields"]),
+    #     })
 
     # validity
     for rid, meta in VAL_RULE_META.items():
@@ -627,11 +531,23 @@ def _build_rows() -> list[dict]:
             "fields":    ", ".join(meta["fields"]),
         })
 
-    # referential-integrity rules — classified under accuracy
+    # uniqueness
+    for rid, meta in UNI_RULE_META.items():
+        tables = sorted({t for t, rules in UNI_TABLE_RULES.items() if rid in rules})
+        rows.append({
+            "rule_id":   rid,
+            "dimension": "uniqueness",
+            "category":  meta["category"],
+            "rule_name": meta["name"],
+            "tables":    ", ".join(tables),
+            "fields":    ", ".join(meta["fields"]),
+        })
+
+    # referential-integrity rules — classified under relationship
     for rid, meta in REL_RULE_META.items():
         rows.append({
             "rule_id":   rid,
-            "dimension": "accuracy",
+            "dimension": "relationship",
             "category":  meta["category"],
             "rule_name": meta["name"],
             "tables":    f"{meta['child_table']} → {meta['parent_table']}",

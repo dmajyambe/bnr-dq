@@ -50,10 +50,22 @@ if [ $EXIT_CODE -eq 0 ]; then
 
     if [ $REPORTS_CODE -eq 0 ]; then
         echo "Stage 2 finished: $(date '+%Y-%m-%d %H:%M:%S')" >> "$LOG"
-        STATUS="success"
     else
         echo "Stage 2 FAILED (exit $REPORTS_CODE) — scores/tracker unaffected." >> "$LOG"
-        STATUS="success"   # Stage 1 succeeded; reports failure doesn't break monitoring
+    fi
+
+    # ── Stage 3: resolution scanner — full-table re-scan of pending issues ────
+    # Runs regardless of Stage 2 outcome (scores are already written by Stage 1).
+    echo "Stage 3 (resolution): full-scan confirmation of pending resolutions …" >> "$LOG"
+    /usr/bin/python3 dq_resolution_pipeline.py >> "$LOG" 2>&1
+    RESOLUTION_CODE=$?
+
+    if [ $RESOLUTION_CODE -eq 0 ]; then
+        echo "Stage 3 finished: $(date '+%Y-%m-%d %H:%M:%S')" >> "$LOG"
+        STATUS="success"
+    else
+        echo "Stage 3 FAILED (exit $RESOLUTION_CODE) — open issues left in pending_resolution." >> "$LOG"
+        STATUS="success"   # Stage 1 succeeded; resolution failure doesn't break monitoring
     fi
 else
     STATUS="failed"

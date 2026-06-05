@@ -33,6 +33,7 @@ INTEREST_RATE_MAX = 100  # maximum plausible interest rate (%)
 
 from dq_rules import (  # noqa: E402
     MIN_PHONE_DIGITS, MIN_NATIONAL_ID, INTEREST_RATE_MAX, MIN_AGE_AT_OPEN,
+    MIN_PRINCIPAL_AMOUNT, MAX_CONTRACT_DURATION_DAYS,
     VAL_RULE_META as RULE_META,
     VALIDITY_COLUMNS,
     VAL_TABLE_RULES as TABLE_RULES,
@@ -301,6 +302,124 @@ def run_rule(rule_id: str, df: pd.DataFrame) -> Optional[tuple[int, int, int]]:
         valid = int(valid_mask.sum())
         return valid, total - valid, total
 
+    if rule_id == "VAL-023":
+        if "renewal_policy_flag" not in df.columns: return None
+        s = df["renewal_policy_flag"].dropna().astype(str).str.strip().str.upper()
+        if s.empty: return None
+        valid = int(s.isin({"Y", "N"}).sum())
+        return valid, len(s) - valid, len(s)
+
+    if rule_id == "VAL-024":
+        if "policy_written_thru" not in df.columns: return None
+        s = pd.to_numeric(df["policy_written_thru"], errors="coerce").dropna()
+        if s.empty: return None
+        valid = int(s.isin({1, 2, 3}).sum())
+        return valid, len(s) - valid, len(s)
+
+    if rule_id == "VAL-025":
+        needed = ["prin_outstanding_amt_lcy", "disbursed_amount"]
+        if not all(c in df.columns for c in needed): return None
+        po = pd.to_numeric(df["prin_outstanding_amt_lcy"], errors="coerce")
+        da = pd.to_numeric(df["disbursed_amount"],         errors="coerce")
+        pair = pd.DataFrame({"po": po, "da": da}).dropna()
+        if pair.empty: return None
+        valid = int((pair["po"] <= pair["da"]).sum())
+        return valid, len(pair) - valid, len(pair)
+
+    if rule_id == "VAL-026":
+        needed = ["performance_class", "date_past_due"]
+        if not all(c in df.columns for c in needed): return None
+        pc  = df["performance_class"].astype(str).str.strip().str.upper()
+        dpd = pd.to_datetime(df["date_past_due"], errors="coerce", utc=False)
+        if getattr(dpd.dt, "tz", None): dpd = dpd.dt.tz_localize(None)
+        scope = pd.DataFrame({"pc": pc, "dpd": dpd})[pc != "NL"].copy()
+        if scope.empty: return None
+        valid_mask = scope["dpd"].notna() & (scope["dpd"].dt.year > 1900)
+        total = len(scope)
+        return int(valid_mask.sum()), total - int(valid_mask.sum()), total
+
+    if rule_id == "VAL-027":
+        needed = ["principal_amount_lcy", "contract_status"]
+        if not all(c in df.columns for c in needed): return None
+        cs = pd.to_numeric(df["contract_status"], errors="coerce")
+        s  = pd.to_numeric(df.loc[cs.isin({0, 6}), "principal_amount_lcy"], errors="coerce").dropna()
+        if s.empty: return None
+        valid = int((s >= 1).sum())
+        return valid, len(s) - valid, len(s)
+
+    if rule_id == "VAL-028":
+        needed = ["start_date", "maturity_date"]
+        if not all(c in df.columns for c in needed): return None
+        sd = pd.to_datetime(df["start_date"],    errors="coerce", utc=False)
+        md = pd.to_datetime(df["maturity_date"], errors="coerce", utc=False)
+        if getattr(sd.dt, "tz", None): sd = sd.dt.tz_localize(None)
+        if getattr(md.dt, "tz", None): md = md.dt.tz_localize(None)
+        pair = pd.DataFrame({"sd": sd, "md": md}).dropna()
+        if pair.empty: return None
+        days = (pair["md"] - pair["sd"]).dt.days
+        valid = int((days <= MAX_CONTRACT_DURATION_DAYS).sum())
+        return valid, len(pair) - valid, len(pair)
+
+    if rule_id == "VAL-029":
+        if "principal_amount_lcy" not in df.columns: return None
+        s = pd.to_numeric(df["principal_amount_lcy"], errors="coerce").dropna()
+        if s.empty: return None
+        valid = int((s >= MIN_PRINCIPAL_AMOUNT).sum())
+        return valid, len(s) - valid, len(s)
+
+    if rule_id == "VAL-030":
+        needed = ["contract_administrative_fee", "principal_amount_lcy"]
+        if not all(c in df.columns for c in needed): return None
+        fee  = pd.to_numeric(df["contract_administrative_fee"], errors="coerce")
+        prin = pd.to_numeric(df["principal_amount_lcy"],        errors="coerce")
+        scope = pd.DataFrame({"fee": fee, "prin": prin})
+        scope = scope[scope["prin"] >= MIN_PRINCIPAL_AMOUNT].dropna()
+        if scope.empty: return None
+        valid = int((scope["fee"] <= scope["prin"]).sum())
+        return valid, len(scope) - valid, len(scope)
+
+    if rule_id == "VAL-031":
+        needed = ["sum_insured", "principal_amount_lcy"]
+        if not all(c in df.columns for c in needed): return None
+        si   = pd.to_numeric(df["sum_insured"],          errors="coerce")
+        prin = pd.to_numeric(df["principal_amount_lcy"], errors="coerce")
+        pair = pd.DataFrame({"si": si, "prin": prin}).dropna()
+        if pair.empty: return None
+        valid = int((pair["si"] > pair["prin"]).sum())
+        return valid, len(pair) - valid, len(pair)
+
+    if rule_id == "VAL-032":
+        needed = ["sum_insured", "sum_reassured"]
+        if not all(c in df.columns for c in needed): return None
+        si = pd.to_numeric(df["sum_insured"],   errors="coerce")
+        sr = pd.to_numeric(df["sum_reassured"], errors="coerce")
+        pair = pd.DataFrame({"si": si, "sr": sr}).dropna()
+        if pair.empty: return None
+        valid = int((pair["si"] > pair["sr"]).sum())
+        return valid, len(pair) - valid, len(pair)
+
+    if rule_id == "VAL-033":
+        needed = ["customer_tin", "customer_gender"]
+        if not all(c in df.columns for c in needed): return None
+        is_corp = df["customer_gender"].astype(str).str.strip().str.upper() == "C"
+        scope   = df[is_corp & df["customer_tin"].notna()].copy()
+        if scope.empty: return None
+        tin = scope["customer_tin"].astype(str).str.strip().str.replace(r"\D", "", regex=True)
+        valid_mask = (tin.str.len() == 9) & tin.str.startswith("1")
+        total = len(scope)
+        return int(valid_mask.sum()), total - int(valid_mask.sum()), total
+
+    if rule_id == "VAL-034":
+        needed = ["application_status", "rejection_reason"]
+        if not all(c in df.columns for c in needed): return None
+        status   = df["application_status"].astype(str).str.strip().str.upper()
+        rejected = df[status == "R"].copy()
+        if rejected.empty: return None
+        has_reason = rejected["rejection_reason"].notna() & \
+                     (rejected["rejection_reason"].astype(str).str.strip() != "")
+        total = len(rejected)
+        return int(has_reason.sum()), total - int(has_reason.sum()), total
+
     log.warning("Unknown rule_id: %s", rule_id)
     return None
 
@@ -414,6 +533,83 @@ def run_rule_mask(rule_id: str, df: pd.DataFrame) -> pd.Series:
             open_ = open_.dt.tz_localize(None)
         age_days = (open_ - dob).dt.days
         return dob.notna() & open_.notna() & (age_days < (MIN_AGE_AT_OPEN * 365))
+
+    if rule_id == "VAL-023":
+        if "renewal_policy_flag" not in df.columns: return false
+        s = df["renewal_policy_flag"].astype(str).str.strip().str.upper()
+        return df["renewal_policy_flag"].notna() & ~s.isin({"Y", "N"})
+
+    if rule_id == "VAL-024":
+        if "policy_written_thru" not in df.columns: return false
+        s = pd.to_numeric(df["policy_written_thru"], errors="coerce")
+        return s.notna() & ~s.isin({1, 2, 3})
+
+    if rule_id == "VAL-025":
+        if not all(c in df.columns for c in ["prin_outstanding_amt_lcy", "disbursed_amount"]): return false
+        po = pd.to_numeric(df["prin_outstanding_amt_lcy"], errors="coerce")
+        da = pd.to_numeric(df["disbursed_amount"],         errors="coerce")
+        return po.notna() & da.notna() & (po > da)
+
+    if rule_id == "VAL-026":
+        if not all(c in df.columns for c in ["performance_class", "date_past_due"]): return false
+        pc  = df["performance_class"].astype(str).str.strip().str.upper()
+        dpd = pd.to_datetime(df["date_past_due"], errors="coerce", utc=False)
+        if getattr(dpd.dt, "tz", None): dpd = dpd.dt.tz_localize(None)
+        non_nl = pc != "NL"
+        invalid_dpd = dpd.isna() | (dpd.dt.year <= 1900)
+        return non_nl & invalid_dpd
+
+    if rule_id == "VAL-027":
+        if not all(c in df.columns for c in ["principal_amount_lcy", "contract_status"]): return false
+        cs = pd.to_numeric(df["contract_status"], errors="coerce")
+        s  = pd.to_numeric(df["principal_amount_lcy"], errors="coerce")
+        return cs.isin({0, 6}) & s.notna() & (s < 1)
+
+    if rule_id == "VAL-028":
+        if not all(c in df.columns for c in ["start_date", "maturity_date"]): return false
+        sd = pd.to_datetime(df["start_date"],    errors="coerce", utc=False)
+        md = pd.to_datetime(df["maturity_date"], errors="coerce", utc=False)
+        if getattr(sd.dt, "tz", None): sd = sd.dt.tz_localize(None)
+        if getattr(md.dt, "tz", None): md = md.dt.tz_localize(None)
+        days = (md - sd).dt.days
+        return sd.notna() & md.notna() & (days > MAX_CONTRACT_DURATION_DAYS)
+
+    if rule_id == "VAL-029":
+        if "principal_amount_lcy" not in df.columns: return false
+        s = pd.to_numeric(df["principal_amount_lcy"], errors="coerce")
+        return s.notna() & (s < MIN_PRINCIPAL_AMOUNT)
+
+    if rule_id == "VAL-030":
+        if not all(c in df.columns for c in ["contract_administrative_fee", "principal_amount_lcy"]): return false
+        fee  = pd.to_numeric(df["contract_administrative_fee"], errors="coerce")
+        prin = pd.to_numeric(df["principal_amount_lcy"],        errors="coerce")
+        return prin.notna() & (prin >= MIN_PRINCIPAL_AMOUNT) & fee.notna() & (fee > prin)
+
+    if rule_id == "VAL-031":
+        if not all(c in df.columns for c in ["sum_insured", "principal_amount_lcy"]): return false
+        si   = pd.to_numeric(df["sum_insured"],          errors="coerce")
+        prin = pd.to_numeric(df["principal_amount_lcy"], errors="coerce")
+        return si.notna() & prin.notna() & (si <= prin)
+
+    if rule_id == "VAL-032":
+        if not all(c in df.columns for c in ["sum_insured", "sum_reassured"]): return false
+        si = pd.to_numeric(df["sum_insured"],   errors="coerce")
+        sr = pd.to_numeric(df["sum_reassured"], errors="coerce")
+        return si.notna() & sr.notna() & (si <= sr)
+
+    if rule_id == "VAL-033":
+        if not all(c in df.columns for c in ["customer_tin", "customer_gender"]): return false
+        is_corp = df["customer_gender"].astype(str).str.strip().str.upper() == "C"
+        tin = df["customer_tin"].astype(str).str.strip().str.replace(r"\D", "", regex=True)
+        valid_tin = (tin.str.len() == 9) & tin.str.startswith("1")
+        return is_corp & df["customer_tin"].notna() & ~valid_tin
+
+    if rule_id == "VAL-034":
+        if not all(c in df.columns for c in ["application_status", "rejection_reason"]): return false
+        status = df["application_status"].astype(str).str.strip().str.upper()
+        no_reason = df["rejection_reason"].isna() | \
+                    (df["rejection_reason"].astype(str).str.strip() == "")
+        return (status == "R") & no_reason
 
     return false
 

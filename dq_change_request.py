@@ -99,6 +99,17 @@ def ensure_table() -> None:
             );
         """)
         con.commit()
+        # Schema migration: add tables and table_approvals columns if missing
+        existing = {row[1] for row in
+                    con.execute("PRAGMA table_info(dq_change_requests)").fetchall()}
+        additions = {
+            "tables":          "TEXT DEFAULT '[]'",
+            "table_approvals": "TEXT DEFAULT '{}'",
+        }
+        for col, defn in additions.items():
+            if col not in existing:
+                con.execute(f"ALTER TABLE dq_change_requests ADD COLUMN {col} {defn}")
+        con.commit()
     finally:
         con.close()
 
@@ -122,7 +133,7 @@ def _next_cr_id() -> str:
 # ── CRUD ──────────────────────────────────────────────────────────────────────
 
 def create_cr(
-    issue_ids:        list[str],
+    tables:           list[str],
     le_book:          str,
     institution_name: str,
     title:            str,
@@ -140,14 +151,37 @@ def create_cr(
     ensure_table()
     now   = datetime.utcnow().strftime("%Y-%m-%d")
     cr_id = _next_cr_id()
-    con   = _conn()
+
+    # Build per-table approval state
+    table_approvals = {
+        tbl: {"status": "pending", "approved_at": None, "approved_by": None}
+        for tbl in tables
+    }
+
+    # Derive issue_ids from open issues for this le_book + tables
+    issue_ids: list[str] = []
+    if tables:
+        try:
+            con_q = _conn()
+            placeholders = ",".join("?" * len(tables))
+            rows = con_q.execute(
+                f"SELECT issue_id FROM dq_open_issues WHERE le_book=? AND table_name IN ({placeholders})",
+                [le_book] + list(tables),
+            ).fetchall()
+            issue_ids = [r[0] for r in rows]
+            con_q.close()
+        except Exception as exc:
+            log.warning("Could not derive issue_ids for CR %s: %s", cr_id, exc)
+            issue_ids = []
+
+    con = _conn()
     try:
         con.execute("""
             INSERT INTO dq_change_requests
                 (cr_id, title, description, issue_ids, le_book, institution_name,
                  dimension, assigned_to, created_by, created_at, updated_at,
-                 target_date, status, failing_rows)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,'open',?)
+                 target_date, status, failing_rows, tables, table_approvals)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,'open',?,?,?)
         """, (
             cr_id,
             title.strip(),
@@ -161,6 +195,8 @@ def create_cr(
             now, now,
             (target_date or ""),
             failing_rows,
+            json.dumps(tables),
+            json.dumps(table_approvals),
         ))
         con.commit()
         log.info("CR created: %s  (%s / %s)", cr_id, le_book, title)
@@ -313,6 +349,123 @@ def get_stats() -> dict[str, int]:
         return {r["status"]: r["n"] for r in rows}
     finally:
         con.close()
+
+
+def approve_table(cr_id: str, table_name: str, actor: str = "") -> tuple[bool, str]:
+    """
+    Mark one table within a CR as approved.
+    If all tables are now approved, auto-transitions the CR to 'approved'.
+    Returns (ok, message).
+    """
+    cr = get_cr(cr_id)
+    if not cr:
+        return False, f"CR {cr_id} not found."
+
+    try:
+        table_approvals: dict = json.loads(cr.get("table_approvals") or "{}")
+    except Exception:
+        table_approvals = {}
+
+    if table_name not in table_approvals:
+        return False, f"Table '{table_name}' is not part of CR {cr_id}."
+
+    table_approvals[table_name] = {
+        "status":      "approved",
+        "approved_at": date.today().isoformat(),
+        "approved_by": actor,
+    }
+
+    now = datetime.utcnow().strftime("%Y-%m-%d")
+    con = _conn()
+    try:
+        con.execute(
+            "UPDATE dq_change_requests SET table_approvals=?, updated_at=? WHERE cr_id=?",
+            (json.dumps(table_approvals), now, cr_id),
+        )
+        con.commit()
+    finally:
+        con.close()
+
+    log.info("CR %s: table '%s' approved by %s", cr_id, table_name, actor or "—")
+
+    # If every table is now approved, auto-transition CR to approved
+    all_approved = all(v.get("status") == "approved" for v in table_approvals.values())
+    if all_approved and table_approvals:
+        update_status(cr_id, "approved", actor=actor, notes="All tables approved")
+        return True, f"Table '{table_name}' approved — CR {cr_id} fully approved."
+
+    pending = [t for t, v in table_approvals.items() if v.get("status") != "approved"]
+    return True, f"Table '{table_name}' approved. Still pending: {', '.join(pending)}."
+
+
+def auto_close_approved_crs(run_id: str = "") -> list[str]:
+    """
+    After a resolution scan, close any 'approved' CR whose every linked table
+    has been approved (or all linked issues are resolved for backward compat).
+    Returns the list of cr_ids that were auto-closed.
+    """
+    import json as _json
+
+    closed: list[str] = []
+    for cr in get_crs(status="approved"):
+        # Primary check: table_approvals
+        tables_raw = cr.get("tables") or "[]"
+        try:
+            tables_list = _json.loads(tables_raw)
+        except Exception:
+            tables_list = []
+
+        if tables_list:
+            try:
+                table_approvals = _json.loads(cr.get("table_approvals") or "{}")
+            except Exception:
+                table_approvals = {}
+            all_done = all(
+                table_approvals.get(t, {}).get("status") == "approved"
+                for t in tables_list
+            )
+        else:
+            # Backward compat: fall back to issue_ids check
+            from dq_issue_tracker import get_issue_by_id
+            iids = _json.loads(cr.get("issue_ids") or "[]")
+            if not iids:
+                continue
+            all_done = all(
+                (get_issue_by_id(iid) or {}).get("status") == "resolved"
+                for iid in iids
+            )
+
+        if not all_done:
+            continue
+
+        note = (
+            "Auto-closed by pipeline: all linked tables/issues confirmed resolved"
+            + (f" (run {run_id})" if run_id else "")
+        )
+        ok, _ = update_status(cr["cr_id"], "closed", actor="pipeline", notes=note)
+        if ok:
+            closed.append(cr["cr_id"])
+            log.info("CR %s auto-closed", cr["cr_id"])
+    return closed
+
+
+def get_issue_cr_map() -> dict[str, dict]:
+    """
+    Return {issue_id: {'cr_id': ..., 'status': ...}} for all non-closed CRs.
+    Used by the Alerts page to show which issues have an active CR.
+    """
+    ensure_table()
+    result: dict[str, dict] = {}
+    for cr in get_crs():
+        if cr["status"] == "closed":
+            continue
+        try:
+            import json as _json
+            for iid in _json.loads(cr.get("issue_ids") or "[]"):
+                result[iid] = {"cr_id": cr["cr_id"], "status": cr["status"]}
+        except Exception:
+            pass
+    return result
 
 
 # ── email notifications ────────────────────────────────────────────────────────

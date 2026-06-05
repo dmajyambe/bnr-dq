@@ -7,15 +7,11 @@ import os
 from datetime import datetime
 from pathlib import Path
 import dash
-from dash import dcc, html, Input, Output, ALL, ctx, State
+from dash import dcc, html, Input, Output, ALL, MATCH, ctx, State
 import plotly.graph_objects as go
 from flask import session as flask_session
 import dq_auth
-from dq_rules import (
-    get_all_rules, get_user_rules, get_draft_rules,
-    add_user_rule, next_user_rule_id,
-    approve_draft_rule, delete_draft_rule,
-)
+from dq_rules import get_all_rules
 log = logging.getLogger("dq_dashboard")
 
 #file paths
@@ -114,12 +110,14 @@ _URGENCY_COLORS = {
     "attention": "#B8860B",   # Dark Goldenrod — caution
     "urgent":    "#7C3D1E",   # Burnt Rust — stronger warning
     "critical":  "#DC2626",   # Red — universal critical
+    "overdue":   "#991B1B",   # Deep Red — SLA breached
 }
 _URGENCY_LABELS = {
     "new":       "New (1–3d)",
     "attention": "Needs Attention (4–15d)",
     "urgent":    "Urgent (16–20d)",
     "critical":  "About to Breach (21–30d)",
+    "overdue":   "⚠ Overdue — SLA Breached",
 }
 
 # ── data loading ───────────────────────────────────────────────────────────────
@@ -167,15 +165,44 @@ def _load_all_categories() -> dict:
     except Exception:
         return {}
 
-_HISTORY  = _load_history()
-_PIPELINE = _load_pipeline_run()
+_HISTORY       = _load_history()
+_PIPELINE      = _load_pipeline_run()
+_history_mtime = HISTORY_FILE.stat().st_mtime  if HISTORY_FILE.exists()       else 0.0
+_pipeline_mtime= PIPELINE_FILE.stat().st_mtime if PIPELINE_FILE.exists()      else 0.0
+
+
+def _fresh_history() -> list:
+    """Return history list, re-reading from disk only when the file has changed."""
+    global _HISTORY, _history_mtime
+    try:
+        mtime = HISTORY_FILE.stat().st_mtime
+        if mtime != _history_mtime:
+            _HISTORY       = _load_history()
+            _history_mtime = mtime
+            log.info("History reloaded from disk (pipeline ran)")
+    except Exception:
+        pass
+    return _HISTORY
+
+
+def _fresh_pipeline() -> dict:
+    """Return pipeline run dict, re-reading from disk only when the file has changed."""
+    global _PIPELINE, _pipeline_mtime
+    try:
+        mtime = PIPELINE_FILE.stat().st_mtime
+        if mtime != _pipeline_mtime:
+            _PIPELINE       = _load_pipeline_run()
+            _pipeline_mtime = mtime
+    except Exception:
+        pass
+    return _PIPELINE
 
 
 # ── data access helpers ────────────────────────────────────────────────────────
 
-def _today_entry()      -> dict: return _HISTORY[-1]         if _HISTORY           else {}
-def _yesterday_entry()  -> dict: return _HISTORY[-2]         if len(_HISTORY) >= 2 else {}
-def _trend_entries(n=7) -> list: return _HISTORY[-n:]        if _HISTORY           else []
+def _today_entry()      -> dict: h = _fresh_history(); return h[-1]         if h           else {}
+def _yesterday_entry()  -> dict: h = _fresh_history(); return h[-2]         if len(h) >= 2 else {}
+def _trend_entries(n=7) -> list: h = _fresh_history(); return h[-n:]        if h           else []
 
 
 def _cat_scores(entry: dict, cat: str) -> dict:
@@ -226,6 +253,34 @@ def _category_counts(entry: dict) -> dict:
         if ct in counts:
             counts[ct] += 1
     return counts
+
+
+TABLE_NAMES_PRETTY: dict[str, str] = {
+    "accounts":               "Accounts",
+    "contract_loans":         "Contract Loans",
+    "contract_schedules":     "Contract Schedules",
+    "contracts_disburse":     "Contracts Disburse",
+    "contracts_expanded":     "Contracts",
+    "customers_expanded":     "Customers",
+    "loan_applications_2":    "Loan Applications",
+    "prev_loan_applications": "Prev Loan Apps",
+}
+
+ALL_TABLES = list(TABLE_NAMES_PRETTY.keys())
+
+
+def _table_fails(entry: dict) -> dict[str, int]:
+    """Return {table: failing_rule_count} from one history entry."""
+    if not entry:
+        return {}
+    return entry.get("table_fail_counts", {})
+
+
+def _table_nulls(entry: dict) -> dict[str, dict[str, int]]:
+    """Return {table: {col: null_count}} for tables with null columns."""
+    if not entry:
+        return {}
+    return entry.get("table_null_cols", {})
 
 
 # ── score styling ──────────────────────────────────────────────────────────────
@@ -357,6 +412,87 @@ def _dup_card(count: int, delta: int, spark: list) -> html.Div:
     })
 
 
+def _table_card(table_name: str, fail_count: int, delta: int,
+                spark: list, null_cols: dict) -> html.Div:
+    """Per-table failing-rules card with collapsible mandatory-column null detail."""
+    col    = C_GREEN if fail_count == 0 else C_AMBER if fail_count <= 3 else C_RED
+    d_col  = C_RED   if delta > 0        else C_GREEN  if delta < 0        else MUTED
+    d_icon = "▲"     if delta > 0        else "▼"      if delta < 0        else "─"
+    pretty = TABLE_NAMES_PRETTY.get(table_name,
+                                    table_name.replace("_", " ").title())
+
+    null_section: list = []
+    if null_cols:
+        null_section = [
+            html.Div([
+                html.Span(
+                    f"Mandatory columns with nulls: {len(null_cols)}",
+                    style={"fontSize": "10px", "color": C_RED, "fontWeight": "700"},
+                ),
+                html.Span(
+                    " ▶ show",
+                    id={"type": "null-col-btn", "index": table_name},
+                    n_clicks=0,
+                    style={
+                        "fontSize": "10px", "color": BRAND,
+                        "cursor": "pointer", "marginLeft": "6px", "fontWeight": "700",
+                    },
+                ),
+            ], style={"marginTop": "6px"}),
+            html.Div(
+                [html.Div(
+                    f"└ {col}: {cnt:,} nulls",
+                    style={"fontSize": "10px", "color": MUTED, "paddingLeft": "4px",
+                           "lineHeight": "1.6"},
+                ) for col, cnt in sorted(null_cols.items(), key=lambda x: -x[1])],
+                id={"type": "null-col-body", "index": table_name},
+                style={"display": "none", "marginTop": "4px"},
+            ),
+        ]
+
+    other_count = max(0, fail_count - (1 if null_cols else 0))
+    other_line  = html.Div(
+        f"Other failing rules: {other_count}" if other_count > 0 else
+        ("All rules passing" if fail_count == 0 else ""),
+        style={
+            "fontSize":   "10px",
+            "color":      C_RED if other_count > 0 else C_GREEN if fail_count == 0 else MUTED,
+            "marginTop":  "4px",
+            "fontWeight": "700" if other_count > 0 else "400",
+        },
+    )
+
+    return html.Div([
+        html.Div(pretty.upper(), style={
+            "fontSize": "10px", "fontWeight": "900", "color": MUTED,
+            "letterSpacing": "0.06em", "textTransform": "uppercase",
+        }),
+        html.Div(str(fail_count), style={
+            "fontSize": "28px", "fontWeight": "700", "color": col,
+            "lineHeight": "1.1", "marginTop": "4px",
+            "fontVariantNumeric": "tabular-nums",
+        }),
+        html.Div("failing rules", style={"fontSize": "10px", "color": MUTED}),
+        html.Div([
+            html.Span(f"{d_icon} {abs(delta)}", style={
+                "color": d_col, "fontWeight": "700", "fontSize": "11px",
+            }),
+            html.Span(" vs yesterday", style={"color": MUTED, "fontSize": "10px"}),
+        ], style={"marginTop": "3px"}),
+        *null_section,
+        other_line,
+        _count_sparkline(spark, col),
+    ], style={
+        "background":   CARD,
+        "borderRadius": "8px",
+        "padding":      "14px 16px",
+        "flex":         "1",
+        "minWidth":     "140px",
+        "borderTop":    f"3px solid {col}",
+        "boxShadow":    "0 1px 4px rgba(117,57,24,0.08)",
+    })
+
+
 def _inst_dup_count(entry: dict, inst_code: str) -> int:
     if not entry or not inst_code:
         return 0
@@ -371,6 +507,97 @@ def _cat_dup_count(entry: dict, cat: str) -> int:
         return int(bc.get("SACCO",  {}).get("customer_duplicates", 0)) + \
                int(bc.get("OSACCO", {}).get("customer_duplicates", 0))
     return int(bc.get(cat, {}).get("customer_duplicates", 0))
+
+
+def _issue_counts_trend(n_days: int = 30,
+                        le_books: set | None = None) -> list[dict]:
+    """
+    For each of the last n_days, compute:
+      open     — issues open (detected but not yet resolved) on that date
+      overdue  — open issues past their sla_deadline on that date
+      resolved — issues resolved on that specific date
+
+    Reconstructed from dq_open_issues dates — no separate history table needed.
+    le_books: if given, restrict to those institution codes.
+    """
+    from datetime import date as _date, timedelta
+    try:
+        from dq_issue_tracker import get_issues
+        all_issues = get_issues()          # all statuses
+    except Exception:
+        return []
+
+    if le_books is not None:
+        all_issues = [i for i in all_issues if str(i["le_book"]) in le_books]
+
+    today = _date.today()
+    rows  = []
+    for offset in range(n_days - 1, -1, -1):
+        day = today - timedelta(days=offset)
+        ds  = day.isoformat()
+
+        open_n = overdue_n = resolved_n = 0
+        for iss in all_issues:
+            det = iss.get("detected_at") or ""
+            res = iss.get("resolved_at") or ""
+            sla = iss.get("sla_deadline") or ""
+            if not det or det > ds:
+                continue
+            if res and res <= ds:
+                if res == ds:
+                    resolved_n += 1
+            else:
+                open_n += 1
+                if sla and sla < ds:
+                    overdue_n += 1
+
+        rows.append({"date": ds, "open": open_n,
+                     "overdue": overdue_n, "resolved": resolved_n})
+    return rows
+
+
+def _issue_trend_figure(data: list) -> go.Figure:
+    """30-day issue count trend: open, overdue, resolved per day."""
+    dates    = [r["date"]    for r in data]
+    open_v   = [r["open"]    for r in data]
+    over_v   = [r["overdue"] for r in data]
+    res_v    = [r["resolved"] for r in data]
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=dates, y=open_v, name="Open",
+        mode="lines+markers",
+        line=dict(color=C_AMBER, width=2),
+        marker=dict(size=4),
+        hovertemplate="<b>Open</b>: %{y}<br>%{x}<extra></extra>",
+    ))
+    fig.add_trace(go.Scatter(
+        x=dates, y=over_v, name="Overdue",
+        mode="lines+markers",
+        line=dict(color=_URGENCY_COLORS["overdue"], width=2, dash="dot"),
+        marker=dict(size=4),
+        hovertemplate="<b>Overdue</b>: %{y}<br>%{x}<extra></extra>",
+    ))
+    fig.add_trace(go.Scatter(
+        x=dates, y=res_v, name="Resolved (daily)",
+        mode="lines+markers",
+        line=dict(color=C_GREEN, width=2),
+        marker=dict(size=4),
+        hovertemplate="<b>Resolved</b>: %{y}<br>%{x}<extra></extra>",
+    ))
+    fig.update_layout(
+        height=250,
+        paper_bgcolor=CARD, plot_bgcolor=CARD,
+        margin=dict(l=8, r=8, t=36, b=8),
+        font=dict(family=FONT, size=11, color=TEXT),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02,
+                    xanchor="left", x=0, font=dict(size=11)),
+        yaxis=dict(gridcolor=DIVIDER, tickfont=dict(size=10),
+                   zeroline=False, rangemode="tozero"),
+        xaxis=dict(gridcolor=DIVIDER, tickfont=dict(size=10), showgrid=False),
+        hovermode="x unified",
+    )
+    return fig
 
 
 def _trend_figure(trend: list, cat: str, inst_code: str | None = None) -> go.Figure:
@@ -494,18 +721,27 @@ def _institution_table(institutions: dict, issue_summary: dict | None = None) ->
             "color": _score_color(overall), "lineHeight": "1.15",
         }))
 
-        rpt_files = sorted(REPORTS_DIR.glob(f"{lb}_*.xlsx"), reverse=True) if REPORTS_DIR.exists() else []
-        if rpt_files:
-            # extract date from filename: {lb}_{name}_{YYYY-MM-DD}.xlsx
-            stem  = rpt_files[0].stem          # e.g. "040_Bank_Of_Kigali_2026-05-18"
-            parts = stem.rsplit("_", 3)
-            rpt_date = parts[-1] if len(parts) >= 2 and len(parts[-1]) == 10 else "—"
+        # prefer CSV over XLSX for the date label
+        csv_files = sorted(REPORTS_DIR.glob(f"*_{lb}_*.csv"), reverse=True) if REPORTS_DIR.exists() else []
+        rpt_files = sorted(REPORTS_DIR.glob(f"{lb}_*.xlsx"),  reverse=True) if REPORTS_DIR.exists() else []
+        has_report = bool(csv_files or rpt_files)
+
+        if has_report:
+            if csv_files:
+                # extract month: {table}_{lb}_{YYYY-MM}.csv
+                parts    = csv_files[0].stem.rsplit("_", 2)
+                rpt_date = parts[2] if len(parts) == 3 and len(parts[2]) == 7 else "—"
+                fmt_label = "CSV"
+            else:
+                parts    = rpt_files[0].stem.rsplit("_", 3)
+                rpt_date = parts[-1] if len(parts) >= 2 and len(parts[-1]) == 10 else "—"
+                fmt_label = "XLSX"
             dl_btn = html.Div(
                 [html.Span("⬇ ", style={"fontSize": "13px"}),
                  html.Span(rpt_date, style={"fontSize": "9px", "opacity": "0.75"})],
                 id={"type": "inst-dl-btn", "index": lb},
                 n_clicks=0,
-                title=f"Download {name} report ({rpt_date})",
+                title=f"Download {name} report ({fmt_label}, {rpt_date})",
                 style={
                     "width": DL_W, "textAlign": "center", "flexShrink": "0",
                     "display": "flex", "alignItems": "center", "justifyContent": "center",
@@ -697,7 +933,7 @@ def _unscored_section(cat: str, all_categories: dict, scored_lbs: set,
 def _stale_banner() -> html.Div | None:
     if not _HISTORY:
         return html.Div(
-            "No pipeline data found. Run:  python dq_pipeline_2m.py --load",
+            "No detection data found. Run:  python dq_monthly_detection.py",
             style={
                 "background": "#FEF2F2", "border": f"1px solid {C_RED}",
                 "borderRadius": "6px", "padding": "10px 16px",
@@ -705,10 +941,16 @@ def _stale_banner() -> html.Div | None:
                 "marginBottom": "16px", "lineHeight": "1.15",
             },
         )
+    from datetime import date as _date
     last_date = _HISTORY[-1].get("date", "")
-    if last_date != datetime.now().strftime("%Y-%m-%d"):
+    try:
+        days_since = (_date.today() - _date.fromisoformat(last_date)).days
+    except Exception:
+        days_since = 999
+    if days_since > 35:
         return html.Div(
-            f"⚠  Last pipeline run: {last_date} — today's run may not have completed yet.",
+            f"⚠  Last monthly detection: {last_date} — {days_since} days ago. "
+            "Run dq_monthly_detection.py to refresh.",
             style={
                 "background": "#FFFBEB", "border": "1px solid #F59E0B",
                 "borderRadius": "6px", "padding": "10px 16px",
@@ -849,7 +1091,8 @@ def _dashboard_content(cat: str, inst: str | None) -> html.Div:
         name = (data.get("name") or code).title()
         inst_options.append({"label": name, "value": code})
 
-    # KPI cards, trend figure, and table depend on whether one institution is selected
+    # KPI dimension score cards + trend figure
+    # (per-institution when one is selected, category-wide otherwise)
     if inst and inst in institutions:
         cards = []
         for dim in DIMS:
@@ -862,11 +1105,10 @@ def _dashboard_content(cat: str, inst: str | None) -> html.Div:
         dup_prev  = _inst_dup_count(yesterday, inst)
         dup_spark = [_inst_dup_count(e, inst) for e in trend]
         cards.append(_dup_card(dup_now, dup_now - dup_prev, dup_spark))
-
-        fig              = _trend_figure(trend, cat, inst_code=inst)
+        issue_trend_data = _issue_counts_trend(30, le_books={str(inst)})
         display_insts    = {inst: institutions[inst]}
         inst_name        = (institutions[inst].get("name") or inst).title()
-        table_title      = f"{inst_name.upper()}  —  {cat_label.upper()}"
+        table_title      = f"ISSUE REPORT — {inst_name.upper()}"
     else:
         cards = []
         for dim in DIMS:
@@ -879,11 +1121,32 @@ def _dashboard_content(cat: str, inst: str | None) -> html.Div:
         dup_prev  = _cat_dup_count(yesterday, cat)
         dup_spark = [_cat_dup_count(e, cat) for e in trend]
         cards.append(_dup_card(dup_now, dup_now - dup_prev, dup_spark))
+        cat_lbs          = {lb for lb, d in institutions.items()}
+        issue_trend_data = _issue_counts_trend(30, le_books=cat_lbs if cat_lbs else None)
+        display_insts    = institutions
+        n                = len(institutions)
+        table_title      = f"ISSUE REPORTS — {cat_label.upper()}  ({n} institutions)"
 
-        fig           = _trend_figure(trend, cat)
-        display_insts = institutions
-        n             = len(institutions)
-        table_title   = f"INSTITUTIONS — {cat_label.upper()}  ({n})"
+    # issue count summary chips (latest day of trend)
+    last = issue_trend_data[-1] if issue_trend_data else {}
+    def _issue_chip(value, label, color):
+        return html.Div([
+            html.Span(str(value), style={"fontWeight": "900", "fontSize": "20px",
+                                         "color": color}),
+            html.Span(label, style={"fontSize": "10px", "color": MUTED,
+                                    "marginTop": "2px"}),
+        ], style={
+            "display": "flex", "flexDirection": "column", "alignItems": "center",
+            "background": CARD, "borderRadius": "6px", "padding": "8px 18px",
+            "border": f"1px solid {DIVIDER}", "minWidth": "80px",
+        })
+    issue_chips = html.Div([
+        _issue_chip(last.get("open",     0), "Open",            C_AMBER),
+        _issue_chip(last.get("overdue",  0), "Overdue",         _URGENCY_COLORS["overdue"]),
+        _issue_chip(last.get("resolved", 0), "Resolved Today",  C_GREEN),
+    ], style={"display": "flex", "gap": "8px", "marginBottom": "10px"})
+
+    issue_fig = _issue_trend_figure(issue_trend_data)
 
     return html.Div([
         banner if banner else html.Div(),
@@ -967,16 +1230,22 @@ def _dashboard_content(cat: str, inst: str | None) -> html.Div:
                 "marginBottom": "16px",
             }),
             html.Div([
-                html.Div("7-DAY QUALITY TREND", style={
-                    "fontSize":      "11px",
-                    "fontWeight":    "900",
-                    "color":         MUTED,
-                    "letterSpacing": "0.06em",
-                    "textTransform": "uppercase",
-                    "marginBottom":  "8px",
-                    "lineHeight":    "1.15",
-                }),
-                dcc.Graph(id="trend-graph", figure=fig,
+                html.Div([
+                    html.Span("30-DAY ISSUE TREND", style={
+                        "fontSize":      "11px",
+                        "fontWeight":    "900",
+                        "color":         MUTED,
+                        "letterSpacing": "0.06em",
+                        "textTransform": "uppercase",
+                        "lineHeight":    "1.15",
+                    }),
+                    html.Span(
+                        " — open / overdue / resolved per day",
+                        style={"fontSize": "10px", "color": MUTED},
+                    ),
+                ], style={"marginBottom": "8px"}),
+                issue_chips,
+                dcc.Graph(id="trend-graph", figure=issue_fig,
                           config={"displayModeBar": False}),
             ]),
         ], style={
@@ -988,7 +1257,7 @@ def _dashboard_content(cat: str, inst: str | None) -> html.Div:
             "marginBottom": "20px",
         }),
 
-        # Institution table
+        # Issue reports table
         html.Div([
             html.Div(table_title, id="table-title", style={
                 "fontSize":      "12px",
@@ -998,8 +1267,7 @@ def _dashboard_content(cat: str, inst: str | None) -> html.Div:
                 "marginBottom":  "12px",
                 "lineHeight":    "1.15",
             }),
-            html.Div(id="inst-table", children=_institution_table(
-                display_insts, _issue_summary())),
+            _institution_reports_table(display_insts),
         ]),
 
         # Unscored institutions section
@@ -1009,53 +1277,168 @@ def _dashboard_content(cat: str, inst: str | None) -> html.Div:
             set(institutions.keys()),
             _load_activity(),
         ),
+
     ])
+
+
+def _institution_reports_table(display_insts: dict) -> html.Div:
+    """Issue reports table — one row per institution, ZIP download button."""
+    import zipfile as _zf
+
+    issue_dir = Path(__file__).parent / "issue_reports"
+
+    H = {"fontSize": "11px", "fontWeight": "900", "color": MUTED,
+         "textTransform": "uppercase", "letterSpacing": "0.05em",
+         "lineHeight": "1.15", "flexShrink": "0"}
+
+    header = html.Div([
+        html.Span("Code",        style={**H, "width": "56px"}),
+        html.Span("Institution", style={**H, "flex": "1"}),
+        html.Span("Tables with issues", style={**H, "width": "220px", "textAlign": "left"}),
+        html.Span("ZIP size",    style={**H, "width": "74px", "textAlign": "right"}),
+        html.Span("Report",      style={**H, "width": "66px", "textAlign": "center"}),
+    ], style={
+        "display": "flex", "alignItems": "center", "gap": "10px",
+        "padding": "9px 14px",
+        "borderBottom": "2px solid rgba(117,57,24,0.18)",
+        "background": BG, "borderRadius": "8px 8px 0 0",
+    })
+
+    # Build rows — institutions with ZIPs first (sorted by size desc), then clean ones
+    with_zip = []
+    no_zip   = []
+
+    for lb, data in display_insts.items():
+        name = (data.get("name") or lb).title()
+        zips = sorted(issue_dir.glob(f"{lb}_*.zip"), reverse=True) if issue_dir.exists() else []
+        if zips:
+            zp = zips[0]
+            try:
+                size_kb    = zp.stat().st_size // 1024
+                namelist   = _zf.ZipFile(zp).namelist()
+                table_names = [n.replace(".csv", "") for n in namelist]
+            except Exception:
+                size_kb, table_names = 0, []
+            with_zip.append((lb, name, size_kb, table_names, zp))
+        else:
+            no_zip.append((lb, name))
+
+    with_zip.sort(key=lambda x: -x[2])
+
+    data_rows = []
+    for i, (lb, name, size_kb, table_names, zp) in enumerate(with_zip):
+        bg = "#c9956c" if i % 2 == 0 else BG
+
+        # table chips
+        table_chips = html.Div(
+            [html.Span(t, style={
+                "fontSize": "9px", "fontWeight": "700",
+                "background": "rgba(117,57,24,0.10)", "color": BRAND,
+                "borderRadius": "3px", "padding": "2px 5px",
+                "whiteSpace": "nowrap",
+            }) for t in table_names],
+            style={"display": "flex", "flexWrap": "wrap", "gap": "3px",
+                   "width": "220px", "flexShrink": "0"},
+        )
+
+        size_label = f"{size_kb:,} KB" if size_kb >= 1 else "< 1 KB"
+
+        dl_btn = html.Div("⬇ ZIP",
+            id={"type": "open-issue-dl-btn", "index": lb},
+            n_clicks=0,
+            title=f"Download issue report for {name}",
+            style={
+                "cursor": "pointer", "background": BRAND, "color": CARD,
+                "fontSize": "10px", "fontWeight": "700",
+                "padding": "3px 10px", "borderRadius": "4px",
+                "userSelect": "none", "width": "66px",
+                "textAlign": "center", "flexShrink": "0",
+            },
+        )
+
+        data_rows.append(html.Div([
+            html.Span(lb, style={"fontWeight": "900", "fontSize": "12px",
+                "color": TEXT, "width": "56px", "flexShrink": "0"}),
+            html.Span(name, style={"fontSize": "12px", "color": TEXT,
+                "flex": "1", "overflow": "hidden",
+                "textOverflow": "ellipsis", "whiteSpace": "nowrap"}),
+            table_chips,
+            html.Span(size_label, style={"fontSize": "11px", "color": MUTED,
+                "width": "74px", "textAlign": "right", "flexShrink": "0"}),
+            dl_btn,
+        ], style={
+            "display": "flex", "alignItems": "center", "gap": "10px",
+            "padding": "8px 14px", "background": bg,
+            "borderBottom": f"1px solid rgba(117,57,24,0.12)",
+        }))
+
+    # clean institutions (no ZIP) — greyed out at bottom
+    for i, (lb, name) in enumerate(sorted(no_zip, key=lambda x: x[1])):
+        bg = CARD if i % 2 == 0 else BG
+        data_rows.append(html.Div([
+            html.Span(lb, style={"fontWeight": "900", "fontSize": "12px",
+                "color": MUTED, "width": "56px", "flexShrink": "0"}),
+            html.Span(name, style={"fontSize": "12px", "color": MUTED,
+                "flex": "1", "overflow": "hidden",
+                "textOverflow": "ellipsis", "whiteSpace": "nowrap"}),
+            html.Span("No issues found", style={"fontSize": "11px",
+                "color": C_GREEN, "fontWeight": "700",
+                "width": "220px", "flexShrink": "0"}),
+            html.Span("—", style={"fontSize": "11px", "color": MUTED,
+                "width": "74px", "textAlign": "right", "flexShrink": "0"}),
+            html.Span("—", style={"fontSize": "11px", "color": MUTED,
+                "width": "66px", "textAlign": "center", "flexShrink": "0"}),
+        ], style={
+            "display": "flex", "alignItems": "center", "gap": "10px",
+            "padding": "8px 14px", "background": bg,
+            "borderBottom": f"1px solid rgba(117,57,24,0.12)",
+        }))
+
+    if not data_rows:
+        return html.Div("No institution data for this category.",
+            style={"color": MUTED, "fontSize": "12px",
+                   "padding": "32px", "textAlign": "center"})
+
+    return html.Div(
+        [header] + data_rows,
+        style={"border": f"1px solid {DIVIDER}", "borderRadius": "8px",
+               "overflow": "hidden"},
+    )
 
 
 # ── alerts page ───────────────────────────────────────────────────────────────
 
 def _issues_to_xlsx(issues: list) -> bytes:
-    """Build an in-memory XLSX workbook from a list of issue dicts."""
+    """Build an in-memory XLSX workbook from a list of resolved issue dicts."""
     import openpyxl
     from openpyxl.styles import Font, PatternFill, Alignment
     from datetime import date as _date
 
     wb = openpyxl.Workbook()
     ws = wb.active
-    ws.title = "Issues"
+    ws.title = "Resolved Issues"
 
-    hdr_fill = PatternFill("solid", fgColor="753918")
-    hdr_font = Font(color="FFFFFF", bold=True, size=10)
+    hdr_fill  = PatternFill("solid", fgColor="753918")
+    hdr_font  = Font(color="FFFFFF", bold=True, size=10)
     hdr_align = Alignment(horizontal="center", vertical="center", wrap_text=True)
 
-    headers = ["Institution", "Table", "Rule ID", "Dimension",
-               "Failing Rows", "Detected", "SLA Deadline", "Status",
-               "Urgency", "Days Left / Over"]
-    col_widths = [30, 28, 12, 14, 12, 12, 14, 12, 14, 16]
+    headers    = ["Institution", "Table", "Rule ID", "Dimension",
+                  "Failing Rows", "Detected", "Resolved", "Days to Fix"]
+    col_widths = [30, 28, 12, 14, 12, 12, 12, 12]
 
     for ci, (h, w) in enumerate(zip(headers, col_widths), start=1):
         cell = ws.cell(row=1, column=ci, value=h)
-        cell.font = hdr_font
-        cell.fill = hdr_fill
+        cell.font      = hdr_font
+        cell.fill      = hdr_fill
         cell.alignment = hdr_align
         ws.column_dimensions[cell.column_letter].width = w
-
     ws.row_dimensions[1].height = 22
-    today = _date.today()
 
     for ri, iss in enumerate(issues, start=2):
-        status = iss.get("status", "open")
         try:
-            deadline = _date.fromisoformat(iss.get("sla_deadline", ""))
-            if status == "resolved":
-                detected = _date.fromisoformat(iss.get("detected_at", ""))
-                resolved = _date.fromisoformat(iss.get("resolved_at", ""))
-                days_str = f"{(resolved - detected).days}d to fix"
-            elif status in ("open", "penalized"):
-                diff = (deadline - today).days
-                days_str = f"+{abs(diff)}d over" if diff < 0 else f"{diff}d left"
-            else:
-                days_str = ""
+            days_fix = (_date.fromisoformat(iss.get("resolved_at", "")) -
+                        _date.fromisoformat(iss.get("detected_at", ""))).days
+            days_str = f"{days_fix}d"
         except Exception:
             days_str = ""
 
@@ -1066,9 +1449,7 @@ def _issues_to_xlsx(issues: list) -> bytes:
             iss.get("dimension", "").title(),
             iss.get("failing_rows", ""),
             iss.get("detected_at", ""),
-            iss.get("sla_deadline", ""),
-            status.title(),
-            iss.get("urgency_band", "").title(),
+            iss.get("resolved_at", ""),
             days_str,
         ])
         if ri % 2 == 0:
@@ -1161,6 +1542,595 @@ def _freshness_section() -> html.Div:
             "border": f"1px solid {DIVIDER}", "marginBottom": "28px",
         }),
     ])
+
+
+def _urgency_dot(band: str) -> html.Span:
+    col = _URGENCY_COLORS.get(band, MUTED)
+    label = {"new": "New", "attention": "Attention", "urgent": "Urgent",
+             "critical": "Critical", "overdue": "⚠ Overdue"}.get(band, band.title())
+    return html.Span([
+        html.Span("●", style={"color": col, "fontSize": "9px", "marginRight": "4px"}),
+        html.Span(label, style={"color": col, "fontSize": "11px", "fontWeight": "700"}),
+    ])
+
+
+def _build_table_issue_sections(issues_by_table: dict, status: str,
+                                cat_filter: str = "") -> html.Div:
+    """
+    Render Alerts page: Table → Institution (mini score card) → Rules.
+    cat_filter: '' = all, 'B' = banks, 'MF' = MFIs, 'SACCO' = SACCOs+OSACCOs.
+    """
+    if not issues_by_table:
+        label = "open issues" if status == "open" else "resolved issues"
+        return html.Div(f"No {label}.", style={"color": MUTED, "padding": "24px"})
+
+    # load categories for type-lookup
+    try:
+        _cats = json.loads(CATEGORIES_FILE.read_text())
+    except Exception:
+        _cats = {}
+    cat_type_map = {str(lb): (info.get("category_type") or "") for lb, info in _cats.items()}
+
+    today_entry = _today_entry()
+    _BO = ["new", "attention", "urgent", "critical", "overdue"]
+
+    # issue_id → {cr_id, status} for active CRs
+    try:
+        from dq_change_request import get_issue_cr_map
+        _cr_map = get_issue_cr_map()
+    except Exception:
+        _cr_map = {}
+
+    _CR_STATUS_CLR = {
+        "open":        "#2563EB",
+        "in_progress": "#D97706",
+        "submitted":   "#7C3D1E",
+        "approved":    "#16A34A",
+        "rejected":    "#DC2626",
+    }
+
+    def _worst(a: str, b: str) -> str:
+        return a if _BO.index(a) >= _BO.index(b) else b
+
+    sections = []
+    for table, rules in issues_by_table.items():
+        # ── pivot: table → {le_book: {name, rules, total_rows, worst_urgency}} ──
+        inst_map: dict[str, dict] = {}
+        for rule in rules:
+            for inst in rule["institutions"]:
+                lb  = inst["le_book"]
+                ct  = cat_type_map.get(str(lb), "")
+                # category filter  (SACCO covers OSACCO)
+                if cat_filter:
+                    if cat_filter == "SACCO" and ct not in ("SACCO", "OSACCO"):
+                        continue
+                    elif cat_filter != "SACCO" and ct != cat_filter:
+                        continue
+                if lb not in inst_map:
+                    inst_map[lb] = {
+                        "name":          inst["institution_name"],
+                        "rules":         [],
+                        "total_rows":    0,
+                        "worst_urgency": "new",
+                        "any_pending":   False,
+                    }
+                inst_map[lb]["rules"].append({
+                    "rule_id":        rule["rule_id"],
+                    "rule_name":      rule["rule_name"],
+                    "dimension":      rule["dimension"],
+                    "failing_rows":   inst["failing_rows"],
+                    "urgency_band":   inst["urgency_band"],
+                    "days_left":      inst["days_left"],
+                    "issue_id":       inst.get("issue_id", ""),
+                    "recurrence_count": inst.get("recurrence_count", 0),
+                    "pending":        inst.get("pending", False),
+                })
+                inst_map[lb]["total_rows"]   += inst["failing_rows"]
+                inst_map[lb]["worst_urgency"] = _worst(
+                    inst_map[lb]["worst_urgency"], inst["urgency_band"])
+                if inst.get("pending"):
+                    inst_map[lb]["any_pending"] = True
+
+        if not inst_map:
+            continue
+
+        total_rows  = sum(d["total_rows"] for d in inst_map.values())
+        worst_tbl   = max(inst_map.values(), key=lambda x: _BO.index(x["worst_urgency"]))["worst_urgency"]
+        band_col    = _URGENCY_COLORS.get(worst_tbl, MUTED)
+        tbl_label   = TABLE_NAMES_PRETTY.get(table, table.replace("_", " ").title())
+        n_inst      = len(inst_map)
+
+        # ── table section header ─────────────────────────────────────────────
+        tbl_header = html.Div([
+            html.Span("●", style={"color": band_col, "fontSize": "10px",
+                                   "marginRight": "8px"}),
+            html.Span(tbl_label, style={
+                "fontSize": "14px", "fontWeight": "900", "color": TEXT,
+                "letterSpacing": "0.02em",
+            }),
+            html.Span(
+                f"{n_inst} institution{'s' if n_inst != 1 else ''}",
+                style={"fontSize": "11px", "color": MUTED, "marginLeft": "12px"},
+            ),
+            html.Span(f"{total_rows:,} failing rows", style={
+                "fontSize": "11px", "color": C_RED, "fontWeight": "700",
+                "marginLeft": "10px",
+            }),
+        ], style={
+            "display": "flex", "alignItems": "center",
+            "padding": "11px 18px",
+            "background": BG,
+            "borderLeft": f"4px solid {band_col}",
+            "borderRadius": "6px 6px 0 0",
+        })
+
+        # ── institution rows (sorted by worst urgency then failing rows) ─────
+        inst_divs = []
+        sort_key  = lambda kv: (_BO.index(kv[1]["worst_urgency"]), -kv[1]["total_rows"])
+        for lb, idata in sorted(inst_map.items(), key=sort_key, reverse=True):
+            urg      = idata["worst_urgency"]
+            urg_col  = _URGENCY_COLORS.get(urg, MUTED)
+            cidx     = f"ait_{table}__{lb}".replace("-", "_")
+
+            # mini dimension score chips
+            i_scores  = _inst_scores(today_entry, lb)
+            score_chips = []
+            for dim in DIMS:
+                s = float(i_scores.get(dim, 0))
+                score_chips.append(html.Span([
+                    html.Span(dim[:4].title(),
+                              style={"fontSize": "9px", "color": MUTED,
+                                     "marginRight": "2px"}),
+                    html.Span(f"{s:.0f}%",
+                              style={"fontSize": "11px", "fontWeight": "700",
+                                     "color": _score_color(s)}),
+                ], style={"marginRight": "12px", "whiteSpace": "nowrap"}))
+
+            # badges: recurrence + pending-resolution
+            badges = []
+            max_recurrence = max(
+                (r.get("recurrence_count", 0) for r in idata["rules"]), default=0
+            )
+            if max_recurrence > 0:
+                badges.append(html.Span(
+                    f"↺ #{max_recurrence + 1} recurrence",
+                    style={"fontSize": "9px", "fontWeight": "700",
+                           "color": C_RED, "background": "rgba(220,38,38,.10)",
+                           "border": "1px solid rgba(220,38,38,.30)",
+                           "borderRadius": "3px", "padding": "1px 5px",
+                           "marginRight": "6px", "whiteSpace": "nowrap"},
+                ))
+            if idata.get("any_pending"):
+                badges.append(html.Span(
+                    "⟳ Confirming",
+                    style={"fontSize": "9px", "fontWeight": "700",
+                           "color": "#D97706", "background": "rgba(217,119,6,.10)",
+                           "border": "1px solid rgba(217,119,6,.30)",
+                           "borderRadius": "3px", "padding": "1px 5px",
+                           "marginRight": "6px", "whiteSpace": "nowrap"},
+                ))
+            # CR badge: pick the most advanced active CR for any issue in this inst+table
+            inst_issue_ids = [r.get("issue_id") for r in idata["rules"] if r.get("issue_id")]
+            cr_info = next((_cr_map[iid] for iid in inst_issue_ids if iid in _cr_map), None)
+            if cr_info:
+                cr_clr = _CR_STATUS_CLR.get(cr_info["status"], MUTED)
+                badges.append(html.Span(
+                    f"CR: {cr_info['status'].replace('_', ' ').title()}",
+                    style={"fontSize": "9px", "fontWeight": "700",
+                           "color": cr_clr, "background": f"rgba(0,0,0,.05)",
+                           "border": f"1px solid {cr_clr}",
+                           "borderRadius": "3px", "padding": "1px 5px",
+                           "marginRight": "6px", "whiteSpace": "nowrap"},
+                ))
+
+            inst_header = html.Div([
+                _urgency_dot(urg),
+                html.Span(idata["name"], style={
+                    "fontSize": "13px", "fontWeight": "700",
+                    "color": TEXT, "marginLeft": "8px",
+                }),
+                html.Span(f"({lb})", style={
+                    "fontSize": "10px", "color": MUTED,
+                    "fontFamily": "monospace", "marginLeft": "6px",
+                    "marginRight": "10px",
+                }),
+                html.Div(badges, style={"display": "flex", "alignItems": "center",
+                                        "flexShrink": "0"}),
+                html.Span(style={"flex": "1"}),
+                html.Div(score_chips, style={
+                    "display": "flex", "alignItems": "center",
+                    "marginRight": "18px",
+                }),
+                html.Span(f"{idata['total_rows']:,} rows", style={
+                    "fontSize": "12px", "fontWeight": "700",
+                    "color": C_RED, "marginRight": "14px",
+                }),
+                html.Div("⬇ ZIP",
+                    id={"type": "open-issue-dl-btn", "index": lb},
+                    n_clicks=0,
+                    title=f"Download issue report for {idata['name']}",
+                    style={
+                        "cursor": "pointer", "background": BRAND, "color": CARD,
+                        "fontSize": "10px", "fontWeight": "700",
+                        "padding": "3px 10px", "borderRadius": "4px",
+                        "userSelect": "none", "marginRight": "10px",
+                        "flexShrink": "0",
+                    },
+                ),
+                html.Div("▶", id={"type": "alert-inst-toggle", "index": cidx},
+                         n_clicks=0,
+                         style={"fontSize": "10px", "color": MUTED,
+                                "cursor": "pointer", "userSelect": "none",
+                                "width": "18px", "textAlign": "center"}),
+            ], style={
+                "display": "flex", "alignItems": "center",
+                "padding": "9px 18px",
+                "background": CARD,
+                "borderBottom": f"1px solid {DIVIDER}",
+                "borderLeft": f"3px solid {urg_col}",
+                "cursor": "pointer",
+            })
+
+            # collapsed rule detail panel
+            _RH = {"fontSize": "10px", "fontWeight": "900", "color": MUTED,
+                   "textTransform": "uppercase", "letterSpacing": "0.04em",
+                   "padding": "5px 12px", "whiteSpace": "nowrap"}
+            rule_hdr = html.Div([
+                html.Span("Rule",      style={**_RH, "width": "90px"}),
+                html.Span("Issue",     style={**_RH, "flex": "1"}),
+                html.Span("Dimension", style={**_RH, "width": "105px"}),
+                html.Span("Rows",      style={**_RH, "width": "70px",
+                                              "textAlign": "right"}),
+                html.Span("SLA",       style={**_RH, "width": "90px",
+                                              "textAlign": "right"}),
+            ], style={"display": "flex", "background": BG,
+                      "borderBottom": f"1px solid {DIVIDER}"})
+
+            rule_rows = [rule_hdr]
+            for j, r in enumerate(
+                sorted(idata["rules"],
+                       key=lambda x: _BO.index(x["urgency_band"]), reverse=True)
+            ):
+                dl  = r["days_left"]
+                ov  = r["urgency_band"] == "overdue"
+                dlc = C_RED if dl <= 5 or ov else TEXT
+                dls = f"⚠ {abs(dl)}d over" if ov else f"{dl}d left"
+                # per-rule: pending indicator + CR badge
+                rule_badges = []
+                if r.get("pending"):
+                    rule_badges.append(html.Span(
+                        "⟳", title="Pending full-scan confirmation",
+                        style={"color": "#D97706", "fontSize": "10px",
+                               "marginRight": "4px"},
+                    ))
+                rule_cr = _cr_map.get(r.get("issue_id", ""))
+                if rule_cr:
+                    rcr_clr = _CR_STATUS_CLR.get(rule_cr["status"], MUTED)
+                    rule_badges.append(html.Span(
+                        rule_cr["cr_id"],
+                        style={"fontSize": "9px", "fontWeight": "700",
+                               "color": rcr_clr, "marginRight": "4px"},
+                    ))
+
+                rule_rows.append(html.Div([
+                    html.Span(r["rule_id"], style={
+                        "width": "90px", "fontSize": "11px", "fontWeight": "900",
+                        "color": BRAND, "fontFamily": "monospace",
+                        "padding": "6px 12px",
+                    }),
+                    html.Div([
+                        html.Span(r["rule_name"], style={
+                            "fontSize": "12px", "color": TEXT,
+                        }),
+                        html.Div(rule_badges, style={"display": "inline-flex",
+                                                      "alignItems": "center",
+                                                      "marginLeft": "6px"}),
+                    ], style={"flex": "1", "padding": "6px 12px",
+                              "display": "flex", "alignItems": "center"}),
+                    html.Div(_dim_pill(r["dimension"]),
+                             style={"width": "105px", "padding": "4px 12px"}),
+                    html.Span(f"{r['failing_rows']:,}", style={
+                        "width": "70px", "fontSize": "12px", "fontWeight": "700",
+                        "color": MUTED if r.get("pending") else C_RED,
+                        "textAlign": "right", "padding": "6px 12px",
+                    }),
+                    html.Span(dls, style={
+                        "width": "90px", "fontSize": "11px", "fontWeight": "700",
+                        "color": dlc, "textAlign": "right", "padding": "6px 12px",
+                    }),
+                ], style={
+                    "display": "flex", "alignItems": "center",
+                    "background": "rgba(244,246,249,0.8)" if j % 2 == 0 else CARD,
+                    "borderBottom": f"1px solid {DIVIDER}",
+                    "opacity": "0.75" if r.get("pending") else "1",
+                }))
+
+            inst_divs.append(html.Div([
+                inst_header,
+                html.Div(
+                    html.Div(rule_rows),
+                    id={"type": "alert-inst-collapse", "index": cidx},
+                    style={"display": "none"},
+                ),
+            ]))
+
+        sections.append(html.Div(
+            [tbl_header, *inst_divs],
+            style={"marginBottom": "16px", "border": f"1px solid {DIVIDER}",
+                   "borderRadius": "6px", "overflow": "hidden"},
+        ))
+
+    if not sections:
+        return html.Div("No issues for the selected category.",
+                        style={"color": MUTED, "padding": "24px"})
+    return html.Div(sections)
+
+
+def _build_resolved_rows(issues: list) -> html.Div:
+    """Flat list for resolved issues."""
+    from datetime import date as _date
+    today = _date.today()
+    if not issues:
+        return html.Div("No resolved issues.", style={"color": MUTED, "padding": "20px"})
+
+    H = {"fontSize": "11px", "fontWeight": "900", "color": MUTED,
+         "textTransform": "uppercase", "letterSpacing": "0.05em", "padding": "8px 10px"}
+    hdr = html.Div([
+        html.Span("Institution", style={**H, "flex": "1"}),
+        html.Span("Table",       style={**H, "width": "160px"}),
+        html.Span("Rule",        style={**H, "width": "80px"}),
+        html.Span("Dimension",   style={**H, "width": "100px"}),
+        html.Span("Detected",    style={**H, "width": "96px"}),
+        html.Span("Resolved",    style={**H, "width": "96px"}),
+        html.Span("Days to Fix", style={**H, "width": "80px", "textAlign": "center"}),
+        html.Span("Timing",      style={**H, "width": "76px", "textAlign": "center"}),
+    ], style={"display": "flex", "background": BG,
+              "borderRadius": "8px 8px 0 0", "borderBottom": f"2px solid {DIVIDER}"})
+
+    rows = []
+    for i, iss in enumerate(issues):
+        detected  = iss.get("detected_at", "—")
+        resolved  = iss.get("resolved_at",  "—")
+        deadline  = iss.get("sla_deadline", "")
+        try:
+            days_fix = (_date.fromisoformat(resolved) - _date.fromisoformat(detected)).days
+            fix_str  = f"{days_fix}d"
+            fix_clr  = C_GREEN if days_fix <= 7 else (C_RED if days_fix >= 20 else TEXT)
+        except Exception:
+            fix_str, fix_clr = "—", MUTED
+        try:
+            on_time = _date.fromisoformat(resolved) <= _date.fromisoformat(deadline)
+            timing_label = "On Time"
+            timing_color = C_GREEN
+        except Exception:
+            on_time = None
+            timing_label, timing_color = "—", MUTED
+        if on_time is False:
+            timing_label = "Late"
+            timing_color = C_RED
+        name = (iss.get("institution_name") or iss["le_book"]).title()
+        rows.append(html.Div([
+            html.Div([html.Span(name, style={"fontSize": "12px", "color": TEXT})],
+                     style={"flex": "1", "padding": "7px 10px"}),
+            html.Span(iss["table_name"],       style={"width": "160px", "fontSize": "11px", "color": MUTED, "padding": "7px 10px"}),
+            html.Span(iss["rule_id"],           style={"width": "80px",  "fontSize": "11px", "fontWeight": "700", "color": TEXT, "padding": "7px 10px"}),
+            html.Span(iss["dimension"].title(), style={"width": "100px", "fontSize": "11px", "color": MUTED, "padding": "7px 10px"}),
+            html.Span(detected,                style={"width": "96px",  "fontSize": "11px", "color": MUTED, "padding": "7px 10px"}),
+            html.Span(resolved,                style={"width": "96px",  "fontSize": "11px", "color": C_GREEN, "padding": "7px 10px"}),
+            html.Span(fix_str,                 style={"width": "80px",  "fontSize": "12px", "fontWeight": "700", "color": fix_clr, "textAlign": "center", "padding": "7px 10px"}),
+            html.Span(timing_label,            style={"width": "76px",  "fontSize": "11px", "fontWeight": "700", "color": timing_color, "textAlign": "center", "padding": "7px 10px"}),
+        ], style={
+            "display": "flex", "alignItems": "center",
+            "background": "#C9956C" if i % 2 == 0 else BG,
+            "borderBottom": f"1px solid {DIVIDER}",
+        }))
+    return html.Div([hdr, *rows], style={
+        "background": CARD, "borderRadius": "8px",
+        "border": f"1px solid {DIVIDER}", "marginBottom": "8px",
+    })
+
+
+def _build_resolved_by_institution(issues: list, cat_filter: str = "") -> html.Div:
+    """Resolved issues grouped by institution with collapsible rule detail and per-inst ZIP download."""
+    from datetime import date as _date
+    from collections import defaultdict
+
+    if not issues:
+        return html.Div("No resolved issues.", style={"color": MUTED, "padding": "24px"})
+
+    try:
+        _cats = json.loads(CATEGORIES_FILE.read_text())
+    except Exception:
+        _cats = {}
+
+    if cat_filter:
+        _SACCO_TYPES = {"SACCO", "OSACCO"}
+        def _matches(lb: str) -> bool:
+            ct = (_cats.get(str(lb), {}).get("category_type") or "").upper()
+            return ct in _SACCO_TYPES if cat_filter == "SACCO" else ct == cat_filter
+        issues = [i for i in issues if _matches(i["le_book"])]
+
+    if not issues:
+        return html.Div("No resolved issues for the selected category.",
+                        style={"color": MUTED, "padding": "24px"})
+
+    by_inst: dict[str, list] = defaultdict(list)
+    for iss in issues:
+        by_inst[iss["le_book"]].append(iss)
+
+    inst_order = sorted(
+        by_inst.keys(),
+        key=lambda lb: max((i.get("resolved_at") or "") for i in by_inst[lb]),
+        reverse=True,
+    )
+
+    H = {"fontSize": "11px", "fontWeight": "900", "color": MUTED,
+         "textTransform": "uppercase", "letterSpacing": "0.05em", "padding": "8px 10px"}
+
+    _CAT_CLR = {"B": "#2563EB", "MF": "#753918", "SACCO": "#16A34A", "OSACCO": "#16A34A"}
+
+    cards = []
+    for cidx, lb in enumerate(inst_order):
+        inst_issues = sorted(by_inst[lb],
+                             key=lambda x: x.get("resolved_at") or "", reverse=True)
+        inst_info   = _cats.get(str(lb), {})
+        name        = (inst_issues[0].get("institution_name") or lb).title()
+        cat_type    = (inst_info.get("category_type") or "").upper()
+        tables      = sorted({i["table_name"] for i in inst_issues})
+        latest_res  = max((i.get("resolved_at") or "") for i in inst_issues)
+
+        fix_days = []
+        for i in inst_issues:
+            try:
+                fix_days.append(
+                    (_date.fromisoformat(i["resolved_at"]) -
+                     _date.fromisoformat(i["detected_at"])).days
+                )
+            except Exception:
+                pass
+        avg_fix = f"{sum(fix_days) // len(fix_days)}d avg" if fix_days else "—"
+
+        cat_clr = _CAT_CLR.get(cat_type, MUTED)
+
+        header = html.Div([
+            html.Div([
+                html.Span("▶",
+                          id={"type": "res-inst-toggle", "index": cidx},
+                          n_clicks=0,
+                          style={"cursor": "pointer", "color": MUTED, "fontSize": "10px",
+                                 "marginRight": "10px", "userSelect": "none",
+                                 "flexShrink": "0"}),
+                html.Span(name, style={"fontWeight": "700", "fontSize": "13px",
+                                       "color": TEXT}),
+                html.Span(cat_type, style={
+                    "fontSize": "10px", "fontWeight": "700", "color": cat_clr,
+                    "border": f"1px solid {cat_clr}", "borderRadius": "3px",
+                    "padding": "1px 6px", "marginLeft": "8px",
+                }),
+                html.Span(f"le_book: {lb}", style={
+                    "fontSize": "10px", "color": MUTED, "marginLeft": "8px",
+                }),
+            ], style={"display": "flex", "alignItems": "center", "flex": "1",
+                      "minWidth": "0"}),
+
+            html.Div([
+                html.Span(f"{len(inst_issues)} issue{'s' if len(inst_issues) != 1 else ''}",
+                          style={"fontSize": "11px", "fontWeight": "700",
+                                 "color": C_GREEN, "whiteSpace": "nowrap"}),
+                html.Span("  ·  ", style={"color": DIVIDER, "fontSize": "11px"}),
+                html.Span(
+                    ", ".join(t.replace("_", " ") for t in tables[:3])
+                    + ("…" if len(tables) > 3 else ""),
+                    style={"fontSize": "11px", "color": MUTED, "whiteSpace": "nowrap"},
+                ),
+                html.Span("  ·  ", style={"color": DIVIDER, "fontSize": "11px"}),
+                html.Span(f"resolved {latest_res}",
+                          style={"fontSize": "11px", "color": C_GREEN,
+                                 "whiteSpace": "nowrap"}),
+                html.Span("  ·  ", style={"color": DIVIDER, "fontSize": "11px"}),
+                html.Span(avg_fix, style={"fontSize": "11px", "color": MUTED,
+                                          "whiteSpace": "nowrap"}),
+            ], style={"display": "flex", "alignItems": "center", "gap": "2px",
+                      "flexWrap": "nowrap", "overflow": "hidden"}),
+
+            html.Div("⬇ ZIP",
+                     id={"type": "res-dl-btn", "index": lb},
+                     n_clicks=0,
+                     style={"cursor": "pointer", "background": BRAND, "color": CARD,
+                            "fontSize": "10px", "fontWeight": "700",
+                            "padding": "4px 12px", "borderRadius": "4px",
+                            "userSelect": "none", "marginLeft": "16px",
+                            "flexShrink": "0"}),
+        ], style={
+            "display": "flex", "alignItems": "center",
+            "padding": "10px 14px", "background": CARD, "gap": "12px",
+        })
+
+        tbl_hdr = html.Div([
+            html.Span("Table",        style={**H, "flex": "1"}),
+            html.Span("Rule",         style={**H, "width": "90px"}),
+            html.Span("Dimension",    style={**H, "width": "110px"}),
+            html.Span("Failing Rows", style={**H, "width": "100px",
+                                             "textAlign": "right"}),
+            html.Span("Detected",     style={**H, "width": "96px"}),
+            html.Span("Resolved",     style={**H, "width": "96px"}),
+            html.Span("Days to Fix",  style={**H, "width": "80px",
+                                             "textAlign": "center"}),
+            html.Span("Timing",       style={**H, "width": "70px",
+                                             "textAlign": "center"}),
+        ], style={"display": "flex", "background": BG,
+                  "borderTop": f"1px solid {DIVIDER}"})
+
+        detail_rows = []
+        for j, iss in enumerate(inst_issues):
+            try:
+                days_fix = (_date.fromisoformat(iss["resolved_at"]) -
+                            _date.fromisoformat(iss["detected_at"])).days
+                fix_str  = f"{days_fix}d"
+                fix_clr  = C_GREEN if days_fix <= 7 else (C_RED if days_fix >= 20 else TEXT)
+            except Exception:
+                fix_str, fix_clr = "—", MUTED
+            try:
+                on_time = (_date.fromisoformat(iss["resolved_at"]) <=
+                           _date.fromisoformat(iss["sla_deadline"]))
+                timing_label = "On Time"
+                timing_color = C_GREEN
+            except Exception:
+                on_time = None
+                timing_label, timing_color = "—", MUTED
+            if on_time is False:
+                timing_label = "Late"
+                timing_color = C_RED
+
+            detail_rows.append(html.Div([
+                html.Span(iss["table_name"],
+                          style={"flex": "1", "fontSize": "11px", "color": TEXT,
+                                 "padding": "6px 10px", "fontFamily": "monospace"}),
+                html.Span(iss["rule_id"],
+                          style={"width": "90px", "fontSize": "11px", "fontWeight": "700",
+                                 "color": TEXT, "padding": "6px 10px"}),
+                html.Span(iss["dimension"].title(),
+                          style={"width": "110px", "fontSize": "11px",
+                                 "color": MUTED, "padding": "6px 10px"}),
+                html.Span(f"{iss.get('failing_rows', 0):,}",
+                          style={"width": "100px", "fontSize": "11px", "color": MUTED,
+                                 "textAlign": "right", "padding": "6px 10px"}),
+                html.Span(iss.get("detected_at", "—"),
+                          style={"width": "96px", "fontSize": "11px",
+                                 "color": MUTED, "padding": "6px 10px"}),
+                html.Span(iss.get("resolved_at", "—"),
+                          style={"width": "96px", "fontSize": "11px",
+                                 "color": C_GREEN, "padding": "6px 10px"}),
+                html.Span(fix_str,
+                          style={"width": "80px", "fontSize": "12px", "fontWeight": "700",
+                                 "color": fix_clr, "textAlign": "center",
+                                 "padding": "6px 10px"}),
+                html.Span(timing_label,
+                          style={"width": "70px", "fontSize": "11px", "fontWeight": "700",
+                                 "color": timing_color, "textAlign": "center",
+                                 "padding": "6px 10px"}),
+            ], style={
+                "display": "flex", "alignItems": "center",
+                "background": BG if j % 2 == 0 else CARD,
+                "borderTop": f"1px solid {DIVIDER}",
+            }))
+
+        collapse = html.Div(
+            [tbl_hdr, *detail_rows],
+            id={"type": "res-inst-collapse", "index": cidx},
+            style={"display": "none"},
+        )
+
+        cards.append(html.Div(
+            [header, collapse],
+            style={
+                "background": CARD, "border": f"1px solid {DIVIDER}",
+                "borderRadius": "8px", "marginBottom": "8px",
+                "overflow": "hidden",
+            },
+        ))
+
+    return html.Div(cards)
 
 
 def _build_issue_rows(issues: list, status: str) -> html.Div:
@@ -1265,8 +2235,21 @@ def _build_issue_rows(issues: list, status: str) -> html.Div:
             try:
                 days_left = (_date.fromisoformat(iss["sla_deadline"]) - today).days
             except Exception:
-                days_left = "?"
-            days_color = C_RED if isinstance(days_left, int) and days_left <= 5 else TEXT
+                days_left = None
+            is_overdue  = band == "overdue" or (isinstance(days_left, int) and days_left < 0)
+            if is_overdue:
+                over_days  = abs(days_left) if isinstance(days_left, int) else "?"
+                days_str   = f"⚠ {over_days}d over"
+                days_color = _URGENCY_COLORS["overdue"]
+            elif isinstance(days_left, int) and days_left <= 5:
+                days_str   = f"{days_left}d left"
+                days_color = C_RED
+            elif isinstance(days_left, int):
+                days_str   = f"{days_left}d left"
+                days_color = TEXT
+            else:
+                days_str   = "?"
+                days_color = MUTED
             row_children = [
                 inst_cell,
                 html.Span(iss["table_name"],           style={"width": "160px", "fontSize": "11px", "color": MUTED, "padding": "7px 10px"}),
@@ -1274,8 +2257,8 @@ def _build_issue_rows(issues: list, status: str) -> html.Div:
                 html.Span(iss["dimension"].title(),    style={"width": "100px", "fontSize": "11px", "color": MUTED, "padding": "7px 10px"}),
                 html.Span(f"{iss['failing_rows']:,}",  style={"width": "90px",  "fontSize": "12px", "fontWeight": "700", "color": TEXT, "textAlign": "right", "padding": "7px 10px"}),
                 html.Span(iss["detected_at"],          style={"width": "90px",  "fontSize": "11px", "color": MUTED, "padding": "7px 10px"}),
-                html.Span(iss["sla_deadline"],         style={"width": "90px",  "fontSize": "11px", "color": MUTED, "padding": "7px 10px"}),
-                html.Span(f"{days_left}d",             style={"width": "76px",  "fontSize": "12px", "fontWeight": "700", "color": days_color, "textAlign": "center", "padding": "7px 10px"}),
+                html.Span(iss["sla_deadline"],         style={"width": "90px",  "fontSize": "11px", "color": C_RED if is_overdue else MUTED, "padding": "7px 10px"}),
+                html.Span(days_str,                    style={"width": "76px",  "fontSize": "12px", "fontWeight": "700", "color": days_color, "textAlign": "center", "padding": "7px 10px"}),
                 html.Div("🔔",
                     id={"type": "notify-btn", "index": lb},
                     n_clicks=0,
@@ -1299,126 +2282,102 @@ def _build_issue_rows(issues: list, status: str) -> html.Div:
 
 def _alerts_page() -> html.Div:
     from datetime import date as _date
+
     try:
-        from dq_issue_tracker import get_open_issues, get_issues, URGENCY_COLORS
-        open_issues = get_open_issues()
-        all_issues  = get_issues()
+        from dq_issue_tracker import get_issues
+        all_resolved = get_issues(status="resolved")
+        all_open     = get_issues(status="open")
     except Exception:
-        open_issues = []
-        all_issues  = []
+        all_resolved = []
+        all_open     = []
 
-    # Build institution options from all issues (all statuses)
-    inst_seen: dict[str, str] = {}
-    for iss in all_issues:
-        lb = iss["le_book"]
-        if lb not in inst_seen:
-            inst_seen[lb] = (iss.get("institution_name") or lb).title()
-    inst_options = [{"label": "All Institutions", "value": ""}] + [
-        {"label": name, "value": lb}
-        for lb, name in sorted(inst_seen.items(), key=lambda kv: kv[1])
-    ]
+    today      = _date.today()
+    this_month = today.strftime("%Y-%m")
+    month_res_count  = sum(1 for i in all_resolved
+                           if (i.get("resolved_at") or "").startswith(this_month))
+    inst_count       = len({i["le_book"] for i in all_resolved})
+    overdue_count    = sum(1 for i in all_open if i.get("urgency_band") == "overdue")
+    on_time_count    = sum(
+        1 for i in all_resolved
+        if i.get("sla_deadline") and i.get("resolved_at")
+        and i["resolved_at"] <= i["sla_deadline"]
+    )
+    late_count = len(all_resolved) - on_time_count
 
-    today = _date.today()
+    fix_days_list = []
+    for i in all_resolved:
+        try:
+            d = (_date.fromisoformat(i["resolved_at"]) - _date.fromisoformat(i["detected_at"])).days
+            fix_days_list.append(d)
+        except Exception:
+            pass
+    avg_fix = f"{sum(fix_days_list) // len(fix_days_list)}d" if fix_days_list else "—"
 
-    # ── summary bar (open issues only) ────────────────────────────────────────
-    band_counts = {"new": 0, "attention": 0, "urgent": 0, "critical": 0}
-    for iss in open_issues:
-        b = iss.get("urgency_band", "new")
-        if b in band_counts:
-            band_counts[b] += 1
-
-    summary_chips = []
-    for band, label in [("critical", "About to Breach"), ("urgent", "Urgent"),
-                         ("attention", "Needs Attention"), ("new", "New")]:
-        n = band_counts[band]
-        clr = _URGENCY_COLORS[band]
-        summary_chips.append(html.Div([
-            html.Span(str(n), style={"fontWeight": "900", "fontSize": "22px", "color": clr}),
-            html.Span(label,  style={"fontSize": "11px",  "color": MUTED, "marginTop": "2px"}),
+    def _stat_chip(value, label, color=None, border_color=None):
+        bc = border_color or DIVIDER
+        return html.Div([
+            html.Span(str(value), style={"fontWeight": "900", "fontSize": "22px",
+                                         "color": color or TEXT}),
+            html.Span(label,      style={"fontSize": "11px", "color": MUTED,
+                                         "marginTop": "2px"}),
         ], style={
             "display": "flex", "flexDirection": "column", "alignItems": "center",
-            "background": CARD, "borderRadius": "8px", "padding": "14px 22px",
-            "border": f"2px solid {clr}", "minWidth": "110px",
-        }))
+            "background": CARD, "borderRadius": "8px", "padding": "12px 24px",
+            "border": f"1px solid {bc}", "minWidth": "110px",
+        })
 
-    summary_bar = html.Div(summary_chips, style={
-        "display": "flex", "gap": "12px", "flexWrap": "wrap", "marginBottom": "24px",
+    summary_bar = html.Div([
+        _stat_chip(len(all_open),     "Open Issues",         C_AMBER),
+        _stat_chip(overdue_count,     "Overdue",             _URGENCY_COLORS["overdue"],
+                   border_color=_URGENCY_COLORS["overdue"]),
+        _stat_chip(month_res_count,   "Resolved This Month", C_GREEN),
+        _stat_chip(len(all_resolved), "Total Resolved"),
+        _stat_chip(on_time_count,     "Resolved On Time",    C_GREEN),
+        _stat_chip(late_count,        "Resolved Late",       C_RED  if late_count else MUTED),
+        _stat_chip(avg_fix,           "Avg Days to Fix"),
+    ], style={"display": "flex", "gap": "10px", "flexWrap": "wrap", "marginBottom": "24px"})
+
+    toolbar = html.Div([
+        html.Span("Category:", style={"fontSize": "12px", "color": MUTED,
+                                      "alignSelf": "center", "marginRight": "10px",
+                                      "whiteSpace": "nowrap"}),
+        dcc.RadioItems(
+            id="alerts-cat-filter",
+            options=[
+                {"label": "All Categories", "value": ""},
+                {"label": "Banks (B)",      "value": "B"},
+                {"label": "MFIs",           "value": "MF"},
+                {"label": "SACCOs",         "value": "SACCO"},
+            ],
+            value="",
+            inline=True,
+            inputStyle={"marginRight": "4px"},
+            labelStyle={"marginRight": "14px", "fontSize": "12px",
+                        "fontWeight": "700", "cursor": "pointer"},
+        ),
+        html.Span(style={"flex": "1"}),
+        html.Div("⬇ Export XLSX", id="issues-download-btn", n_clicks=0,
+                 style={"cursor": "pointer", "background": BRAND, "color": CARD,
+                        "fontSize": "11px", "fontWeight": "700",
+                        "padding": "6px 14px", "borderRadius": "5px",
+                        "userSelect": "none", "whiteSpace": "nowrap"}),
+    ], style={
+        "display": "flex", "alignItems": "center", "flexWrap": "wrap",
+        "gap": "6px", "marginBottom": "18px",
+        "background": CARD, "borderRadius": "8px",
+        "padding": "10px 16px", "border": f"1px solid {DIVIDER}",
     })
 
     return html.Div([
-        html.H2("Alerts & Issue Tracker", style={
+        html.H2("Resolved Issues", style={
             "fontSize": "18px", "fontWeight": "900", "color": TEXT,
             "marginTop": "0", "marginBottom": "6px",
         }),
-        html.P(
-            "Issues are detected when a dimension score falls below 85% for an institution. "
-            "They are tracked for 30 days. "
-            #"Click 🔔 to send a reminder email to the institution."
-            ,
-            style={"fontSize": "12px", "color": MUTED, "marginBottom": "20px"},
-        ),
-        html.Div(id="notify-feedback", style={"marginBottom": "12px"}),
         summary_bar,
-        _freshness_section(),
-        # ── filter bar ────────────────────────────────────────────────────────
-        html.Div([
-            # Status radio
-            html.Span("Issues:", style={"fontSize": "12px", "color": MUTED,
-                                        "marginRight": "10px", "alignSelf": "center",
-                                        "whiteSpace": "nowrap"}),
-            dcc.RadioItems(
-                id="issue-status-filter",
-                options=[
-                    {"label": "Open",     "value": "open"},
-                    {"label": "Delayed",  "value": "penalized"},
-                    {"label": "Resolved", "value": "resolved"},
-                ],
-                value="open",
-                inline=True,
-                inputStyle={"marginRight": "4px"},
-                labelStyle={
-                    "marginRight": "12px", "fontSize": "12px",
-                    "fontWeight": "700", "cursor": "pointer",
-                },
-            ),
-            # Divider
-            html.Span(style={
-                "width": "1px", "background": DIVIDER,
-                "alignSelf": "stretch", "margin": "0 16px",
-            }),
-            # Institution filter
-            html.Span("Institution:", style={
-                "fontSize": "12px", "color": MUTED,
-                "marginRight": "10px", "alignSelf": "center",
-                "whiteSpace": "nowrap",
-            }),
-            dcc.Dropdown(
-                id="alerts-inst-filter",
-                options=inst_options,
-                value="",
-                clearable=False,
-                style={
-                    "fontSize": "12px", "fontFamily": FONT,
-                    "minWidth": "260px",
-                },
-            ),
-            # Divider
-            html.Span(style={
-                "width": "1px", "background": DIVIDER,
-                "alignSelf": "stretch", "margin": "0 16px",
-            }),
-            # Export button
-            html.Div("⬇ Export XLSX", id="issues-download-btn", n_clicks=0,
-                     style={
-                         "cursor": "pointer", "background": BRAND, "color": CARD,
-                         "fontSize": "11px", "fontWeight": "700",
-                         "padding": "6px 14px", "borderRadius": "5px",
-                         "userSelect": "none", "whiteSpace": "nowrap",
-                     }),
-        ], style={"display": "flex", "alignItems": "center",
-                  "marginBottom": "12px", "flexWrap": "wrap", "gap": "4px"}),
+        toolbar,
         html.Div(id="issue-list"),
-    ], style={"padding": "28px 32px", "maxWidth": "1300px", "margin": "0 auto"})
+        html.Div(id="notify-feedback", style={"display": "none"}),
+    ], style={"padding": "28px 32px", "maxWidth": "1380px", "margin": "0 auto"})
 
 
 # ── bootstrap values (rendered once at startup) ────────────────────────────────
@@ -1428,7 +2387,7 @@ _counts    = _category_counts(_today_e)
 _run_ts    = _PIPELINE.get("data_processed", "")
 _run_date  = _PIPELINE.get("run_date", _today_e.get("date", "—"))
 _run_label = (
-    f"Last run: {_run_date}"
+    f"Last detection: {_run_date}"
     + (f"  ·  {_run_ts[11:16]} UTC" if len(_run_ts) >= 16 else "")
 )
 
@@ -1440,6 +2399,8 @@ _DIM_PILL_COLOR = {
     "accuracy":     "#B8860B",
     "timeliness":   "#7C3D1E",
     "validity":     "#C9956C",
+    "uniqueness":   "#2563EB",
+    "relationship": "#475569",
 }
 
 
@@ -1486,152 +2447,108 @@ _STATUS_STYLE = {
 
 
 def _rules_charts(builtin_rules: list[dict], user_rules: list[dict]) -> html.Div:
-    """Two-panel chart: by dimension (left) + by table (right)."""
+    """Single horizontal bar chart: total rules per table (no dimension breakdown)."""
     from collections import defaultdict
-
-    dim_order = ["completeness", "accuracy", "timeliness", "validity"]
 
     pending = [r for r in user_rules if r.get("status") == "pending"]
     active  = [r for r in user_rules if r.get("status") == "active"]
 
-    builtin_dim = {d: sum(1 for r in builtin_rules if r["dimension"] == d) for d in dim_order}
-    active_dim  = {d: sum(1 for r in active        if r.get("dimension") == d) for d in dim_order}
-    pending_dim = {d: sum(1 for r in pending        if r.get("dimension") == d) for d in dim_order}
+    _TABLE_LABELS = {
+        "accounts":              "Accounts",
+        "contract_loans":        "Contract Loans",
+        "contract_schedules":    "Contract Schedules",
+        "contracts_disburse":    "Contracts Disburse",
+        "contracts_expanded":    "Contracts",
+        "customers_expanded":    "Customers",
+        "loan_applications_2":   "Loan Applications",
+        "prev_loan_applications": "Prev Loan Apps",
+    }
 
-    has_pending = any(pending_dim[d] > 0 for d in dim_order)
+    def _count_per_table(rule_list: list[dict]) -> dict[str, int]:
+        counts: dict[str, int] = defaultdict(int)
+        for r in rule_list:
+            tables_str = r.get("tables", "")
+            if "→" in tables_str:
+                child = tables_str.split("→")[0].strip()
+                if child:
+                    counts[child] += 1
+            else:
+                for t in tables_str.split(","):
+                    t = t.strip()
+                    if t:
+                        counts[t] += 1
+        return counts
 
-    dim_traces = [
-        go.Bar(
-            name="Built-in rules",
-            x=[d.capitalize() for d in dim_order],
-            y=[builtin_dim[d] + active_dim[d] for d in dim_order],
-            marker_color=[_DIM_PILL_COLOR[d] for d in dim_order],
-            text=[str(builtin_dim[d] + active_dim[d]) for d in dim_order],
-            textposition="outside",
-            hovertemplate="%{x}: %{y} run rules<extra></extra>",
-            showlegend=False,
-        ),
-    ]
+    run_counts     = _count_per_table(builtin_rules + active)
+    pending_counts = _count_per_table(pending)
+
+    all_tables = sorted(
+        set(run_counts.keys()) | set(pending_counts.keys()),
+        key=lambda t: run_counts.get(t, 0) + pending_counts.get(t, 0),
+    )
+
+    y_labels  = [_TABLE_LABELS.get(t, t.replace("_", " ").title()) for t in all_tables]
+    x_run     = [run_counts.get(t, 0) for t in all_tables]
+    x_pending = [pending_counts.get(t, 0) for t in all_tables]
+    has_pending = any(x_pending)
+
+    traces = [go.Bar(
+        name="Built-in + active rules",
+        y=y_labels,
+        x=x_run,
+        orientation="h",
+        marker_color=BRAND,
+        text=[str(v) for v in x_run],
+        textposition="outside",
+        hovertemplate="%{y}: %{x} rules<extra></extra>",
+        showlegend=False,
+    )]
     if has_pending:
-        dim_traces.append(go.Bar(
+        traces.append(go.Bar(
             name="Pending (not yet run)",
-            x=[d.capitalize() for d in dim_order],
-            y=[pending_dim[d] for d in dim_order],
+            y=y_labels,
+            x=x_pending,
+            orientation="h",
             marker=dict(
                 color="rgba(148,163,184,0.35)",
                 pattern=dict(shape="/", fgcolor="rgba(100,116,139,0.6)", size=6),
                 line=dict(color="rgba(100,116,139,0.5)", width=1),
             ),
-            text=[str(pending_dim[d]) if pending_dim[d] else "" for d in dim_order],
+            text=[str(v) if v else "" for v in x_pending],
             textposition="outside",
-            hovertemplate="%{x}: %{y} pending rules<extra></extra>",
+            hovertemplate="Pending — %{y}: %{x} rules<extra></extra>",
         ))
 
-    fig_dim = go.Figure(dim_traces)
-    fig_dim.update_layout(
-        barmode="group",
-        height=240,
+    fig = go.Figure(traces)
+    fig.update_layout(
+        barmode="stack",
+        height=max(260, 40 * len(all_tables) + 70),
         paper_bgcolor=CARD, plot_bgcolor=CARD,
-        margin=dict(l=8, r=8, t=36, b=8),
+        margin=dict(l=8, r=40, t=20, b=8),
         font=dict(family=FONT, size=11, color=TEXT),
-        yaxis=dict(title=None, gridcolor=DIVIDER, zeroline=False, tickfont=dict(size=10)),
-        xaxis=dict(tickfont=dict(size=11), showgrid=False),
-        bargap=0.25, bargroupgap=0.08,
+        xaxis=dict(title="Number of rules", gridcolor=DIVIDER, zeroline=False,
+                   tickfont=dict(size=10)),
+        yaxis=dict(tickfont=dict(size=11), showgrid=False, automargin=True),
+        bargap=0.3,
         legend=dict(orientation="h", yanchor="bottom", y=1.02,
                     xanchor="left", x=0, font=dict(size=10)),
         showlegend=has_pending,
     )
 
-    table_dim: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
-
-    def _add_table_rules(rule_list, dim_key="dimension"):
-        for r in rule_list:
-            dim        = r.get(dim_key, r.get("dimension", ""))
-            tables_str = r.get("tables", "")
-            if "→" in tables_str:
-                # RI rule: "child_table → parent_table" — credit the child table
-                child = tables_str.split("→")[0].strip()
-                if child:
-                    table_dim[child][dim] += 1
-            else:
-                for t in tables_str.split(","):
-                    t = t.strip()
-                    if t:
-                        table_dim[t][dim] += 1
-
-    _add_table_rules(builtin_rules)
-    _add_table_rules(active)
-
-    pending_table: dict[str, int] = defaultdict(int)
-    for r in pending:
-        t = (r.get("tables") or "").split(",")[0].strip()
-        if t:
-            pending_table[t] += 1
-
-    all_tables = sorted(
-        set(table_dim.keys()) | set(pending_table.keys()),
-        key=lambda t: sum(table_dim[t].values()) + pending_table.get(t, 0),
-        reverse=True,
-    )
-
-    tbl_traces = []
-    for dim in dim_order:
-        tbl_traces.append(go.Bar(
-            name=dim.capitalize(),
-            y=all_tables,
-            x=[table_dim[t].get(dim, 0) for t in all_tables],
-            orientation="h",
-            marker_color=_DIM_PILL_COLOR[dim],
-            hovertemplate=f"<b>{dim.capitalize()}</b><br>%{{y}}: %{{x}} rules<extra></extra>",
-        ))
-    if any(pending_table.get(t, 0) for t in all_tables):
-        tbl_traces.append(go.Bar(
-            name="Pending (not yet run)",
-            y=all_tables,
-            x=[pending_table.get(t, 0) for t in all_tables],
-            orientation="h",
-            marker=dict(
-                color="rgba(148,163,184,0.35)",
-                pattern=dict(shape="/", fgcolor="rgba(100,116,139,0.6)", size=6),
-                line=dict(color="rgba(100,116,139,0.5)", width=1),
-            ),
-            hovertemplate="<b>Pending (not yet run)</b><br>%{y}: %{x} rules<extra></extra>",
-        ))
-
-    fig_tbl = go.Figure(tbl_traces)
-    fig_tbl.update_layout(
-        barmode="stack",
-        height=max(240, 36 * len(all_tables) + 60),
-        paper_bgcolor=CARD, plot_bgcolor=CARD,
-        margin=dict(l=8, r=8, t=36, b=8),
-        font=dict(family=FONT, size=11, color=TEXT),
-        xaxis=dict(title=None, gridcolor=DIVIDER, zeroline=False, tickfont=dict(size=10)),
-        yaxis=dict(tickfont=dict(size=10), showgrid=False, automargin=True),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02,
-                    xanchor="left", x=0, font=dict(size=10)),
-        bargap=0.25,
-    )
-
-    def _chart_card(title: str, fig: go.Figure) -> html.Div:
-        return html.Div([
-            html.Div(title, style={
-                "fontSize": "11px", "fontWeight": "900", "color": MUTED,
-                "textTransform": "uppercase", "letterSpacing": "0.06em",
-                "lineHeight": "1.15", "marginBottom": "4px",
-            }),
-            dcc.Graph(figure=fig, config={"displayModeBar": False}),
-        ], style={
-            "flex": "1", "minWidth": "0",
-            "background": CARD, "borderRadius": "8px",
-            "padding": "16px 16px 8px",
-            "boxShadow": "0 1px 4px rgba(117,57,24,0.08)",
-            "border": f"1px solid {DIVIDER}",
-        })
-
     return html.Div([
-        _chart_card("RULES BY DIMENSION", fig_dim),
-        _chart_card("RULES BY TABLE",     fig_tbl),
-    ], style={"display": "flex", "gap": "16px", "marginBottom": "20px"})
+        html.Div("RULES BY TABLE", style={
+            "fontSize": "11px", "fontWeight": "900", "color": MUTED,
+            "textTransform": "uppercase", "letterSpacing": "0.06em",
+            "marginBottom": "6px",
+        }),
+        dcc.Graph(figure=fig, config={"displayModeBar": False}),
+    ], style={
+        "background": CARD, "borderRadius": "8px",
+        "padding": "16px 16px 8px",
+        "boxShadow": "0 1px 4px rgba(117,57,24,0.08)",
+        "border": f"1px solid {DIVIDER}",
+        "marginBottom": "20px",
+    })
 
 
 def _rule_form(next_id: str) -> html.Div:
@@ -1984,25 +2901,13 @@ def _complex_rule_form(next_id: str) -> html.Div:
 
 def _validations_page() -> html.Div:
     builtin_rules = get_all_rules()
-    user_rules    = get_user_rules()       # non-draft: pending / active / error
-    draft_rules   = get_draft_rules()
-    total         = len(builtin_rules) + len(user_rules)
-    n_pending     = sum(1 for r in user_rules if r.get("status") == "pending")
-    next_id       = next_user_rule_id()
-
-    subtitle = f"{total} rules across 4 dimensions"
-    if n_pending:
-        subtitle += f"  ·  {n_pending} pending (will run on next pipeline)"
-    if draft_rules:
-        subtitle += f"  ·  {len(draft_rules)} awaiting review"
-
-    draft_section = _draft_review_section(draft_rules)
+    n_tables  = len({t.strip() for r in builtin_rules
+                     for t in (r.get("tables") or "").replace("→", ",").split(",")
+                     if t.strip()})
+    subtitle  = f"{len(builtin_rules)} rules across {n_tables} tables"
 
     return html.Div([
-        # ── pending review (admin panel) ──────────────────────────────────────
-        draft_section if draft_section else html.Div(),
-
-        # ── header row: title + action buttons ───────────────────────────────
+        # ── header: title + download ──────────────────────────────────────────
         html.Div([
             html.Div([
                 html.Div("VALIDATION RULES", style={
@@ -2012,38 +2917,24 @@ def _validations_page() -> html.Div:
                 html.Div(subtitle,
                          style={"fontSize": "11px", "color": MUTED, "marginTop": "3px"}),
             ]),
-            html.Div([
-                html.Div("+ Add Rule", id="form-toggle-btn", n_clicks=0, style={
-                    "cursor": "pointer", "background": CARD, "color": BRAND,
-                    "fontSize": "12px", "fontWeight": "700", "padding": "8px 16px",
-                    "borderRadius": "6px", "border": f"1px solid {BRAND}",
-                    "userSelect": "none", "marginRight": "8px",
-                }),
-                html.Div("+ Complex Rule", id="complex-form-toggle-btn", n_clicks=0, style={
-                    "cursor": "pointer", "background": CARD, "color": "#7C3D1E",
-                    "fontSize": "12px", "fontWeight": "700", "padding": "8px 16px",
-                    "borderRadius": "6px", "border": "1px solid #7C3D1E",
-                    "userSelect": "none", "marginRight": "8px",
-                }),
-                html.Div("Download CSV", id="rules-download-btn", n_clicks=0, style={
-                    "cursor": "pointer", "background": BRAND, "color": CARD,
-                    "fontSize": "12px", "fontWeight": "700", "padding": "8px 18px",
-                    "borderRadius": "6px", "userSelect": "none",
-                }),
-            ], style={"display": "flex", "alignItems": "center"}),
+            html.Div("Download CSV", id="rules-download-btn", n_clicks=0, style={
+                "cursor": "pointer", "background": BRAND, "color": CARD,
+                "fontSize": "12px", "fontWeight": "700", "padding": "8px 18px",
+                "borderRadius": "6px", "userSelect": "none",
+            }),
         ], style={
             "display": "flex", "alignItems": "center",
             "justifyContent": "space-between", "marginBottom": "16px",
         }),
 
-        # ── standard rule form ────────────────────────────────────────────────
-        _rule_form(next_id),
+        # Hidden trigger buttons + form panels kept in DOM so callback IDs resolve
+        html.Div(id="form-toggle-btn",         n_clicks=0, style={"display": "none"}),
+        html.Div(id="complex-form-toggle-btn", n_clicks=0, style={"display": "none"}),
+        _rule_form("USR-001"),
+        _complex_rule_form("USR-001"),
 
-        # ── complex rule form ─────────────────────────────────────────────────
-        _complex_rule_form(next_id),
-
-        # ── charts ───────────────────────────────────────────────────────────
-        _rules_charts(builtin_rules, user_rules),
+        # ── chart + download ──────────────────────────────────────────────────
+        _rules_charts(builtin_rules, []),
         dcc.Download(id="rules-download"),
     ])
 
@@ -2132,7 +3023,16 @@ def _build_cr_list(crs: list[dict], role: str = "bnr_admin") -> html.Div:
         })
 
         # Contextual action buttons — gated by role
-        # Flow: BNR creates → institution starts + submits → BNR approves/rejects
+        # Flow: BNR creates → institution starts + submits → BNR approves/rejects (table by table)
+        try:
+            cr_tables = json.loads(cr.get("tables") or "[]")
+        except Exception:
+            cr_tables = []
+        try:
+            table_approvals = json.loads(cr.get("table_approvals") or "{}")
+        except Exception:
+            table_approvals = {}
+
         action_btns: list = []
         if status == "open":
             if is_inst:
@@ -2146,10 +3046,53 @@ def _build_cr_list(crs: list[dict], role: str = "bnr_admin") -> html.Div:
                 action_btns.append(_action_btn("Cancel", cr["cr_id"], "closed", "#6B7280"))
         elif status == "submitted":
             if is_bnr_admin:
-                action_btns += [
-                    _action_btn("Approve", cr["cr_id"], "approved", "#16A34A"),
-                    _action_btn("Reject",  cr["cr_id"], "rejected", "#DC2626"),
-                ]
+                action_btns.append(_action_btn("Reject", cr["cr_id"], "rejected", "#DC2626"))
+                if cr_tables:
+                    from dq_issue_tracker import get_issues as _gi
+                    try:
+                        lb_open: dict[str, int] = {}
+                        for _i in _gi(status="open"):
+                            if _i["le_book"] == cr["le_book"]:
+                                lb_open[_i["table_name"]] = lb_open.get(_i["table_name"], 0) + 1
+                    except Exception:
+                        lb_open = {}
+                    tbl_rows = []
+                    for tbl in cr_tables:
+                        tbl_label  = TABLE_NAMES_PRETTY.get(tbl, tbl.replace("_", " ").title())
+                        tbl_status = table_approvals.get(tbl, {}).get("status", "pending")
+                        n_open     = lb_open.get(tbl, 0)
+                        chip_color = "#16A34A" if tbl_status == "approved" else "#D97706"
+                        chip_label = "Approved" if tbl_status == "approved" else "Pending"
+                        approve_btn = html.Span() if tbl_status == "approved" else html.Div(
+                            "✓ Approve Table",
+                            id={"type": "cr-tbl-approve-btn", "index": f"{cr['cr_id']}|{tbl}"},
+                            n_clicks=0,
+                            style={"display": "inline-block", "background": "#16A34A",
+                                   "color": CARD, "fontSize": "10px", "fontWeight": "700",
+                                   "padding": "3px 10px", "borderRadius": "4px",
+                                   "cursor": "pointer", "userSelect": "none", "marginLeft": "6px"},
+                        )
+                        tbl_rows.append(html.Div([
+                            html.Span(tbl_label, style={"fontSize": "11px", "color": TEXT,
+                                                        "fontWeight": "700", "width": "130px",
+                                                        "flexShrink": "0"}),
+                            html.Span(f"{n_open} open", style={"fontSize": "10px",
+                                                               "color": C_RED if n_open else C_GREEN,
+                                                               "width": "60px", "flexShrink": "0"}),
+                            html.Span(chip_label, style={"fontSize": "10px", "fontWeight": "700",
+                                                          "color": chip_color,
+                                                          "border": f"1px solid {chip_color}",
+                                                          "borderRadius": "4px", "padding": "1px 6px"}),
+                            approve_btn,
+                        ], style={"display": "flex", "alignItems": "center",
+                                  "gap": "6px", "marginBottom": "4px"}))
+                    action_btns.append(html.Div(tbl_rows, style={
+                        "background": BG, "border": f"1px solid {DIVIDER}",
+                        "borderRadius": "6px", "padding": "8px 12px",
+                        "marginTop": "6px", "width": "100%",
+                    }))
+                else:
+                    action_btns.append(_action_btn("Approve", cr["cr_id"], "approved", "#16A34A"))
         elif status == "rejected":
             if is_inst:
                 action_btns.append(_action_btn("Reopen", cr["cr_id"], "in_progress", "#D97706"))
@@ -2298,7 +3241,7 @@ def _remediation_page(role: str = "bnr_admin") -> html.Div:
             "minWidth":       "90px",
         }))
 
-    summary_bar = html.Div(chips, style={
+    summary_bar = html.Div(chips, id="cr-summary-bar", style={
         "display": "flex", "gap": "10px", "flexWrap": "wrap",
         "marginBottom": "24px",
     })
@@ -2371,10 +3314,11 @@ def _remediation_page(role: str = "bnr_admin") -> html.Div:
                 },
             ),
             html.Div(
-                "Select an institution above to see its open issues.",
+                "Select an institution above to see its tables with open issues.",
                 id="cr-issue-hint",
                 style={"fontSize": "10px", "color": MUTED, "marginTop": "4px"},
             ),
+            html.Div(id="cr-table-dl-area", style={"marginTop": "6px"}),
         ], style={"marginBottom": "16px"}),
 
         # Row 3: title
@@ -2535,13 +3479,6 @@ def _remediation_page(role: str = "bnr_admin") -> html.Div:
                 "fontSize": "18px", "fontWeight": "900", "color": TEXT,
                 "margin": "0", "lineHeight": "1.2",
             }),
-            html.P(
-                "Create and manage Change Requests to track the correction of data quality "
-                "issues.  Each CR links one or more open issues to a structured workflow: "
-                "Open → In Progress → Submitted → Approved / Rejected.",
-                style={"fontSize": "12px", "color": MUTED,
-                       "marginTop": "6px", "marginBottom": "0", "lineHeight": "1.6"},
-            ),
         ], style={"marginBottom": "24px"}),
 
         # Status summary bar
@@ -2826,6 +3763,86 @@ app.layout = html.Div([
     dcc.Store(id="login-type",       data="bnr"),
     dcc.Download(id="inst-download"),
     dcc.Download(id="issues-download"),
+    dcc.Download(id="inst-csv-download"),
+    dcc.Download(id="resolved-inst-download"),
+    dcc.Download(id="open-issue-dl"),
+    dcc.Download(id="cr-tbl-dl"),
+    dcc.Store(id="resolved-dl-lb",  data=None),
+    dcc.Store(id="dl-preview-lb", data=None),
+
+    # ── download preview modal ────────────────────────────────────────────────
+    html.Div(
+        id="dl-preview-modal",
+        style={"display": "none"},
+        children=[
+            # backdrop
+            html.Div(style={
+                "position": "fixed", "inset": "0",
+                "background": "rgba(28,28,39,0.55)", "zIndex": "900",
+            }),
+            # dialog
+            html.Div([
+                # header
+                html.Div([
+                    html.Div([
+                        html.Span("⬇", style={"fontSize": "18px", "marginRight": "10px",
+                                              "color": BRAND}),
+                        html.Span(id="dl-modal-title",
+                                  style={"fontSize": "15px", "fontWeight": "700",
+                                         "color": TEXT}),
+                    ], style={"display": "flex", "alignItems": "center"}),
+                    html.Div(id="dl-modal-subtitle",
+                             style={"fontSize": "12px", "color": MUTED,
+                                    "marginTop": "2px"}),
+                ], style={
+                    "padding": "18px 22px 14px",
+                    "borderBottom": f"1px solid {DIVIDER}",
+                }),
+
+                # issues table
+                html.Div(
+                    id="dl-modal-table",
+                    style={
+                        "maxHeight": "420px", "overflowY": "auto",
+                        "padding": "0",
+                    },
+                ),
+
+                # footer buttons
+                html.Div([
+                    html.Div("Cancel", id="dl-modal-cancel", n_clicks=0,
+                             style={
+                                 "padding": "8px 22px", "borderRadius": "5px",
+                                 "border": f"1px solid {DIVIDER}",
+                                 "fontSize": "13px", "fontWeight": "600",
+                                 "color": MUTED, "cursor": "pointer",
+                                 "background": CARD,
+                             }),
+                    html.Div("Download Report", id="dl-modal-confirm", n_clicks=0,
+                             style={
+                                 "padding": "8px 22px", "borderRadius": "5px",
+                                 "fontSize": "13px", "fontWeight": "700",
+                                 "color": CARD, "cursor": "pointer",
+                                 "background": BRAND,
+                             }),
+                ], style={
+                    "display": "flex", "justifyContent": "flex-end",
+                    "gap": "10px", "padding": "14px 22px",
+                    "borderTop": f"1px solid {DIVIDER}",
+                }),
+            ], style={
+                "position": "fixed",
+                "top": "50%", "left": "50%",
+                "transform": "translate(-50%, -50%)",
+                "zIndex": "901",
+                "background": CARD,
+                "borderRadius": "10px",
+                "boxShadow": "0 8px 40px rgba(28,28,39,0.22)",
+                "width": "min(860px, 92vw)",
+                "fontFamily": FONT,
+            }),
+        ],
+    ),
 
 ], style={"background": BG, "minHeight": "100vh", "fontFamily": FONT})
 
@@ -2833,55 +3850,135 @@ app.layout = html.Div([
 # ── callbacks ──────────────────────────────────────────────────────────────────
 
 @app.callback(
+    Output({"type": "null-col-body", "index": MATCH}, "style"),
+    Output({"type": "null-col-btn",  "index": MATCH}, "children"),
+    Input({"type": "null-col-btn",   "index": MATCH}, "n_clicks"),
+    State({"type": "null-col-body",  "index": MATCH}, "style"),
+    prevent_initial_call=True,
+)
+def _toggle_null_cols(_n, current_style):
+    is_open  = (current_style or {}).get("display") != "none"
+    new_style = {"display": "none" if is_open else "block", "marginTop": "4px"}
+    label     = "▼ hide" if not is_open else "▶ show"
+    return new_style, label
+
+
+@app.callback(
     Output("pipeline-status-banner", "children"),
+    Output("status-poll", "interval"),
     Input("status-poll", "n_intervals"),
 )
 def _update_pipeline_banner(_):
-    """Refresh the header pipeline status every 30 s without a full page reload."""
-    run    = _load_pipeline_run()
+    """
+    Refresh pipeline status. Poll every 5 s while running, 30 s otherwise.
+    When running, shows live stage detection + log tail instead of a single line.
+    """
+    from datetime import datetime as _dt
+    import re as _re
+
+    run    = _fresh_pipeline()
     status = _load_pipeline_status()
-
-    # "Data as of" = the end date of the 7-day window the pipeline processed,
-    # i.e. the most recent date whose data is reflected in the dashboard scores.
     data_date = run.get("run_date", "—")
-
-    # Pipeline execution status from pipeline_status.json
     s = status.get("status", "")
-    if s == "running":
-        color  = "#FCD34D"                          # yellow
-        dot    = "● "
-        label  = "Running…"
-        ts_raw = status.get("started_at", "")
-        ts_lbl = f"since {ts_raw[11:16]}" if len(ts_raw) >= 16 else ""
-    elif s == "success":
-        color  = "#4ADE80"                          # green
-        dot    = "● "
-        label  = "Success"
-        ts_raw = status.get("finished_at", "")
-        ts_lbl = f"finished {ts_raw[11:16]}" if len(ts_raw) >= 16 else ""
-    elif s == "failed":
-        color  = "#F87171"                          # red
-        dot    = "● "
-        label  = "Failed"
-        ts_raw = status.get("finished_at", "")
-        ts_lbl = f"at {ts_raw[11:16]}" if len(ts_raw) >= 16 else ""
-    else:
-        color = dot = label = ts_lbl = ""
 
-    # Build one compact line: "Data as of: 2026-03-30  ·  ● Success  (finished 02:07)"
-    children = [
-        html.Span(f"Data as of: {data_date}",
-                  style={"color": "rgba(255,255,255,0.55)"}),
-    ]
-    if label:
-        children += [
-            html.Span("  ·  ", style={"color": "rgba(255,255,255,0.30)"}),
-            html.Span(dot + label, style={"color": color, "fontWeight": "700"}),
-            html.Span(f"  ({ts_lbl})" if ts_lbl else "",
-                      style={"color": "rgba(255,255,255,0.40)"}),
+    # ── dynamic poll interval ──────────────────────────────────────────────────
+    poll_ms = 5_000 if s == "running" else 30_000
+
+    # ── not running: compact banner line ──────────────────────────────────────
+    if s != "running":
+        if s == "success":
+            color, label = "#4ADE80", "Success"
+            ts_raw = status.get("finished_at", "")
+        elif s == "failed":
+            color, label = "#F87171", "Failed"
+            ts_raw = status.get("finished_at", "")
+        else:
+            color = label = ts_raw = ""
+
+        ts_lbl = f"{ts_raw[11:16]}" if len(ts_raw or "") >= 16 else ""
+        children = [
+            html.Span(f"Data as of: {data_date}",
+                      style={"color": "rgba(255,255,255,0.55)"}),
         ]
+        if label:
+            children += [
+                html.Span("  ·  ", style={"color": "rgba(255,255,255,0.30)"}),
+                html.Span(f"● {label}", style={"color": color, "fontWeight": "700"}),
+                html.Span(f"  ({ts_lbl})" if ts_lbl else "",
+                          style={"color": "rgba(255,255,255,0.40)"}),
+            ]
+        return html.Span(children, style={"fontSize": "11px"}), poll_ms
 
-    return html.Span(children, style={"fontSize": "11px", "lineHeight": "1.15"})
+    # ── running: rich live panel ───────────────────────────────────────────────
+    started_raw = status.get("started_at", "")
+    try:
+        started  = _dt.strptime(started_raw, "%Y-%m-%d %H:%M:%S")
+        elapsed  = _dt.now() - started
+        mins, sec = divmod(int(elapsed.total_seconds()), 60)
+        elapsed_str = f"{mins}m {sec:02d}s"
+    except Exception:
+        elapsed_str = "—"
+
+    # Read today's log file for stage + table detection
+    from datetime import date as _date
+    log_path = _DIR / "logs" / f"pipeline_{_date.today().isoformat()}.log"
+    log_lines: list[str] = []
+    stage_label = "Initialising…"
+    current_table = ""
+    try:
+        with open(log_path, "r", errors="replace") as f:
+            all_lines = f.readlines()
+        log_lines = [l.rstrip() for l in all_lines if l.strip()][-6:]
+
+        # Detect current stage from log content
+        full_text = "".join(all_lines)
+        if "Stage 3" in full_text or "Resolution scan" in full_text:
+            stage_label = "Stage 3 — Resolution scanner"
+        elif "Stage 2" in full_text or "RI checks" in full_text or "--reports" in full_text:
+            stage_label = "Stage 2 — RI checks + XLSX reports"
+        elif "Stage 1" in full_text or "--load" in full_text:
+            stage_label = "Stage 1 — SQL engines + scoring"
+
+        # Detect current table from most recent ━━ separator
+        tables_seen = _re.findall(r"━━\s+([\w]+)", full_text)
+        if tables_seen:
+            current_table = tables_seen[-1].replace("_", " ")
+    except Exception:
+        pass
+
+    # Compact log tail rows
+    _LOG_STYLE = {
+        "fontFamily": "monospace", "fontSize": "9px",
+        "color": "rgba(255,255,255,0.55)", "lineHeight": "1.4",
+        "display": "block", "whiteSpace": "nowrap",
+        "overflow": "hidden", "textOverflow": "ellipsis",
+        "maxWidth": "480px",
+    }
+    log_tail = [html.Span(l, style=_LOG_STYLE) for l in log_lines[-4:]]
+
+    panel = html.Div([
+        # Top row: animated dot + stage + elapsed
+        html.Div([
+            html.Span("⬤ ", style={
+                "color": "#FCD34D", "fontSize": "10px",
+                "animation": "pulse 1.2s ease-in-out infinite",
+            }),
+            html.Span(stage_label, style={
+                "color": "#FCD34D", "fontWeight": "700", "fontSize": "11px",
+            }),
+            html.Span(f"  ·  {elapsed_str}", style={
+                "color": "rgba(255,255,255,0.50)", "fontSize": "10px",
+            }),
+            *([ html.Span(f"  ·  {current_table}", style={
+                    "color": "rgba(255,255,255,0.40)", "fontSize": "10px",
+                    "fontStyle": "italic",
+                })] if current_table else []),
+        ], style={"marginBottom": "3px"}),
+        # Log tail
+        html.Div(log_tail),
+    ], style={"textAlign": "right"})
+
+    return panel, poll_ms
 
 
 @app.callback(
@@ -3147,23 +4244,186 @@ def _submit_rule(n_clicks, rule_id, dim, cat, name, table, field,
 
 
 @app.callback(
-    Output("inst-download", "data"),
+    Output("dl-preview-lb",    "data"),
+    Output("dl-preview-modal", "style"),
     Input({"type": "inst-dl-btn", "index": ALL}, "n_clicks"),
+    Input("dl-modal-cancel", "n_clicks"),
     prevent_initial_call=True,
 )
-def _on_inst_download(n_clicks):
+def _on_inst_dl_btn(n_clicks, _cancel):
+    tid = ctx.triggered_id
+    # close modal
+    if tid == "dl-modal-cancel":
+        return None, {"display": "none"}
+    # open modal
+    if not isinstance(tid, dict) or "index" not in tid:
+        raise dash.exceptions.PreventUpdate
     if not any(n for n in (n_clicks or []) if n):
         raise dash.exceptions.PreventUpdate
-    triggered = ctx.triggered_id
-    if not isinstance(triggered, dict) or "index" not in triggered:
+    return tid["index"], {"display": "block"}
+
+
+@app.callback(
+    Output("dl-modal-title",    "children"),
+    Output("dl-modal-subtitle", "children"),
+    Output("dl-modal-table",    "children"),
+    Input("dl-preview-lb", "data"),
+    prevent_initial_call=True,
+)
+def _populate_dl_modal(le_book):
+    if not le_book:
         raise dash.exceptions.PreventUpdate
-    le_book = triggered["index"]
-    if not REPORTS_DIR.exists():
+
+    from dq_issue_tracker import get_issues
+
+    issues = get_issues(le_book=le_book)
+
+    # institution name from categories JSON
+    try:
+        cats = json.loads(CATEGORIES_FILE.read_text())
+        info = cats.get(str(le_book), cats.get(le_book, {}))
+        inst_name = (info.get("name") or str(le_book)).title()
+    except Exception:
+        inst_name = str(le_book)
+
+    title    = f"{inst_name}  ({le_book})"
+    n_issues = len(issues)
+    tables   = len({i.get("table_name", "") for i in issues})
+    subtitle = (
+        f"{n_issues} issue{'s' if n_issues != 1 else ''} across "
+        f"{tables} table{'s' if tables != 1 else ''} will be included in the report"
+        if issues else "No open issues recorded — report will contain schema data only."
+    )
+
+    # ── table header ─────────────────────────────────────────────────────────
+    _TH = {
+        "padding": "8px 14px", "fontSize": "11px", "fontWeight": "700",
+        "color": "#FFFFFF", "textTransform": "uppercase",
+        "letterSpacing": "0.05em", "whiteSpace": "nowrap",
+        "background": BRAND,
+    }
+    header = html.Div([
+        html.Span("Table",        style={**_TH, "flex": "1.4"}),
+        html.Span("Rule",         style={**_TH, "flex": "0.9"}),
+        html.Span("Issue",        style={**_TH, "flex": "3"}),
+        html.Span("Dimension",    style={**_TH, "flex": "1"}),
+        html.Span("Failing Rows", style={**_TH, "flex": "0.8", "textAlign": "right"}),
+        html.Span("Status",       style={**_TH, "flex": "0.7", "textAlign": "center"}),
+    ], style={"display": "flex", "position": "sticky", "top": "0", "zIndex": "1"})
+
+    # ── urgency colour map ────────────────────────────────────────────────────
+    _URGENCY_CLR = {
+        "overdue":  "#7C3D1E", "critical": "#A0784A",
+        "urgent":   "#B8860B", "attention": "#68686f",
+        "new":      "#68686f",
+    }
+    _STATUS_BG = {
+        "open": "rgba(117,57,24,.10)", "penalized": "rgba(124,61,30,.15)",
+        "resolved": "rgba(40,160,80,.10)",
+    }
+
+    rows = []
+    for i, iss in enumerate(issues):
+        bg  = "rgba(244,246,249,0.7)" if i % 2 == 0 else "#FFFFFF"
+        st  = (iss.get("status") or "open").lower()
+        urg = (iss.get("urgency_band") or "new").lower()
+        _TD = {
+            "padding": "8px 14px", "fontSize": "12px",
+            "color": TEXT, "display": "flex", "alignItems": "center",
+        }
+        rows.append(html.Div([
+            html.Span(iss.get("table_name", "—"),
+                      style={**_TD, "flex": "1.4", "fontFamily": "monospace",
+                             "fontSize": "11px"}),
+            html.Span(iss.get("rule_id", "—"),
+                      style={**_TD, "flex": "0.9", "fontFamily": "monospace",
+                             "fontSize": "11px", "color": BRAND,
+                             "fontWeight": "700"}),
+            html.Span(iss.get("rule_name") or iss.get("dimension", "—"),
+                      style={**_TD, "flex": "3", "color": MUTED}),
+            html.Span((iss.get("dimension") or "").title(),
+                      style={**_TD, "flex": "1", "fontSize": "11px"}),
+            html.Span(f"{iss.get('failing_rows', '—'):,}" if isinstance(
+                          iss.get('failing_rows'), int) else "—",
+                      style={**_TD, "flex": "0.8", "textAlign": "right",
+                             "justifyContent": "flex-end", "fontWeight": "700",
+                             "color": _URGENCY_CLR.get(urg, TEXT)}),
+            html.Div(st.title(), style={
+                **_TD, "flex": "0.7", "justifyContent": "center",
+                "fontSize": "10px", "fontWeight": "700",
+                "borderRadius": "4px",
+                "background": _STATUS_BG.get(st, "transparent"),
+                "color": _URGENCY_CLR.get(urg, MUTED),
+            }),
+        ], style={
+            "display": "flex", "background": bg,
+            "borderBottom": f"1px solid {DIVIDER}",
+        }))
+
+    if not rows:
+        rows = [html.Div("No issues on record for this institution.",
+                         style={"padding": "18px 14px", "fontSize": "13px",
+                                "color": MUTED, "textAlign": "center"})]
+
+    table = html.Div([header] + rows)
+    return title, subtitle, table
+
+
+@app.callback(
+    Output("inst-download", "data"),
+    Input("dl-modal-confirm", "n_clicks"),
+    State("dl-preview-lb", "data"),
+    prevent_initial_call=True,
+)
+def _on_inst_download_confirm(n_clicks, le_book):
+    """
+    Download the latest issue report for this institution.
+    Preference order:
+      1. issue_reports/{le_book}_{YYYY-MM}.zip  (monthly detection ZIP)
+      2. reports/ CSV bundle (legacy pipeline CSVs)
+      3. reports/ XLSX fallback
+    """
+    if not n_clicks or not le_book:
         raise dash.exceptions.PreventUpdate
-    matches = sorted(REPORTS_DIR.glob(f"{le_book}_*.xlsx"), reverse=True)
-    if not matches:
-        raise dash.exceptions.PreventUpdate
-    return dcc.send_file(str(matches[0]))
+
+    # ── 1. monthly detection issue ZIP ────────────────────────────────────────
+    issue_reports_dir = _DIR / "issue_reports"
+    if issue_reports_dir.exists():
+        zips = sorted(issue_reports_dir.glob(f"{le_book}_*.zip"), reverse=True)
+        if zips:
+            return dcc.send_file(str(zips[0]))
+
+    # ── 2. legacy pipeline CSVs ───────────────────────────────────────────────
+    if REPORTS_DIR.exists():
+        import zipfile, io as _io
+        csv_files = sorted(REPORTS_DIR.glob(f"*_{le_book}_*.csv"), reverse=True)
+        if csv_files:
+            latest_month = None
+            for f in csv_files:
+                parts = f.stem.rsplit("_", 2)
+                if len(parts) == 3 and len(parts[2]) == 7:
+                    m = parts[2]
+                    if latest_month is None or m > latest_month:
+                        latest_month = m
+            month_files = [f for f in csv_files
+                           if f.stem.endswith(f"_{latest_month}")]
+            if len(month_files) == 1:
+                return dcc.send_file(str(month_files[0]))
+            if len(month_files) > 1:
+                buf = _io.BytesIO()
+                with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+                    for f in month_files:
+                        zf.write(f, arcname=f.name)
+                buf.seek(0)
+                return dcc.send_bytes(buf.read(),
+                                      filename=f"dq_report_{le_book}_{latest_month}.zip")
+
+        # ── 3. XLSX fallback ──────────────────────────────────────────────────
+        matches = sorted(REPORTS_DIR.glob(f"{le_book}_*.xlsx"), reverse=True)
+        if matches:
+            return dcc.send_file(str(matches[0]))
+
+    raise dash.exceptions.PreventUpdate
 
 
 @app.callback(
@@ -3420,33 +4680,163 @@ def _update_user_header(auth_data):
 
 @app.callback(
     Output("issue-list", "children"),
-    Input("issue-status-filter", "value"),
-    Input("alerts-inst-filter", "value"),
+    Input("alerts-cat-filter", "value"),
+    Input("notif-poll",        "n_intervals"),
 )
-def _refresh_issue_list(status, inst_filter):
-    from collections import Counter
+def _refresh_issue_list(cat_filter, _poll):
     from dq_issue_tracker import get_issues
-    status = status or "open"
-    inst_filter = inst_filter or ""
-    issues = get_issues(status=status, le_book=inst_filter if inst_filter else None)
+    cat_filter = cat_filter or ""
+    issues = get_issues(status="resolved")
+    issues.sort(key=lambda x: x.get("resolved_at") or "", reverse=True)
+    return _build_resolved_by_institution(issues, cat_filter)
 
-    # Sort: institutions with most issues first, then by sla_deadline within each
-    inst_counts = Counter(iss["le_book"] for iss in issues)
-    issues = sorted(issues, key=lambda x: (-inst_counts[x["le_book"]], x.get("sla_deadline", "")))
 
-    label = {"open": "Open", "penalized": "Delayed", "resolved": "Resolved"}.get(status, status.title())
-    subtitle = ""
-    if inst_filter:
-        inst_name = next((iss.get("institution_name") or inst_filter
-                          for iss in issues if iss["le_book"] == inst_filter), inst_filter)
-        subtitle = f" — {inst_name.title()}"
-    return [
-        html.H3(f"{label} Issues ({len(issues)}){subtitle}", style={
-            "fontSize": "14px", "fontWeight": "900", "color": TEXT,
-            "marginBottom": "10px", "marginTop": "0",
-        }),
-        _build_issue_rows(issues, status),
-    ]
+@app.callback(
+    Output({"type": "alert-inst-collapse", "index": MATCH}, "style"),
+    Output({"type": "alert-inst-toggle",   "index": MATCH}, "children"),
+    Input({"type": "alert-inst-toggle",    "index": MATCH}, "n_clicks"),
+    State({"type": "alert-inst-collapse",  "index": MATCH}, "style"),
+    prevent_initial_call=True,
+)
+def _toggle_alert_inst(n_clicks, current_style):
+    hidden    = (current_style or {}).get("display") == "none"
+    new_style = {"display": "block"} if hidden else {"display": "none"}
+    return new_style, "▼" if hidden else "▶"
+
+
+@app.callback(
+    Output({"type": "res-inst-collapse", "index": MATCH}, "style"),
+    Output({"type": "res-inst-toggle",   "index": MATCH}, "children"),
+    Input({"type": "res-inst-toggle",    "index": MATCH}, "n_clicks"),
+    State({"type": "res-inst-collapse",  "index": MATCH}, "style"),
+    prevent_initial_call=True,
+)
+def _toggle_res_inst(n_clicks, current_style):
+    hidden    = (current_style or {}).get("display") == "none"
+    new_style = {"display": "block"} if hidden else {"display": "none"}
+    return new_style, "▼" if hidden else "▶"
+
+
+@app.callback(
+    Output("resolved-dl-lb", "data"),
+    Input({"type": "res-dl-btn", "index": ALL}, "n_clicks"),
+    prevent_initial_call=True,
+)
+def _resolved_dl_select(clicks):
+    if not any(c for c in (clicks or []) if c):
+        raise dash.exceptions.PreventUpdate
+    tid = ctx.triggered_id
+    if not isinstance(tid, dict) or tid.get("type") != "res-dl-btn":
+        raise dash.exceptions.PreventUpdate
+    if not ctx.triggered[0]["value"]:
+        raise dash.exceptions.PreventUpdate
+    return tid["index"]
+
+
+@app.callback(
+    Output("resolved-inst-download", "data"),
+    Input("resolved-dl-lb", "data"),
+    prevent_initial_call=True,
+)
+def _resolved_dl_generate(le_book):
+    if not le_book:
+        raise dash.exceptions.PreventUpdate
+
+    import zipfile, io as _io
+    import pandas as pd
+    from datetime import date as _date
+    from dq_issue_tracker import get_issues
+    from dq_rules import COMP_RULE_META
+
+    resolved = [i for i in get_issues(status="resolved") if i["le_book"] == le_book]
+    if not resolved:
+        raise dash.exceptions.PreventUpdate
+
+    issue_reports_dir = _DIR / "issue_reports"
+    comp_rule_ids     = set(COMP_RULE_META.keys())
+    today_str         = _date.today().strftime("%Y-%m")
+    out_buf           = _io.BytesIO()
+    found_any         = False
+
+    # group resolved issues by (detected month, table)
+    by_month_table: dict[tuple, list] = {}
+    for iss in resolved:
+        month = (iss.get("detected_at") or "")[:7]
+        if month:
+            by_month_table.setdefault((month, iss["table_name"]), []).append(iss)
+
+    with zipfile.ZipFile(out_buf, "w", zipfile.ZIP_DEFLATED) as out_zf:
+        # process each (month, table) group using the stored detection ZIP
+        for (month, table), issues in sorted(by_month_table.items()):
+            zip_path = issue_reports_dir / f"{le_book}_{month}.zip"
+            if not zip_path.exists():
+                continue
+
+            try:
+                with zipfile.ZipFile(zip_path) as src_zf:
+                    if f"{table}.csv" not in src_zf.namelist():
+                        continue
+                    df = pd.read_csv(
+                        _io.BytesIO(src_zf.read(f"{table}.csv")),
+                        encoding="utf-8-sig", low_memory=False,
+                    )
+            except Exception:
+                continue
+
+            if df.empty or "issue_type" not in df.columns:
+                continue
+
+            # build filter: which issue_type values correspond to these resolved issues?
+            has_comp      = any(i["rule_id"] in comp_rule_ids for i in issues)
+            dim_types     = {i["rule_name"] for i in issues
+                             if i["rule_id"] not in comp_rule_ids and i.get("rule_name")}
+
+            mask = pd.Series(False, index=df.index)
+            if dim_types:
+                mask |= df["issue_type"].isin(dim_types)
+            if has_comp:
+                mask |= df["issue_type"].str.startswith("Missing ", na=False)
+
+            filtered = df[mask].copy()
+            if filtered.empty:
+                continue
+
+            # build lookup: issue_type value → resolved issue metadata
+            meta: dict[str, dict] = {}
+            for iss in issues:
+                if iss["rule_id"] in comp_rule_ids:
+                    meta["__comp__"] = iss
+                elif iss.get("rule_name"):
+                    meta[iss["rule_name"]] = iss
+
+            def _resolved_at(itype: str) -> str:
+                key = "__comp__" if str(itype).startswith("Missing ") else itype
+                return (meta.get(key) or {}).get("resolved_at", "")
+
+            def _sla(itype: str) -> str:
+                key = "__comp__" if str(itype).startswith("Missing ") else itype
+                return (meta.get(key) or {}).get("sla_deadline", "")
+
+            filtered["resolved_at"]  = filtered["issue_type"].map(_resolved_at)
+            filtered["sla_deadline"] = filtered["issue_type"].map(_sla)
+            filtered["on_time"] = filtered.apply(
+                lambda r: (
+                    "On Time" if r["resolved_at"] and r["sla_deadline"]
+                    and r["resolved_at"] <= r["sla_deadline"] else
+                    "Late"    if r["resolved_at"] and r["sla_deadline"] else ""
+                ), axis=1,
+            )
+
+            fname = f"{table}_{le_book}_{month}_resolved.csv"
+            out_zf.writestr(fname, filtered.to_csv(index=False, encoding="utf-8-sig"))
+            found_any = True
+
+    if not found_any:
+        raise dash.exceptions.PreventUpdate
+
+    out_buf.seek(0)
+    return dcc.send_bytes(out_buf.read(),
+                          filename=f"dq_resolved_{le_book}_{today_str}.zip")
 
 
 @app.callback(
@@ -3538,28 +4928,64 @@ def _toggle_cr_form(n_clicks, current_style):
     Output("cr-issue-checklist", "options"),
     Output("cr-issue-checklist", "value"),
     Output("cr-issue-hint",      "children"),
+    Output("cr-table-dl-area",   "children"),
     Input("cr-inst-filter", "value"),
     prevent_initial_call=True,
 )
 def _update_issue_checklist(le_book):
-    """Populate the issue checklist when the specialist picks an institution."""
+    """Populate the table selector when the specialist picks an institution."""
+    _empty = ([], [], "Select an institution above to see its tables with open issues.", html.Div())
     if not le_book:
-        return [], [], "Select an institution above to see its open issues."
+        return _empty
     from dq_issue_tracker import get_open_issues
     issues = get_open_issues(le_book)
     if not issues:
-        return [], [], "No open issues found for this institution."
+        return [], [], "No open issues found for this institution.", html.Div()
+
+    _BO = {"new": 0, "attention": 1, "urgent": 2, "critical": 3, "overdue": 4}
+    by_table: dict[str, list] = {}
+    for iss in issues:
+        by_table.setdefault(iss["table_name"], []).append(iss)
+
     options = []
-    for iss in sorted(issues, key=lambda x: x.get("sla_deadline", "")):
-        band  = (iss.get("urgency_band") or "new").upper()
-        label = (
-            f"[{iss['rule_id']}]  {iss['table_name']}  —  "
-            f"{iss['dimension'].title()}  —  "
-            f"{iss.get('failing_rows', 0):,} failing rows  —  "
-            f"SLA: {iss['sla_deadline']}  [{band}]"
+    for tbl in sorted(by_table.keys()):
+        tbl_issues = by_table[tbl]
+        tbl_label  = TABLE_NAMES_PRETTY.get(tbl, tbl.replace("_", " ").title())
+        n_issues   = len(tbl_issues)
+        worst_band = max(
+            (iss.get("urgency_band") or "new" for iss in tbl_issues),
+            key=lambda b: _BO.get(b, 0),
         )
-        options.append({"label": label, "value": iss["issue_id"]})
-    return options, [], f"{len(issues)} open issue(s) for this institution — select those to include."
+        options.append({"label": f"{tbl_label}  —  {n_issues} issue(s)  —  {worst_band.upper()}", "value": tbl})
+
+    hint = f"{len(by_table)} table(s) with open issues — select those to include in this Change Request."
+
+    dl_buttons = html.Div([
+        html.Div(
+            "⬇ " + TABLE_NAMES_PRETTY.get(tbl, tbl),
+            id={"type": "cr-tbl-dl-btn", "index": f"{le_book}|{tbl}"},
+            n_clicks=0,
+            style={"display": "inline-block", "background": BRAND, "color": CARD,
+                   "fontSize": "10px", "fontWeight": "700", "padding": "3px 10px",
+                   "borderRadius": "4px", "cursor": "pointer", "userSelect": "none"},
+        )
+        for tbl in sorted(by_table.keys())
+    ], style={"display": "flex", "gap": "6px", "flexWrap": "wrap"})
+
+    return options, [], hint, dl_buttons
+
+
+@app.callback(
+    Output("cr-assigned-to", "value"),
+    Input("cr-inst-filter",  "value"),
+    prevent_initial_call=True,
+)
+def _autofill_assigned_to(le_book):
+    if not le_book:
+        return ""
+    from dq_issue_tracker import get_contact
+    contact = get_contact(le_book)
+    return contact.get("contact_email", "")
 
 
 @app.callback(
@@ -3576,7 +5002,7 @@ def _update_issue_checklist(le_book):
     State("auth-store",         "data"),
     prevent_initial_call=True,
 )
-def _create_cr(n_clicks, issue_ids, title, description,
+def _create_cr(n_clicks, tables, title, description,
                assigned_to, target_date, le_book, version, auth_data):
     if not n_clicks:
         raise dash.exceptions.PreventUpdate
@@ -3585,21 +5011,22 @@ def _create_cr(n_clicks, issue_ids, title, description,
 
     if not le_book:
         return _err("Select an institution first.")
-    if not issue_ids:
-        return _err("Select at least one issue to include in this change request.")
+    if not tables:
+        return _err("Select at least one table to include in this change request.")
     if not (title or "").strip():
         return _err("A title is required.")
 
     import dq_change_request as cr_mod
     from dq_issue_tracker import get_open_issues
 
-    issues      = get_open_issues(le_book)
-    by_id       = {iss["issue_id"]: iss for iss in issues}
-    inst_name   = ""
-    total_fail  = 0
+    issues     = get_open_issues(le_book)
+    tables_set = set(tables)
+    inst_name  = ""
+    total_fail = 0
     dims: set[str] = set()
-    for iid in issue_ids:
-        iss = by_id.get(iid, {})
+    for iss in issues:
+        if iss["table_name"] not in tables_set:
+            continue
         inst_name  = (iss.get("institution_name") or le_book).title()
         total_fail += int(iss.get("failing_rows") or 0)
         if iss.get("dimension"):
@@ -3610,7 +5037,7 @@ def _create_cr(n_clicks, issue_ids, title, description,
 
     try:
         cr_id = cr_mod.create_cr(
-            issue_ids        = list(issue_ids),
+            tables           = list(tables),
             le_book          = le_book,
             institution_name = inst_name or le_book,
             title            = title.strip(),
@@ -3629,7 +5056,7 @@ def _create_cr(n_clicks, issue_ids, title, description,
             html.Span("✓ ", style={"color": C_GREEN, "fontWeight": "900"}),
             html.Span(
                 f"{cr_id} created for {inst_name} "
-                f"({len(issue_ids)} issue(s), {total_fail:,} failing rows).",
+                f"({len(tables)} table(s), {total_fail:,} failing rows).",
                 style={"color": C_GREEN},
             ),
         ]),
@@ -3682,13 +5109,50 @@ def _cr_action(clicks, review_notes, auth_data, version):
     Output("cr-list-container", "children"),
     Input("cr-version",      "data"),
     Input("cr-status-filter", "value"),
-    State("auth-store",      "data"),
+    Input("notif-poll",       "n_intervals"),
+    State("auth-store",       "data"),
 )
-def _refresh_cr_list(version, status_filter, auth_data):
+def _refresh_cr_list(version, status_filter, _poll, auth_data):
     import dq_change_request as cr_mod
     role = (auth_data or {}).get("role", "viewer")
     crs  = cr_mod.get_crs(status=status_filter if status_filter != "all" else None)
     return _build_cr_list(crs, role=role)
+
+
+@app.callback(
+    Output("cr-summary-bar", "children"),
+    Input("cr-version",  "data"),
+    Input("notif-poll",  "n_intervals"),
+    prevent_initial_call=False,
+)
+def _refresh_cr_stats(version, _poll):
+    import dq_change_request as cr_mod
+    stats = cr_mod.get_stats()
+    chips = []
+    for key, lbl in cr_mod.STATUS_LABELS.items():
+        n   = stats.get(key, 0)
+        clr = cr_mod.STATUS_COLORS[key]
+        chips.append(html.Div([
+            html.Span(str(n), style={
+                "fontSize": "24px", "fontWeight": "900",
+                "color": clr, "lineHeight": "1",
+            }),
+            html.Span(lbl, style={
+                "fontSize": "10px", "color": MUTED,
+                "marginTop": "3px", "lineHeight": "1.2",
+                "textAlign": "center",
+            }),
+        ], style={
+            "display":       "flex",
+            "flexDirection": "column",
+            "alignItems":    "center",
+            "background":    CARD,
+            "borderRadius":  "8px",
+            "padding":       "12px 18px",
+            "border":        f"2px solid {clr}",
+            "minWidth":      "90px",
+        }))
+    return chips
 
 
 # ── institution portal callbacks ──────────────────────────────────────────────
@@ -3709,84 +5173,276 @@ def _inst_nav_click(clicks):
 
 @app.callback(
     Output("inst-issue-list", "children"),
-    Input("inst-issue-filter", "value"),
+    Input("inst-issue-filter",  "value"),
+    Input("inst-table-filter",  "value"),
+    Input("notif-poll",         "n_intervals"),
     State("auth-store", "data"),
     prevent_initial_call=False,
 )
-def _inst_issue_list(status, auth_data):
-    from dq_issue_tracker import get_issues
-    from dq_inst_portal import _URGENCY_COLORS as _IC
+def _inst_issue_list(status, table_filter, _poll, auth_data):
+    from dq_issue_tracker import get_issues_by_table, get_issues
     from datetime import date as _date
 
-    le_books = set((auth_data or {}).get("le_books", []))
+    le_books = set(str(lb) for lb in (auth_data or {}).get("le_books", []))
+    le_book  = next(iter(le_books), None)
     status   = status or "open"
-    issues   = [i for i in get_issues(status=status) if i["le_book"] in le_books]
 
-    LABELS = {"open": "Open", "penalized": "Delayed", "resolved": "Resolved"}
-    heading = html.H3(
-        f"{LABELS.get(status, status.title())} Issues ({len(issues)})",
-        style={"fontSize": "14px", "fontWeight": "900", "color": TEXT,
-               "marginBottom": "10px", "marginTop": "0"},
-    )
+    if status != "open":
+        issues = [i for i in get_issues(status=status) if i["le_book"] in le_books]
+        label  = {"penalized": "Delayed", "resolved": "Resolved"}.get(status, status.title())
+        if not issues:
+            return html.Div(f"No {label.lower()} issues.",
+                            style={"color": MUTED, "padding": "20px", "fontSize": "12px"})
+        return _build_resolved_rows(issues)
 
-    if not issues:
-        label = {"open": "open", "penalized": "delayed", "resolved": "resolved"}.get(status, status)
-        return html.Div([
-            heading,
-            html.Div(f"No {label} issues.", style={"color": MUTED, "padding": "20px", "fontSize": "12px"}),
-        ])
+    # ── open: one row per affected table ──────────────────────────────────────
+    all_by_table = get_issues_by_table(status="open")
 
-    today = _date.today()
-    H = {"fontSize": "11px", "fontWeight": "900", "color": MUTED,
-         "textTransform": "uppercase", "letterSpacing": "0.05em", "padding": "8px 10px"}
+    # apply table filter
+    selected_tables = set(table_filter) if table_filter else set()
+
+    # aggregate per table for this institution
+    _BO = ["new", "attention", "urgent", "critical", "overdue"]
+    table_summary: list[dict] = []
+    for table, rules in all_by_table.items():
+        if selected_tables and table not in selected_tables:
+            continue
+        total_rows  = 0
+        n_rules     = 0
+        worst       = "new"
+        earliest_dl = None
+        for rule in rules:
+            my_insts = [i for i in rule["institutions"] if i["le_book"] in le_books]
+            if not my_insts:
+                continue
+            total_rows += sum(i["failing_rows"] for i in my_insts)
+            n_rules    += 1
+            urg = rule["worst_urgency"]
+            if _BO.index(urg) > _BO.index(worst):
+                worst = urg
+            for inst in my_insts:
+                dl = inst.get("sla_deadline")
+                if dl and (earliest_dl is None or dl < earliest_dl):
+                    earliest_dl = dl
+        if n_rules:
+            table_summary.append({
+                "table":       table,
+                "label":       TABLE_NAMES_PRETTY.get(table, table.replace("_", " ").title()),
+                "n_rules":     n_rules,
+                "total_rows":  total_rows,
+                "worst":       worst,
+                "deadline":    earliest_dl or "—",
+            })
+
+    if not table_summary:
+        return html.Div("No open issues.",
+                        style={"color": MUTED, "padding": "20px", "fontSize": "12px"})
+
+    # sort worst-urgency first, then most failing rows
+    table_summary.sort(key=lambda r: (_BO.index(r["worst"]), -r["total_rows"]), reverse=True)
+
+    # ── find the latest institution report file (mirrors _on_inst_download_confirm order) ──
+    rpt_file  = None
+    rpt_date  = "—"
+    if le_book:
+        _issue_dir = _DIR / "issue_reports"
+        if _issue_dir.exists():
+            _zips = sorted(_issue_dir.glob(f"{le_book}_*.zip"), reverse=True)
+            if _zips:
+                rpt_file = _zips[0]
+                rpt_date = rpt_file.stem.split("_", 1)[-1]  # YYYY-MM
+        if rpt_file is None and REPORTS_DIR.exists():
+            _csvs = sorted(REPORTS_DIR.glob(f"*_{le_book}_*.csv"), reverse=True)
+            if _csvs:
+                rpt_file = _csvs[0]
+                parts    = rpt_file.stem.rsplit("_", 2)
+                rpt_date = parts[2] if len(parts) == 3 and len(parts[2]) == 7 else "—"
+            if rpt_file is None:
+                _xlsxs = sorted(REPORTS_DIR.glob(f"{le_book}_*.xlsx"), reverse=True)
+                if _xlsxs:
+                    rpt_file = _xlsxs[0]
+                    stem     = rpt_file.stem.rsplit("_", 1)
+                    rpt_date = stem[-1] if len(stem) == 2 and len(stem[-1]) == 10 else "—"
+
+    # ── table header ──────────────────────────────────────────────────────────
+    _H = {"fontSize": "10px", "fontWeight": "900", "color": MUTED,
+          "textTransform": "uppercase", "letterSpacing": "0.05em",
+          "padding": "7px 14px", "whiteSpace": "nowrap"}
     hdr = html.Div([
-        html.Span("Table",        style={**H, "width": "160px"}),
-        html.Span("Rule",         style={**H, "width": "90px"}),
-        html.Span("Dimension",    style={**H, "width": "100px"}),
-        html.Span("Failing Rows", style={**H, "width": "90px", "textAlign": "right"}),
-        html.Span("Detected",     style={**H, "width": "90px"}),
-        html.Span("Deadline",     style={**H, "width": "90px"}),
-        html.Span("Remaining",    style={**H, "width": "76px", "textAlign": "center"}),
+        html.Span("Table",        style={**_H, "flex": "1"}),
+        html.Span("Issues",       style={**_H, "width": "68px", "textAlign": "center"}),
+        html.Span("Failing Rows", style={**_H, "width": "110px", "textAlign": "right"}),
+        html.Span("Urgency",      style={**_H, "width": "90px", "textAlign": "center"}),
+        html.Span("SLA Deadline", style={**_H, "width": "100px"}),
+        html.Span("Report",       style={**_H, "width": "80px", "textAlign": "center"}),
     ], style={"display": "flex", "background": BG,
-              "borderRadius": "8px 8px 0 0", "borderBottom": f"2px solid {DIVIDER}"})
+              "borderRadius": "8px 8px 0 0",
+              "borderBottom": f"2px solid {DIVIDER}"})
 
+    _UC = _URGENCY_COLORS
     rows = []
-    for i, iss in enumerate(sorted(issues, key=lambda x: x.get("sla_deadline", ""))):
-        band  = iss.get("urgency_band", "new")
-        clr   = _IC.get(band, MUTED)
-        try:
-            days_left = (_date.fromisoformat(iss["sla_deadline"]) - today).days
-        except Exception:
-            days_left = "?"
-        days_color = C_RED if isinstance(days_left, int) and days_left <= 5 else TEXT
-        bg = "#C9956C" if i % 2 == 0 else BG
+    for i, row in enumerate(table_summary):
+        urg     = row["worst"]
+        urg_col = _UC.get(urg, MUTED)
+        ov      = urg == "overdue"
+        bg      = "rgba(244,246,249,0.7)" if i % 2 == 0 else CARD
+
+        # urgency chip
+        urg_chip = html.Span(
+            ("⚠ " if ov else "") + urg.title(),
+            style={"fontSize": "10px", "fontWeight": "700", "color": urg_col,
+                   "background": f"rgba({','.join(str(int(urg_col.lstrip('#')[j:j+2],16)) for j in (0,2,4))},.10)",
+                   "border": f"1px solid {urg_col}",
+                   "borderRadius": "4px", "padding": "2px 7px",
+                   "whiteSpace": "nowrap"},
+        )
+
+        # download icon — links to the institution's report file
+        if rpt_file:
+            dl_icon = html.Div(
+                "⬇",
+                id={"type": "inst-dl-btn", "index": le_book or ""},
+                n_clicks=0,
+                title=f"Download full report ({rpt_date})",
+                style={"fontSize": "16px", "color": BRAND,
+                       "cursor": "pointer", "textAlign": "center",
+                       "userSelect": "none"},
+            )
+        else:
+            dl_icon = html.Span("—", style={"color": MUTED, "fontSize": "12px",
+                                             "textAlign": "center", "display": "block"})
 
         rows.append(html.Div([
-            html.Span(iss["table_name"],           style={"width": "160px", "fontSize": "11px", "color": MUTED, "padding": "7px 10px"}),
-            html.Span(iss["rule_id"],              style={"width": "90px",  "fontSize": "11px", "fontWeight": "700", "color": TEXT,  "padding": "7px 10px", "borderLeft": f"3px solid {clr}"}),
-            html.Span(iss["dimension"].title(),    style={"width": "100px", "fontSize": "11px", "color": MUTED, "padding": "7px 10px"}),
-            html.Span(f"{iss['failing_rows']:,}",  style={"width": "90px",  "fontSize": "12px", "fontWeight": "700", "color": TEXT, "textAlign": "right", "padding": "7px 10px"}),
-            html.Span(iss["detected_at"],          style={"width": "90px",  "fontSize": "11px", "color": MUTED, "padding": "7px 10px"}),
-            html.Span(iss.get("sla_deadline", "—"),style={"width": "90px",  "fontSize": "11px", "color": MUTED, "padding": "7px 10px"}),
-            html.Span(f"{days_left}d",             style={"width": "76px",  "fontSize": "12px", "fontWeight": "700", "color": days_color, "textAlign": "center", "padding": "7px 10px"}),
-        ], style={"display": "flex", "alignItems": "center",
-                  "background": bg, "borderBottom": f"1px solid {DIVIDER}"}))
+            html.Div([
+                html.Span("●", style={"color": urg_col, "fontSize": "9px",
+                                       "marginRight": "8px"}),
+                html.Span(row["label"], style={"fontSize": "13px", "fontWeight": "700",
+                                                "color": TEXT}),
+            ], style={"flex": "1", "display": "flex", "alignItems": "center",
+                      "padding": "10px 14px",
+                      "borderLeft": f"3px solid {urg_col}"}),
+            html.Span(
+                str(row["n_rules"]),
+                style={"width": "68px", "textAlign": "center",
+                       "fontSize": "13px", "color": MUTED, "padding": "10px 0"},
+            ),
+            html.Span(
+                f"{row['total_rows']:,}",
+                style={"width": "110px", "textAlign": "right",
+                       "fontSize": "13px", "fontWeight": "700",
+                       "color": C_RED, "padding": "10px 14px"},
+            ),
+            html.Div(urg_chip,
+                     style={"width": "90px", "padding": "10px 6px",
+                            "display": "flex", "justifyContent": "center"}),
+            html.Span(
+                row["deadline"],
+                style={"width": "100px", "fontSize": "11px",
+                       "color": C_RED if ov else MUTED, "padding": "10px 14px"},
+            ),
+            html.Div(dl_icon,
+                     style={"width": "80px", "display": "flex",
+                            "justifyContent": "center", "alignItems": "center"}),
+        ], style={
+            "display": "flex", "alignItems": "center",
+            "background": bg,
+            "borderBottom": f"1px solid {DIVIDER}",
+        }))
 
-    return html.Div([
-        heading,
-        html.Div([hdr, *rows], style={
-            "background": CARD, "borderRadius": "8px", "border": f"1px solid {DIVIDER}",
-        }),
+    return html.Div(
+        [hdr, *rows],
+        style={"background": CARD, "borderRadius": "8px",
+               "border": f"1px solid {DIVIDER}"},
+    )
+
+
+@app.callback(
+    Output("inst-csv-download", "data"),
+    Input("inst-csv-dl-btn",   "n_clicks"),
+    State("inst-issue-filter", "value"),
+    State("inst-table-filter", "value"),
+    State("auth-store",        "data"),
+    prevent_initial_call=True,
+)
+def _inst_download_csv(n_clicks, status_filter, table_filter, auth_data):
+    """Generate a filtered CSV of open issues for the institution."""
+    if not n_clicks:
+        raise dash.exceptions.PreventUpdate
+
+    from dq_issue_tracker import get_issues
+    from datetime import date as _date
+    import io as _io
+    import csv as _csv
+
+    le_books = set(str(lb) for lb in (auth_data or {}).get("le_books", []))
+    inst_name = (auth_data or {}).get("institution_name", "institution")
+    status    = status_filter or "open"
+    today     = _date.today()
+
+    issues = [i for i in get_issues(status=status) if i["le_book"] in le_books]
+
+    # apply table filter
+    if table_filter:
+        issues = [i for i in issues if i["table_name"] in set(table_filter)]
+
+    _PRETTY = {
+        "accounts":               "Accounts",
+        "contract_loans":         "Contract Loans",
+        "contract_schedules":     "Contract Schedules",
+        "contracts_disburse":     "Contracts Disburse",
+        "contracts_expanded":     "Contracts",
+        "customers_expanded":     "Customers",
+        "loan_applications_2":    "Loan Applications",
+        "prev_loan_applications": "Prev Loan Apps",
+    }
+
+    buf = _io.StringIO()
+    w   = _csv.writer(buf)
+    w.writerow([
+        "Table", "Rule ID", "Issue", "Dimension",
+        "Failing Rows", "Prev Count", "Detected", "SLA Deadline",
+        "Days Remaining", "Urgency", "Status", "Recurrence",
     ])
+
+    for iss in sorted(issues, key=lambda x: (x.get("table_name",""), x.get("sla_deadline",""))):
+        try:
+            days = (_date.fromisoformat(iss["sla_deadline"]) - today).days
+            days_str = f"{days}d" if days >= 0 else f"⚠ {abs(days)}d overdue"
+        except Exception:
+            days_str = "—"
+
+        recur = int(iss.get("recurrence_count") or 0)
+        prev  = iss.get("last_failing_rows")
+
+        w.writerow([
+            _PRETTY.get(iss["table_name"], iss["table_name"]),
+            iss.get("rule_id", ""),
+            iss.get("rule_name") or iss.get("rule_id", ""),
+            (iss.get("dimension") or "").title(),
+            iss.get("failing_rows", 0),
+            prev if prev is not None else "",
+            iss.get("detected_at", ""),
+            iss.get("sla_deadline", ""),
+            days_str,
+            (iss.get("urgency_band") or "").title(),
+            (iss.get("status") or "").replace("_", " ").title(),
+            f"#{recur + 1}" if recur > 0 else "1st occurrence",
+        ])
+
+    tbl_suffix  = "_" + "_".join(table_filter) if table_filter else ""
+    safe_name   = inst_name.lower().replace(" ", "_").replace("/", "")[:20]
+    filename    = f"issues_{safe_name}{tbl_suffix}_{today.isoformat()}.csv"
+    return dcc.send_string(buf.getvalue(), filename=filename)
 
 
 @app.callback(
     Output("inst-cr-list", "children"),
     Input("inst-cr-status-filter", "value"),
+    Input("notif-poll",            "n_intervals"),
     State("auth-store", "data"),
     prevent_initial_call=False,
 )
-def _inst_cr_list(status_filter, auth_data):
+def _inst_cr_list(status_filter, _poll, auth_data):
     import dq_change_request as cr_mod
     le_books = set((auth_data or {}).get("le_books", []))
     role     = (auth_data or {}).get("role", "inst_user")
@@ -3905,23 +5561,122 @@ def _mark_all_read(n, auth_data):
 @app.callback(
     Output("issues-download", "data"),
     Input("issues-download-btn", "n_clicks"),
-    State("issue-status-filter", "value"),
-    State("alerts-inst-filter",  "value"),
+    State("alerts-cat-filter",   "value"),
     prevent_initial_call=True,
 )
-def _on_issues_download(n_clicks, status, inst_filter):
+def _on_issues_download(n_clicks, cat_filter):
     if not n_clicks:
         raise dash.exceptions.PreventUpdate
-    from collections import Counter
     from dq_issue_tracker import get_issues
-    status = status or "open"
-    issues = get_issues(status=status, le_book=inst_filter if inst_filter else None)
-    inst_counts = Counter(iss["le_book"] for iss in issues)
-    issues = sorted(issues, key=lambda x: (-inst_counts[x["le_book"]], x.get("sla_deadline", "")))
-    label = {"open": "open", "penalized": "delayed", "resolved": "resolved"}.get(status, status)
-    filename = f"dq_issues_{label}.xlsx"
-    return dcc.send_bytes(_issues_to_xlsx(issues), filename)
+    issues = get_issues(status="resolved")
+    issues.sort(key=lambda x: x.get("resolved_at") or "", reverse=True)
+    return dcc.send_bytes(_issues_to_xlsx(issues), "dq_resolved_issues.xlsx")
 
+
+
+# ── CR: per-table CSV download ────────────────────────────────────────────────
+
+@app.callback(
+    Output("cr-tbl-dl", "data"),
+    Input({"type": "cr-tbl-dl-btn", "index": ALL}, "n_clicks"),
+    prevent_initial_call=True,
+)
+def _cr_table_dl(clicks):
+    if not any(c for c in (clicks or []) if c):
+        raise dash.exceptions.PreventUpdate
+    tid = ctx.triggered_id
+    if not isinstance(tid, dict) or tid.get("type") != "cr-tbl-dl-btn":
+        raise dash.exceptions.PreventUpdate
+    if not ctx.triggered[0]["value"]:
+        raise dash.exceptions.PreventUpdate
+
+    raw = tid["index"]
+    if "|" not in raw:
+        raise dash.exceptions.PreventUpdate
+    le_book, table_name = raw.split("|", 1)
+
+    import zipfile, io as _io
+    issue_reports_dir = _DIR / "issue_reports"
+    if not issue_reports_dir.exists():
+        raise dash.exceptions.PreventUpdate
+
+    zips = sorted([z for z in issue_reports_dir.glob(f"{le_book}_*.zip")
+                   if not z.name.endswith("_resolved.zip")], reverse=True)
+    if not zips:
+        raise dash.exceptions.PreventUpdate
+
+    try:
+        with zipfile.ZipFile(zips[0]) as zf:
+            if f"{table_name}.csv" not in zf.namelist():
+                raise dash.exceptions.PreventUpdate
+            csv_bytes = zf.read(f"{table_name}.csv")
+    except Exception:
+        raise dash.exceptions.PreventUpdate
+
+    month = zips[0].stem.split("_", 1)[-1]
+    return dcc.send_bytes(csv_bytes, filename=f"{table_name}_{le_book}_{month}.csv")
+
+
+# ── CR: table-level approval ───────────────────────────────────────────────────
+
+@app.callback(
+    Output("cr-version",         "data", allow_duplicate=True),
+    Output("cr-action-feedback", "children", allow_duplicate=True),
+    Input({"type": "cr-tbl-approve-btn", "index": ALL}, "n_clicks"),
+    State("auth-store", "data"),
+    State("cr-version", "data"),
+    prevent_initial_call=True,
+)
+def _approve_table_cb(clicks, auth_data, version):
+    if not any(c for c in (clicks or []) if c):
+        raise dash.exceptions.PreventUpdate
+    tid = ctx.triggered_id
+    if not isinstance(tid, dict) or tid.get("type") != "cr-tbl-approve-btn":
+        raise dash.exceptions.PreventUpdate
+    if not ctx.triggered[0]["value"]:
+        raise dash.exceptions.PreventUpdate
+
+    raw = tid["index"]
+    if "|" not in raw:
+        raise dash.exceptions.PreventUpdate
+    cr_id, table_name = raw.split("|", 1)
+
+    import dq_change_request as cr_mod
+    actor  = (auth_data or {}).get("email", "")
+    ok, msg = cr_mod.approve_table(cr_id, table_name, actor=actor)
+
+    feedback = (
+        html.Span([html.Span("✓ ", style={"color": C_GREEN, "fontWeight": "900"}),
+                   html.Span(msg, style={"color": C_GREEN})])
+        if ok else html.Span(msg, style={"color": C_RED})
+    )
+    return (version or 0) + 1 if ok else version, feedback
+
+
+# ── open-issue ZIP download (alerts page, per institution) ────────────────────
+
+@app.callback(
+    Output("open-issue-dl", "data"),
+    Input({"type": "open-issue-dl-btn", "index": ALL}, "n_clicks"),
+    prevent_initial_call=True,
+)
+def _on_open_issue_dl(clicks):
+    if not any(c for c in (clicks or []) if c):
+        raise dash.exceptions.PreventUpdate
+    tid = ctx.triggered_id
+    if not isinstance(tid, dict) or tid.get("type") != "open-issue-dl-btn":
+        raise dash.exceptions.PreventUpdate
+    if not ctx.triggered[0]["value"]:
+        raise dash.exceptions.PreventUpdate
+
+    lb = tid["index"]
+    issue_reports_dir = _DIR / "issue_reports"
+    if issue_reports_dir.exists():
+        zips = sorted(issue_reports_dir.glob(f"{lb}_*.zip"), reverse=True)
+        if zips:
+            return dcc.send_file(str(zips[0]))
+
+    raise dash.exceptions.PreventUpdate
 
 
 # ── dev server ─────────────────────────────────────────────────────────────────
