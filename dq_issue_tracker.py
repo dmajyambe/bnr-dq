@@ -366,6 +366,7 @@ def detect_and_update_issues(R: dict, categories: dict, run_date: str) -> None:
         _process_completeness(con, R.get("comp") or {}, categories, run_date)
         _process_rule_dimension(con, R.get("acc") or {},  "accuracy",    "accuracy_score",   categories, run_date)
         _process_rule_dimension(con, R.get("val") or {},  "validity",    "validity_score",    categories, run_date)
+        _process_rule_dimension(con, R.get("uni") or {},  "uniqueness",  "uniqueness_score",  categories, run_date)
         _process_relationship(con, R.get("rel") or {}, categories, run_date)
         _refresh_urgency_bands(con)
         con.commit()

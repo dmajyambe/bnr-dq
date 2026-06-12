@@ -825,6 +825,7 @@ def main() -> None:
     import accuracy_check     as acc_eng
     # import timeliness_check   as tim_eng
     import validity_check     as val_eng
+    import uniqueness_check    as uni_eng
     import dq_issue_export    as issue_eng
 
     watermarks = _load_watermarks()
@@ -887,6 +888,9 @@ def main() -> None:
         #                 row_limit=test_limit),
         "val":  partial(val_eng.evaluate_from_sql,  engine, args.schema, valid_le_books,
                         WINDOW_DAYS, watermarks, str(SCRIPT_DIR / "dq_validity_report.json"),
+                        row_limit=test_limit),
+        "uni":  partial(uni_eng.evaluate_from_sql,  engine, args.schema, valid_le_books,
+                        WINDOW_DAYS, watermarks, str(SCRIPT_DIR / "dq_uniqueness_report.json"),
                         row_limit=test_limit),
     }
 

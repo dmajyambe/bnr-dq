@@ -484,6 +484,38 @@ VAL_TABLE_RULES: dict[str, list[str]] = {
     "loan_applications_2": ["VAL-003", "VAL-015", "VAL-021"],
 }
 
+# ── UNIQUENESS ───────────────────────────────────────────────────────────────
+# Duplicate detection within the rolling window. A row is a duplicate when its
+# full key tuple (fields below) repeats for the same le_book in the window.
+# The first field of each rule is the "anchor": rows where it is NULL are out of
+# scope. Evaluated via uniqueness_check.evaluate_from_sql (ROW_NUMBER window fn).
+UNI_RULE_META: dict[str, dict] = {
+    "UNI-001": {
+        "name":     "No duplicate loan records within the period",
+        "category": "Duplicate Detection",
+        "fields":   ["contract_sequence_number", "date_of_provision", "disbursed_amount",
+                     "prin_outstanding_amt_fcy", "prin_outstanding_amt_lcy"],
+    },
+    "UNI-002": {
+        "name":     "No duplicate disbursement records within the period",
+        "category": "Duplicate Detection",
+        "fields":   ["contract_id", "currency", "current_disbursed_amt",
+                     "previous_disbursed_amt", "first_payment_date"],
+    },
+    "UNI-003": {
+        "name":     "No duplicate contract records within the period",
+        "category": "Duplicate Detection",
+        "fields":   ["contract_sequence_number", "start_date", "maturity_date",
+                     "principal_amount_lcy", "vision_sbu", "contract_status"],
+    },
+}
+
+UNI_TABLE_RULES: dict[str, list[str]] = {
+    "contract_loans":     ["UNI-001"],
+    "contracts_disburse": ["UNI-002"],
+    "contracts_expanded": ["UNI-003"],
+}
+
 # ── RELATIONSHIP ───────────────────────────────────────────────────────────────
 # DISABLED to avoid OOM: the pandas RI path loads full child + parent tables into
 # memory (--reports stage). Empty dict keeps every importer working while no heavy
@@ -590,6 +622,18 @@ def _build_rows() -> list[dict]:
         rows.append({
             "rule_id":   rid,
             "dimension": "accuracy",
+            "category":  meta["category"],
+            "rule_name": meta["name"],
+            "tables":    ", ".join(tables),
+            "fields":    ", ".join(meta["fields"]),
+        })
+
+    # uniqueness
+    for rid, meta in UNI_RULE_META.items():
+        tables = sorted({t for t, rules in UNI_TABLE_RULES.items() if rid in rules})
+        rows.append({
+            "rule_id":   rid,
+            "dimension": "uniqueness",
             "category":  meta["category"],
             "rule_name": meta["name"],
             "tables":    ", ".join(tables),
