@@ -330,20 +330,23 @@ def evaluate_from_sql(engine, schema: str, valid_le_books: frozenset,
                 report["warnings"][table] = "No mandatory columns found in DB."
                 continue
 
-            # Date window
-            wm     = watermarks.get(table)
-            anchor = f"'{wm[:10]}'::date" if wm else "CURRENT_DATE"
-            date_parts = []
-            if "date_creation" in existing:
-                date_parts.append(
-                    f'"date_creation" BETWEEN {anchor} - INTERVAL \'{window_days} days\' AND {anchor}'
-                )
-            if "date_last_modified" in existing:
-                date_parts.append(
-                    f'"date_last_modified" > \'{wm}\'' if wm else
-                    f'"date_last_modified" BETWEEN {anchor} - INTERVAL \'{window_days} days\' AND {anchor}'
-                )
-            date_clause = "(" + " OR ".join(date_parts) + ")" if date_parts else "TRUE"
+            # Date window — window_days falsy (0/None) ⇒ full-table scan (monthly pipeline)
+            if not window_days:
+                date_clause = "TRUE"
+            else:
+                wm     = watermarks.get(table)
+                anchor = f"'{wm[:10]}'::date" if wm else "CURRENT_DATE"
+                date_parts = []
+                if "date_creation" in existing:
+                    date_parts.append(
+                        f'"date_creation" BETWEEN {anchor} - INTERVAL \'{window_days} days\' AND {anchor}'
+                    )
+                if "date_last_modified" in existing:
+                    date_parts.append(
+                        f'"date_last_modified" > \'{wm}\'' if wm else
+                        f'"date_last_modified" BETWEEN {anchor} - INTERVAL \'{window_days} days\' AND {anchor}'
+                    )
+                date_clause = "(" + " OR ".join(date_parts) + ")" if date_parts else "TRUE"
 
             null_exprs = ",\n        ".join(
                 f'SUM(CASE WHEN "{c}" IS NULL THEN 1 ELSE 0 END) AS "null_{c}"'

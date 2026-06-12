@@ -20,7 +20,6 @@ import json
 import logging
 import os
 import sys
-import tempfile
 from datetime import datetime
 from pathlib import Path
 from dotenv import load_dotenv
@@ -57,156 +56,6 @@ def _db_columns(conn, schema: str, table: str) -> set[str]:
         WHERE table_schema = :s AND table_name = :t
     """), {"s": schema, "t": table}).fetchall()
     return {r[0].lower() for r in rows}
-
-
-def _needed_columns(table: str) -> set[str]:
-    from dq_rules import MANDATORY_COLUMNS, VALIDITY_COLUMNS
-    cols: set[str] = {"le_book"}
-    cols.update(MANDATORY_COLUMNS.get(table, []))
-   # cols.update(VALIDITY_COLUMNS.get(table, []))
-    return cols
-
-# load tables
-def load_full_tables(engine, schema: str, valid_le_books: frozenset,
-                     tables: list[str] | None = None,
-                     limit: int = 0) -> dict:
-    """Load every row for each table — no date filter, le_book filter only.
-    tables: restrict to this subset (default: all TABLES)
-    limit:  row cap per table for testing (0 = no limit)
-    """
-    import pandas as pd
-
-    target = tables if tables else TABLES
-    dataframes: dict = {}
-    with engine.connect() as conn:
-        conn.execute(text("SET work_mem = '512MB'"))
-        for table in target:
-            needed   = _needed_columns(table)
-            existing = _db_columns(conn, schema, table)
-            cols     = sorted(needed & existing) #get needed columns that actually exist in the table
-
-            if not cols:
-                log.warning("  %s: no matching columns — skipping", table)
-                dataframes[table] = pd.DataFrame()
-                continue
-
-            quoted = ", ".join(f'"{c}"' for c in cols)
-            lb_sql = ""
-            if valid_le_books and "le_book" in cols:
-                books  = ", ".join(f"'{lb}'" for lb in sorted(valid_le_books))
-                lb_sql = f' WHERE "le_book" IN ({books})'
-
-            limit_sql = f" LIMIT {limit}" if limit > 0 else ""
-            sql = f'SELECT {quoted} FROM "{schema}"."{table}"{lb_sql}{limit_sql}'
-            try:
-                df = pd.read_sql(text(sql), conn)
-                df.columns = [c.lower() for c in df.columns]
-                df["data_processed"] = datetime.now().isoformat()
-                log.info("  %-30s  %d rows × %d cols%s", table, len(df), len(df.columns),
-                         f"  [LIMIT {limit}]" if limit else "")
-                dataframes[table] = df
-            except Exception as exc:
-                log.error("  %s: load failed — %s", table, exc)
-                dataframes[table] = pd.DataFrame()
-
-    return dataframes
-
-#commented out for now ( for testing)
-# def load_parent_keys(engine, schema: str,
-#                      valid_le_books: frozenset | None = None) -> dict:
-#     """Load full parent key sets for relationship checks."""
-#     import pandas as pd
-#     from dq_rules import REL_RULE_META
-
-#     parent_cols: dict[str, set] = {}
-#     for meta in REL_RULE_META.values():
-#         parent_cols.setdefault(meta["parent_table"], set()).add(meta["parent_col"])
-
-#     result: dict = {}
-#     with engine.connect() as conn:
-#         for table, cols in sorted(parent_cols.items()):
-#             quoted = ", ".join(f'"{c}"' for c in sorted(cols))
-#             lb_sql = ""
-#             if valid_le_books:
-#                 existing = _db_columns(conn, schema, table)
-#                 if "le_book" in existing:
-#                     books  = ", ".join(f"'{lb}'" for lb in sorted(valid_le_books))
-#                     lb_sql = f' WHERE "le_book" IN ({books})'
-#             sql    = f'SELECT DISTINCT {quoted} FROM "{schema}"."{table}"{lb_sql}'
-#             try:
-#                 df = pd.read_sql(text(sql), conn)
-#                 df.columns = [c.lower() for c in df.columns]
-#                 log.info("  parent keys %-30s  %d keys", table, len(df))
-#                 result[table] = df
-#             except Exception as exc:
-#                 log.warning("  parent keys %s: failed — %s", table, exc)
-#                 result[table] = pd.DataFrame()
-
-#     return result
-
-
-# issue reports
-
-def _append_table_to_zips(lb_values: list, table: str, df_full,
-                           categories: dict, month: str) -> None:
-    """
-    Write one CSV entry per institution into their on-disk ZIP, immediately
-    after each table is processed.  Avoids accumulating all CSV bytes in RAM.
-    """
-    import zipfile
-    from dq_issue_export import _collect_failing_df, _enrich_csv_df, TABLE_CSV_COLS
-
-    ISSUE_REPORTS_DIR.mkdir(exist_ok=True)
-
-    # Trim each failing-row chunk to output columns only — avoids holding
-    # wide full-column copies in RAM for tables with many rule/null columns.
-    _derived = {"stakeholder_name", "category_type", "issue_type"}
-    _template = TABLE_CSV_COLS.get(table, [])
-    output_cols = ["le_book"] + [c for c in _template
-                                 if c not in _derived and c != "le_book"]
-
-    for lb in lb_values:
-        inst_df = df_full[df_full["le_book"].astype(str) == lb].reset_index(drop=True)
-        if inst_df.empty:
-            continue
-        try:
-            combined = _collect_failing_df(table=table, df=inst_df,
-                                           all_frames={table: inst_df},
-                                           parent_frames=None,
-                                           categories=categories,
-                                           output_cols=output_cols)
-            if combined.empty:
-                continue
-            combined  = _enrich_csv_df(combined, table, categories)
-            csv_bytes = combined.to_csv(index=False,
-                                        encoding="utf-8-sig").encode("utf-8-sig")
-            del combined
-            zip_path = ISSUE_REPORTS_DIR / f"{lb}_{month}.zip"
-            with zipfile.ZipFile(zip_path, "a", zipfile.ZIP_DEFLATED) as zf:
-                zf.writestr(f"{table}.csv", csv_bytes)
-            log.info("  ZIP %-6s  %s.csv  %d bytes", lb, table, len(csv_bytes))
-        except Exception as exc:
-            log.warning("Issue report collection failed %s/%s: %s", lb, table, exc)
-
-
-# engine runner
-
-def _run(eng_module, dataframes: dict, valid_le_books: frozenset,
-         extra_kwargs: dict | None = None) -> dict:
-    """Run evaluate_from_dataframes() for one engine; discard temp JSON output."""
-    tmp = tempfile.mkstemp(suffix=".json")
-    kwargs = extra_kwargs or {}
-    try:
-        return eng_module.evaluate_from_dataframes(
-            dataframes, valid_le_books, tmp, **kwargs)
-    except Exception as exc:
-        log.error("  %s engine failed: %s", eng_module.__name__, exc)
-        return {}
-    finally:
-        try:
-            Path(tmp).unlink(missing_ok=True)
-        except Exception:
-            pass
 
 
 # ── history aggregation (moved here from dq_pipeline_2m to decouple) ───────────
@@ -261,6 +110,10 @@ def _build_history_entry(run_date: str, R: dict, categories: dict,
     overall: dict[str, float] = {}
     for rkey, (dim, overall_key, _) in _SCORE_KEYS.items():
         esummary = (R.get(rkey) or {}).get("executive_summary") or {}
+        # Relationship not run (no report) → don't fold a phantom 0 into accuracy
+        # (that would halve it via _merge_rel). Skip rel entirely when absent.
+        if rkey == "rel" and not esummary:
+            continue
         overall[dim] = round(float(esummary.get(overall_key) or 0.0), 2)
     overall = _merge_rel(overall)
 
@@ -389,25 +242,106 @@ def _append_history(entry: dict) -> None:
     log.info("History log updated → %s  (%d entries total)", HISTORY_FILE, len(history))
 
 
+def _zip_failing_rows_sql(engine, schema: str, table: str,
+                          valid_le_books: frozenset, categories: dict,
+                          month: str, limit: int = 0) -> None:
+    """Stream completeness failing rows (any mandatory column NULL) for `table`
+    from SQL, grouped by institution, and append a per-institution CSV into their
+    monthly ZIP. Memory-safe: server-side filter + streamed result, one institution
+    buffered at a time — never loads the full table into RAM.
+
+    Reuses dq_issue_export._collect_failing_df / _enrich_csv_df so the CSV content,
+    per-missing-column tagging, and column ordering match the previous behaviour.
+    """
+    import pandas as pd
+    import zipfile
+    from dq_rules import MANDATORY_COLUMNS
+    from dq_issue_export import _collect_failing_df, _enrich_csv_df, TABLE_CSV_COLS
+
+    mandatory = MANDATORY_COLUMNS.get(table, [])
+    if not mandatory:
+        return
+
+    with engine.connect() as conn:
+        existing = _db_columns(conn, schema, table)
+        if "le_book" not in existing:
+            return
+        cols_present = [c for c in mandatory if c in existing]
+        if not cols_present:
+            return
+
+        derived  = {"stakeholder_name", "category_type", "issue_type"}
+        template = TABLE_CSV_COLS.get(table, [])
+        output_cols = ["le_book"] + [c for c in template
+                                     if c not in derived and c != "le_book"]
+        # fetch le_book + the output columns that exist + mandatory cols (for masks)
+        fetch_cols = sorted({"le_book"}
+                            | {c for c in output_cols if c in existing}
+                            | set(cols_present))
+        sel       = ", ".join(f'"{c}"' for c in fetch_cols)
+        null_pred = " OR ".join(f'"{c}" IS NULL' for c in cols_present)
+        lb_clause = ""
+        if valid_le_books:
+            codes     = ", ".join(f"'{lb}'" for lb in sorted(valid_le_books))
+            lb_clause = f'AND "le_book" IN ({codes})'
+        limit_sql = f"LIMIT {limit}" if limit and limit > 0 else ""
+        sql = (f'SELECT {sel} FROM "{schema}"."{table}" '
+               f'WHERE ({null_pred}) {lb_clause} ORDER BY "le_book" {limit_sql}')
+
+        result = conn.execution_options(stream_results=True).execute(text(sql))
+
+        def _flush(lb: str | None, rows: list) -> None:
+            if not lb or not rows:
+                return
+            inst_df = pd.DataFrame(rows)
+            inst_df.columns = [c.lower() for c in inst_df.columns]
+            combined = _collect_failing_df(table=table, df=inst_df,
+                                           all_frames={table: inst_df},
+                                           parent_frames=None, categories=categories,
+                                           output_cols=output_cols)
+            if combined.empty:
+                return
+            combined  = _enrich_csv_df(combined, table, categories)
+            csv_bytes = combined.to_csv(index=False,
+                                        encoding="utf-8-sig").encode("utf-8-sig")
+            zip_path = ISSUE_REPORTS_DIR / f"{lb}_{month}.zip"
+            with zipfile.ZipFile(zip_path, "a", zipfile.ZIP_DEFLATED) as zf:
+                zf.writestr(f"{table}.csv", csv_bytes)
+            log.info("  ZIP %-6s  %s.csv  %d bytes", lb, table, len(csv_bytes))
+
+        cur_lb: str | None = None
+        buf: list = []
+        for row in result:
+            m  = dict(row._mapping)
+            lb = str(m["le_book"]).strip() if m.get("le_book") is not None else None
+            if lb != cur_lb:
+                _flush(cur_lb, buf)
+                buf, cur_lb = [], lb
+            buf.append(m)
+        _flush(cur_lb, buf)
+
+
 # orchestration
 
 def run_monthly_detection(engine, schema: str, run_date: str,
                           tables: list[str] | None = None,
                           limit: int = 0) -> None:
     """
-    Full-table DQ scan across all dimensions.
-    Writes results to dq_open_issues via detect_and_update_issues().
+    Full-table DQ scan across all dimensions, run entirely in SQL (memory-safe).
 
-    Loads one table at a time to avoid holding all DataFrames in memory
-    simultaneously.
+    Pipeline:
+      1. comp/acc/val/uni evaluate_from_sql with window_days=0 (full-table scan) → R
+      2. detect_and_update_issues(R)  → dq_open_issues
+      3. _build_history_entry / _append_history  → dq_history.json (dashboard trends)
+      4. per-institution failing-row ZIPs streamed from SQL → issue_reports/
 
     tables: restrict to a subset of tables (testing)
     limit:  row cap per table, 0 = no limit (testing)
     """
-    import gc
     import completeness_check as comp_eng
+    import accuracy_check     as acc_eng
     import validity_check     as val_eng
-    import pandas as pd
+    import uniqueness_check    as uni_eng
     from db_utils import get_valid_le_books, get_le_book_categories, customer_dup_counts
     from dq_issue_tracker import detect_and_update_issues, ensure_tables
 
@@ -417,91 +351,32 @@ def run_monthly_detection(engine, schema: str, run_date: str,
     valid_le_books = get_valid_le_books(engine, schema)
     categories     = get_le_book_categories(engine, schema)
 
-    target = tables or TABLES
     if tables:
         log.info("Table filter: %s", ", ".join(tables))
     if limit:
         log.info("Row limit: %d per table (TEST MODE)", limit)
 
-    def _empty_report() -> dict:
-        return {"generated_at": datetime.now().isoformat(timespec="seconds"),
-                "tables": {}, "warnings": {}}
+    # ── dimension scoring: pure-SQL engines, full-table scan (window_days=0) ───
+    FULL_SCAN = 0
+    wm: dict = {}
+    log.info("Running completeness …")
+    comp_report = comp_eng.evaluate_from_sql(engine, schema, valid_le_books, FULL_SCAN, wm,
+                                             str(SCRIPT_DIR / "dq_report.json"),
+                                             row_limit=limit, tables=tables)
+    log.info("Running accuracy …")
+    acc_report  = acc_eng.evaluate_from_sql(engine, schema, valid_le_books, FULL_SCAN, wm,
+                                            str(SCRIPT_DIR / "dq_accuracy_report.json"),
+                                            row_limit=limit, tables=tables)
+    log.info("Running validity …")
+    val_report  = val_eng.evaluate_from_sql(engine, schema, valid_le_books, FULL_SCAN, wm,
+                                            str(SCRIPT_DIR / "dq_validity_report.json"),
+                                            row_limit=limit, tables=tables)
+    log.info("Running uniqueness …")
+    uni_report  = uni_eng.evaluate_from_sql(engine, schema, valid_le_books, FULL_SCAN, wm,
+                                            str(SCRIPT_DIR / "dq_uniqueness_report.json"),
+                                            row_limit=limit, tables=tables)
 
-    comp_report = _empty_report()
-    val_report  = _empty_report()
-    rel_report: dict = {"generated_at": datetime.utcnow().isoformat(),
-                        "tables": {}, "le_books": [], "warnings": {}}
-
-    # ZIPs are written incrementally per table — no in-memory accumulation.
-    month = run_date[:7]
-    # Remove any stale ZIPs for this month so a re-run starts clean.
-    ISSUE_REPORTS_DIR.mkdir(exist_ok=True)
-    for old in ISSUE_REPORTS_DIR.glob(f"*_{month}.zip"):
-        old.unlink()
-        log.info("Removed stale ZIP: %s", old.name)
-
-    # Parent key sets are key columns only (DISTINCT) — much smaller than full tables.
-    #log.info("Loading parent key sets …")
-    log.info("skipped loading parent key sets for now (testing)")
-    #parent_frames = load_parent_keys(engine, schema, valid_le_books)
-
-    try:
-        import relationship_check as rel_eng
-        _have_rel = True
-    except ImportError:
-        _have_rel = False
-        log.warning("relationship_check not found — skipping RI checks")
-
-    valid_lb_strs = {str(lb) for lb in valid_le_books} if valid_le_books else set()
-
-    for table in target:
-        log.info("Loading table: %s …", table)
-        single_df = load_full_tables(engine, schema, valid_le_books,
-                                     tables=[table], limit=limit)
-
-        # ── single-table dimension checks ────────────────────────────────────
-        for eng, accum in [
-            (comp_eng, comp_report),
-            (val_eng,  val_report),
-        ]:
-            partial = _run(eng, single_df, valid_le_books)
-            if partial:
-                # Only carry forward evaluated tables — skip "no_data" entries so
-                # earlier tables aren't overwritten when a later partial re-emits them
-                # as no_data (each partial covers all target tables, not just the one loaded).
-                for tbl, tdata in partial.get("tables", {}).items():
-                    if tdata.get("status") == "evaluated":
-                        accum["tables"][tbl] = tdata
-                accum["warnings"].update(partial.get("warnings", {}))
-
-        # ── relationship checks for this child table ─────────────────────────
-        # if _have_rel:
-        #     try:
-        #         partial = rel_eng.evaluate_all_from_dataframes(
-        #             single_df, valid_le_books, parent_frames)
-        #         if partial:
-        #             rel_report["tables"].update(partial.get("tables", {}))
-        #             rel_report["warnings"].update(partial.get("warnings", {}))
-        #             rel_report["le_books"] = list(
-        #                 set(rel_report["le_books"]) | set(partial.get("le_books", [])))
-        #     except Exception as exc:
-        #         log.warning("Relationship check for %s failed: %s", table, exc)
-
-        # ── write failing rows directly into per-institution ZIPs ───────────
-        df_full = single_df.get(table, pd.DataFrame())
-        if not df_full.empty and "le_book" in df_full.columns:
-            lb_values = sorted(df_full["le_book"].dropna().astype(str).unique())
-            if valid_lb_strs:
-                lb_values = [lb for lb in lb_values if lb in valid_lb_strs]
-            _append_table_to_zips(lb_values, table, df_full, categories, month)
-
-        del single_df, df_full
-        gc.collect()
-
-    R = {
-        "comp": comp_report,
-        "val":  val_report,
-    }
+    R = {"comp": comp_report, "acc": acc_report, "val": val_report, "uni": uni_report}
 
     log.info("Writing issues to tracker …")
     detect_and_update_issues(R, categories, run_date)
@@ -513,6 +388,16 @@ def run_monthly_detection(engine, schema: str, run_date: str,
     log.info("Writing history entry …")
     entry = _build_history_entry(run_date, R, categories, dup_counts, cat_dup_counts)
     _append_history(entry)
+
+    # ── per-institution failing-row ZIPs: streamed from SQL (memory-safe) ──────
+    month = run_date[:7]
+    ISSUE_REPORTS_DIR.mkdir(exist_ok=True)
+    for old in ISSUE_REPORTS_DIR.glob(f"*_{month}.zip"):
+        old.unlink()
+        log.info("Removed stale ZIP: %s", old.name)
+    log.info("Streaming per-institution failing-row ZIPs …")
+    for table in (tables or TABLES):
+        _zip_failing_rows_sql(engine, schema, table, valid_le_books, categories, month, limit)
 
     log.info("Monthly detection complete — run_date=%s", run_date)
 

@@ -90,18 +90,23 @@ def run_rule_dimension_sql(
                 report["warnings"][table] = f"No applicable {dim_label} columns found."
                 continue
 
-            # Date window — same convention as completeness_check
-            wm     = watermarks.get(table)
-            anchor = f"'{wm[:10]}'::date" if wm else "CURRENT_DATE"
-            date_parts = []
-            if "date_creation" in existing:
-                date_parts.append(
-                    f'"date_creation" BETWEEN {anchor} - INTERVAL \'{window_days} days\' AND {anchor}')
-            if "date_last_modified" in existing:
-                date_parts.append(
-                    f'"date_last_modified" > \'{wm}\'' if wm else
-                    f'"date_last_modified" BETWEEN {anchor} - INTERVAL \'{window_days} days\' AND {anchor}')
-            date_clause = "(" + " OR ".join(date_parts) + ")" if date_parts else "TRUE"
+            # Date window — same convention as completeness_check.
+            # window_days falsy (0/None) ⇒ full-table scan (no date filter), used by
+            # the monthly full-scan pipeline.
+            if not window_days:
+                date_clause = "TRUE"
+            else:
+                wm     = watermarks.get(table)
+                anchor = f"'{wm[:10]}'::date" if wm else "CURRENT_DATE"
+                date_parts = []
+                if "date_creation" in existing:
+                    date_parts.append(
+                        f'"date_creation" BETWEEN {anchor} - INTERVAL \'{window_days} days\' AND {anchor}')
+                if "date_last_modified" in existing:
+                    date_parts.append(
+                        f'"date_last_modified" > \'{wm}\'' if wm else
+                        f'"date_last_modified" BETWEEN {anchor} - INTERVAL \'{window_days} days\' AND {anchor}')
+                date_clause = "(" + " OR ".join(date_parts) + ")" if date_parts else "TRUE"
 
             has_lb     = "le_book" in existing
             scope_cols = sorted(({"le_book"} if has_lb else set()) | (rule_cols & existing))

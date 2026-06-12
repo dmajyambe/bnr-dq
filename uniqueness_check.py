@@ -48,6 +48,8 @@ def _existing_columns(conn, schema: str, table: str, wanted: set) -> set:
 
 
 def _date_clause(existing: set, wm: str | None, window_days: int) -> str:
+    if not window_days:          # 0/None ⇒ full-table scan (monthly pipeline)
+        return "TRUE"
     anchor = f"'{wm[:10]}'::date" if wm else "CURRENT_DATE"
     parts = []
     if "date_creation" in existing:
