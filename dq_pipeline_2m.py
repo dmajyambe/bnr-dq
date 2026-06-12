@@ -879,12 +879,9 @@ def main() -> None:
         "comp": partial(comp_eng.evaluate_from_sql, engine, args.schema, valid_le_books,
                         WINDOW_DAYS, watermarks, str(SCRIPT_DIR / "dq_report.json"),
                         row_limit=test_limit),
-        # "acc":  PARKED — accuracy_check.py was rewritten to a pandas API and has no
-        #         evaluate_from_sql (it was commented out even at 16a9001). Rebuild the
-        #         accuracy SQL engine to the standard contract, then re-enable here.
-        # "acc":  partial(acc_eng.evaluate_from_sql,  engine, args.schema, valid_le_books,
-        #                 WINDOW_DAYS, watermarks, str(SCRIPT_DIR / "dq_accuracy_report.json"),
-        #                 row_limit=test_limit),
+        "acc":  partial(acc_eng.evaluate_from_sql,  engine, args.schema, valid_le_books,
+                        WINDOW_DAYS, watermarks, str(SCRIPT_DIR / "dq_accuracy_report.json"),
+                        row_limit=test_limit),
         # "tim":  partial(tim_eng.evaluate_from_sql,  engine, args.schema, valid_le_books,
         #                 WINDOW_DAYS, watermarks, str(SCRIPT_DIR / "dq_timeliness_report.json"),
         #                 row_limit=test_limit),
