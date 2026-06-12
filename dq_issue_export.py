@@ -69,7 +69,7 @@ TABLE_CSV_COLS: dict[str, list[str]] = {
         # "vision_sbu", "vision_sbu_desc",
         # "account_status", "account_status_desc",
         # "last_tran_date"
-        , "date_last_modified", "date_creation",
+        "date_last_modified", "date_creation",
         "issue_type",
     ],
     "customers_expanded": [

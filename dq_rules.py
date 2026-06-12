@@ -489,8 +489,14 @@ VAL_TABLE_RULES: dict[str, list[str]] = {
     "loan_applications_2": ["VAL-003", "VAL-015", "VAL-021"],
 }
 
-# # ── RELATIONSHIP ───────────────────────────────────────────────────────────────
+# ── RELATIONSHIP ───────────────────────────────────────────────────────────────
+# DISABLED to avoid OOM: the pandas RI path loads full child + parent tables into
+# memory (--reports stage). Empty dict keeps every importer working while no heavy
+# relationship execution runs. Re-enable by rewriting as SQL anti-joins (see the
+# commented rule definitions below for the intended FK relationships).
+REL_RULE_META: dict[str, dict] = {}
 
+# REL_RULE_META full definitions — restore via a SQL anti-join engine:
 # REL_RULE_META: dict[str, dict] = {
 #     "REL-001": {
 #         "name":         "Every account must reference a known customer",
