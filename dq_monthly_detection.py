@@ -245,80 +245,86 @@ def _append_history(entry: dict) -> None:
 def _zip_failing_rows_sql(engine, schema: str, table: str,
                           valid_le_books: frozenset, categories: dict,
                           month: str, limit: int = 0) -> None:
-    """Stream completeness failing rows (any mandatory column NULL) for `table`
-    from SQL, grouped by institution, and append a per-institution CSV into their
-    monthly ZIP. Memory-safe: server-side filter + streamed result, one institution
-    buffered at a time — never loads the full table into RAM.
+    """Stream FAILING rows across all dimensions (completeness/accuracy/validity/
+    uniqueness) for `table` from SQL, grouped by institution, and append a
+    per-institution CSV into their monthly ZIP.
 
-    Reuses dq_issue_export._collect_failing_df / _enrich_csv_df so the CSV content,
-    per-missing-column tagging, and column ordering match the previous behaviour.
+    Memory-safe: server-side filter + streamed result written straight to a temp
+    file per institution (no full-table load, no large in-RAM buffer).
+
+    CSV columns: identifiers (left) → issue_type → failing rule columns (rightmost),
+    with stakeholder_name/category_type inserted after le_book.
     """
-    import pandas as pd
+    import csv
+    import os
+    import tempfile
     import zipfile
-    from dq_rules import MANDATORY_COLUMNS
-    from dq_issue_export import _collect_failing_df, _enrich_csv_df, TABLE_CSV_COLS
-
-    mandatory = MANDATORY_COLUMNS.get(table, [])
-    if not mandatory:
-        return
+    from failing_rows_sql import build_failing_union
 
     with engine.connect() as conn:
         existing = _db_columns(conn, schema, table)
-        if "le_book" not in existing:
+        built = build_failing_union(schema, table, existing, valid_le_books, limit)
+        if not built:
             return
-        cols_present = [c for c in mandatory if c in existing]
-        if not cols_present:
-            return
+        sql, out_cols = built
 
-        derived  = {"stakeholder_name", "category_type", "issue_type"}
-        template = TABLE_CSV_COLS.get(table, [])
-        output_cols = ["le_book"] + [c for c in template
-                                     if c not in derived and c != "le_book"]
-        # fetch le_book + the output columns that exist + mandatory cols (for masks)
-        fetch_cols = sorted({"le_book"}
-                            | {c for c in output_cols if c in existing}
-                            | set(cols_present))
-        sel       = ", ".join(f'"{c}"' for c in fetch_cols)
-        null_pred = " OR ".join(f'"{c}" IS NULL' for c in cols_present)
-        lb_clause = ""
-        if valid_le_books:
-            codes     = ", ".join(f"'{lb}'" for lb in sorted(valid_le_books))
-            lb_clause = f'AND "le_book" IN ({codes})'
-        limit_sql = f"LIMIT {limit}" if limit and limit > 0 else ""
-        sql = (f'SELECT {sel} FROM "{schema}"."{table}" '
-               f'WHERE ({null_pred}) {lb_clause} ORDER BY "le_book" {limit_sql}')
+        # header: le_book, stakeholder_name, category_type, <other ids>, issue_type, <fail cols>
+        header: list[str] = []
+        for c in out_cols:
+            header.append(c)
+            if c == "le_book":
+                header += ["stakeholder_name", "category_type"]
+
+        def _row_values(m: dict, name: str, ctype: str) -> list:
+            vals: list = []
+            for c in out_cols:
+                vals.append(m.get(c))
+                if c == "le_book":
+                    vals += [name, ctype]
+            return vals
 
         result = conn.execution_options(stream_results=True).execute(text(sql))
 
-        def _flush(lb: str | None, rows: list) -> None:
-            if not lb or not rows:
+        state = {"path": None, "fh": None, "writer": None, "n": 0}
+
+        def _open() -> None:
+            fd, path = tempfile.mkstemp(suffix=".csv")
+            fh = os.fdopen(fd, "w", newline="", encoding="utf-8-sig")
+            w = csv.writer(fh)
+            w.writerow(header)
+            state.update(path=path, fh=fh, writer=w, n=0)
+
+        def _close(lb: str) -> None:
+            if state["fh"] is None:
                 return
-            inst_df = pd.DataFrame(rows)
-            inst_df.columns = [c.lower() for c in inst_df.columns]
-            combined = _collect_failing_df(table=table, df=inst_df,
-                                           all_frames={table: inst_df},
-                                           parent_frames=None, categories=categories,
-                                           output_cols=output_cols)
-            if combined.empty:
-                return
-            combined  = _enrich_csv_df(combined, table, categories)
-            csv_bytes = combined.to_csv(index=False,
-                                        encoding="utf-8-sig").encode("utf-8-sig")
-            zip_path = ISSUE_REPORTS_DIR / f"{lb}_{month}.zip"
-            with zipfile.ZipFile(zip_path, "a", zipfile.ZIP_DEFLATED) as zf:
-                zf.writestr(f"{table}.csv", csv_bytes)
-            log.info("  ZIP %-6s  %s.csv  %d bytes", lb, table, len(csv_bytes))
+            state["fh"].close()
+            if state["n"] > 0:
+                zip_path = ISSUE_REPORTS_DIR / f"{lb}_{month}.zip"
+                with zipfile.ZipFile(zip_path, "a", zipfile.ZIP_DEFLATED) as zf:
+                    zf.write(state["path"], arcname=f"{table}.csv")
+                log.info("  ZIP %-6s  %s.csv  %d rows", lb, table, state["n"])
+            os.unlink(state["path"])
+            state.update(path=None, fh=None, writer=None, n=0)
 
         cur_lb: str | None = None
-        buf: list = []
         for row in result:
             m  = dict(row._mapping)
             lb = str(m["le_book"]).strip() if m.get("le_book") is not None else None
+            if lb is None:
+                continue
             if lb != cur_lb:
-                _flush(cur_lb, buf)
-                buf, cur_lb = [], lb
-            buf.append(m)
-        _flush(cur_lb, buf)
+                if cur_lb is not None:
+                    _close(cur_lb)
+                cur_lb = lb
+                _open()
+            info  = categories.get(lb, {})
+            name  = info.get("name") or lb
+            name  = name.title() if isinstance(name, str) else name
+            ctype = info.get("category_type") or ""
+            state["writer"].writerow(_row_values(m, name, ctype))
+            state["n"] += 1
+        if cur_lb is not None:
+            _close(cur_lb)
 
 
 # orchestration
