@@ -27,26 +27,26 @@ from dq_rules import REL_RULE_META
 
 log = logging.getLogger("dq_issue_export")
 
-# -- table ordering ------------------------------------------------------------
+#tables to export
 ALL_TABLES = [
     "accounts", "contract_loans", "contract_schedules",
     "contracts_disburse", "contracts_expanded",
     "customers_expanded", "loan_applications_2", "prev_loan_applications",
 ]
 
-# -- primary key per table -----------------------------------------------------
+# PK table
 TABLE_PK: dict[str, list[str]] = {
     "customers_expanded":    ["customer_id", "le_book"],
     "accounts":              ["account_no", "le_book"],
-    "contracts_expanded":    ["contract_sequence_number", "contract_id"],
-    "contracts_disburse":    ["contract_id", "business_date"],
-    "contract_loans":        ["contract_sequence_number", "year_month"],
+    "contracts_expanded":    ["le_book", "contract_id","customer_id"],
+    "contracts_disburse":    ["contract_id","le_book","business_date"],#commented out (, "business_date")
+    "contract_loans":        ["contract_sequence_number"],#commented out (, "year_month")
     "contract_schedules":    ["contract_sequence_number", "schedule_date"],
     "loan_applications_2":   ["loan_application_id"],
     "prev_loan_applications": ["loan_application_id"],
 }
 
-# -- human-readable context columns per table ----------------------------------
+#human-readable context columns per table
 TABLE_CONTEXT: dict[str, list[str]] = {
     "customers_expanded":    ["customer_name", "customer_open_date"],
     "accounts":              ["account_name", "customer_id", "account_open_date"],
@@ -57,22 +57,19 @@ TABLE_CONTEXT: dict[str, list[str]] = {
     "loan_applications_2":   ["customer_name", "application_date", "application_status"],
     "prev_loan_applications": ["business_date"],
 }
-
-# -- template column sets (matches BNR reference Excel files) ------------------
-# Order: institution metadata | record identifiers | context | technical | issue_type
-# Columns that don't exist in a given DataFrame are silently skipped.
-
+#csv cols
 TABLE_CSV_COLS: dict[str, list[str]] = {
     "accounts": [
         "le_book", "stakeholder_name", "category_type",
         "account_no", "customer_id", "account_name",
         "account_type", "account_type_desc",
-        "vision_ouc", "currency",
-        "account_status_date", "account_open_date", "account_closing_date",
-        "performance_class", "performance_class_desc",
-        "vision_sbu", "vision_sbu_desc",
-        "account_status", "account_status_desc",
-        "last_tran_date", "date_last_modified", "date_creation",
+        # "vision_ouc", "currency",
+        # "account_status_date", "account_open_date", "account_closing_date",
+        # "performance_class", "performance_class_desc",
+        # "vision_sbu", "vision_sbu_desc",
+        # "account_status", "account_status_desc",
+        # "last_tran_date"
+        , "date_last_modified", "date_creation",
         "issue_type",
     ],
     "customers_expanded": [
@@ -80,13 +77,13 @@ TABLE_CSV_COLS: dict[str, list[str]] = {
         "customer_id", "salutation", "salutation_desc",
         "customer_name", "surname", "forename_1", "forename_2",
         "customer_gender", "customer_gender_desc",
-        "customer_acronym", "vision_ouc", "vision_sbu", "vision_sbu_desc",
-        "customer_open_date", "customer_tin", "passport_number",
-        "national_id_type", "national_id_type_desc", "national_id_number",
-        "customer_status", "customer_status_desc",
-        "date_of_birth", "place_of_birth",
-        "email_id", "work_telephone", "home_telephone",
-        "legal_status", "legal_status_desc",
+        # "customer_acronym", "vision_ouc", "vision_sbu", "vision_sbu_desc",
+        # "customer_open_date", "customer_tin", "passport_number",
+        # "national_id_type", "national_id_type_desc", "national_id_number",
+        # "customer_status", "customer_status_desc",
+        # "date_of_birth", "place_of_birth",
+        # "email_id", "work_telephone", "home_telephone",
+        # "legal_status", "legal_status_desc",
         "date_last_modified", "date_creation",
         "issue_type",
     ],
@@ -119,10 +116,10 @@ TABLE_CSV_COLS: dict[str, list[str]] = {
     "contracts_expanded": [
         "le_book", "stakeholder_name", "category_type",
         "contract_sequence_number", "contract_id", "customer_id",
-        "deal_type", "deal_sub_type",
-        "start_date", "maturity_date",
-        "performance_class", "contract_status",
-        "outstanding_amount_lcy", "principal_amount_lcy",
+        # "deal_type", "deal_sub_type",
+        # "start_date", "maturity_date",
+        # "performance_class", "contract_status",
+        # "outstanding_amount_lcy", "principal_amount_lcy",
         "date_last_modified", "date_creation",
         "issue_type",
     ],
@@ -145,7 +142,7 @@ TABLE_CSV_COLS: dict[str, list[str]] = {
 }
 
 
-# -- mask cache ----------------------------------------------------------------
+# cache
 
 def _build_mask_cache(table: str, df: pd.DataFrame) -> dict:
     """Pre-compute all accuracy and timeliness masks for one table. Keyed by rule_id."""
@@ -182,8 +179,7 @@ def build_mask_caches(dataframes: dict, valid_le_books: frozenset) -> dict:
     return caches
 
 
-# -- CSV report generation -----------------------------------------------------
-
+# generate report
 def _collect_failing_df(table: str, df: pd.DataFrame,
                         all_frames: dict, parent_frames: dict | None = None,
                         categories: dict = None,
@@ -207,7 +203,7 @@ def _collect_failing_df(table: str, df: pd.DataFrame,
         out["issue_type"] = issue_name
         return out
 
-    # -- completeness ----------------------------------------------------------
+    # completeness 
     for col in MANDATORY_COLUMNS.get(table, []):
         if col not in df.columns:
             continue
@@ -215,14 +211,14 @@ def _collect_failing_df(table: str, df: pd.DataFrame,
         if mask.any():
             chunks.append(_tag(df[mask], f"Missing {col}"))
 
-    # -- accuracy --------------------------------------------------------------
+    # accuracy 
     # for rule_id in ACC_TABLE_RULES.get(table, []):
     #     if mask_cache is not None:
     #         mask = mask_cache.get(rule_id)
     #         if mask is None:
     #             continue  # rule failed during cache build -- already logged
     #     else:
-    #         try:
+    #         try: 
     #             mask = accuracy_check.run_rule_mask(rule_id, df)
     #         except Exception:
     #             log.exception("Rule failed: %s", rule_id)
@@ -231,7 +227,7 @@ def _collect_failing_df(table: str, df: pd.DataFrame,
     #         chunks.append(_tag(df[mask],
     #                            ACC_META.get(rule_id, {}).get("name", rule_id)))
 
-    # -- timeliness ------------------------------------------------------------
+    # timeliness 
     # for rule_id in TIM_TABLE_RULES.get(table, []):
     #     if mask_cache is not None:
     #         mask = mask_cache.get(rule_id)
@@ -247,7 +243,7 @@ def _collect_failing_df(table: str, df: pd.DataFrame,
         #     chunks.append(_tag(df[mask],
         #                        TIM_META.get(rule_id, {}).get("name", rule_id)))
 
-    # -- validity (commented out) ----------------------------------------------
+    # validity (commented out) 
     # for rule_id in VAL_TABLE_RULES.get(table, []):
     #     try:
     #         mask = validity_check.run_rule_mask(rule_id, df)
@@ -314,7 +310,7 @@ def export_csv_reports(
     mask_caches: dict | None = None,
 ) -> int:
     """
-    Write one CSV per institution per table following the BNR template format.
+    Write one CSV per institution per table.
 
     Filename: {table}_{le_book}_{YYYY-MM}.csv
     Columns:  le_book | stakeholder_name | category_type | <table cols> | issue_type

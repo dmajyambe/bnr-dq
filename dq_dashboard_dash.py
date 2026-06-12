@@ -2280,101 +2280,43 @@ def _build_issue_rows(issues: list, status: str) -> html.Div:
     })
 
 
-def _alerts_page() -> html.Div:
-    from datetime import date as _date
+def _alerts_page(cat: str = "") -> html.Div:
+    cat_label = CAT_LABELS.get(cat, "All Categories") if cat else "All Categories"
 
-    try:
-        from dq_issue_tracker import get_issues
-        all_resolved = get_issues(status="resolved")
-        all_open     = get_issues(status="open")
-    except Exception:
-        all_resolved = []
-        all_open     = []
-
-    today      = _date.today()
-    this_month = today.strftime("%Y-%m")
-    month_res_count  = sum(1 for i in all_resolved
-                           if (i.get("resolved_at") or "").startswith(this_month))
-    inst_count       = len({i["le_book"] for i in all_resolved})
-    overdue_count    = sum(1 for i in all_open if i.get("urgency_band") == "overdue")
-    on_time_count    = sum(
-        1 for i in all_resolved
-        if i.get("sla_deadline") and i.get("resolved_at")
-        and i["resolved_at"] <= i["sla_deadline"]
-    )
-    late_count = len(all_resolved) - on_time_count
-
-    fix_days_list = []
-    for i in all_resolved:
-        try:
-            d = (_date.fromisoformat(i["resolved_at"]) - _date.fromisoformat(i["detected_at"])).days
-            fix_days_list.append(d)
-        except Exception:
-            pass
-    avg_fix = f"{sum(fix_days_list) // len(fix_days_list)}d" if fix_days_list else "—"
-
-    def _stat_chip(value, label, color=None, border_color=None):
-        bc = border_color or DIVIDER
-        return html.Div([
-            html.Span(str(value), style={"fontWeight": "900", "fontSize": "22px",
-                                         "color": color or TEXT}),
-            html.Span(label,      style={"fontSize": "11px", "color": MUTED,
-                                         "marginTop": "2px"}),
-        ], style={
-            "display": "flex", "flexDirection": "column", "alignItems": "center",
-            "background": CARD, "borderRadius": "8px", "padding": "12px 24px",
-            "border": f"1px solid {bc}", "minWidth": "110px",
-        })
-
-    summary_bar = html.Div([
-        _stat_chip(len(all_open),     "Open Issues",         C_AMBER),
-        _stat_chip(overdue_count,     "Overdue",             _URGENCY_COLORS["overdue"],
-                   border_color=_URGENCY_COLORS["overdue"]),
-        _stat_chip(month_res_count,   "Resolved This Month", C_GREEN),
-        _stat_chip(len(all_resolved), "Total Resolved"),
-        _stat_chip(on_time_count,     "Resolved On Time",    C_GREEN),
-        _stat_chip(late_count,        "Resolved Late",       C_RED  if late_count else MUTED),
-        _stat_chip(avg_fix,           "Avg Days to Fix"),
-    ], style={"display": "flex", "gap": "10px", "flexWrap": "wrap", "marginBottom": "24px"})
-
-    toolbar = html.Div([
-        html.Span("Category:", style={"fontSize": "12px", "color": MUTED,
-                                      "alignSelf": "center", "marginRight": "10px",
-                                      "whiteSpace": "nowrap"}),
-        dcc.RadioItems(
-            id="alerts-cat-filter",
-            options=[
-                {"label": "All Categories", "value": ""},
-                {"label": "Banks (B)",      "value": "B"},
-                {"label": "MFIs",           "value": "MF"},
-                {"label": "SACCOs",         "value": "SACCO"},
-            ],
-            value="",
-            inline=True,
-            inputStyle={"marginRight": "4px"},
-            labelStyle={"marginRight": "14px", "fontSize": "12px",
-                        "fontWeight": "700", "cursor": "pointer"},
-        ),
-        html.Span(style={"flex": "1"}),
+    header_row = html.Div([
+        html.Div([
+            html.H2("Resolved Issues", style={
+                "fontSize": "18px", "fontWeight": "900", "color": TEXT,
+                "margin": "0 0 2px",
+            }),
+            html.Span(f"Showing: {cat_label}", style={
+                "fontSize": "11px", "color": MUTED,
+            }),
+        ]),
         html.Div("⬇ Export XLSX", id="issues-download-btn", n_clicks=0,
                  style={"cursor": "pointer", "background": BRAND, "color": CARD,
                         "fontSize": "11px", "fontWeight": "700",
                         "padding": "6px 14px", "borderRadius": "5px",
-                        "userSelect": "none", "whiteSpace": "nowrap"}),
-    ], style={
-        "display": "flex", "alignItems": "center", "flexWrap": "wrap",
-        "gap": "6px", "marginBottom": "18px",
-        "background": CARD, "borderRadius": "8px",
-        "padding": "10px 16px", "border": f"1px solid {DIVIDER}",
-    })
+                        "userSelect": "none", "whiteSpace": "nowrap",
+                        "alignSelf": "center"}),
+    ], style={"display": "flex", "justifyContent": "space-between",
+              "alignItems": "flex-start", "marginBottom": "20px"})
 
     return html.Div([
-        html.H2("Resolved Issues", style={
-            "fontSize": "18px", "fontWeight": "900", "color": TEXT,
-            "marginTop": "0", "marginBottom": "6px",
-        }),
-        summary_bar,
-        toolbar,
+        header_row,
+        html.Div(id="alerts-summary-bar", style={"marginBottom": "24px"}),
+        # Hidden RadioItems — preserves callback wiring; value drives filtered data
+        dcc.RadioItems(
+            id="alerts-cat-filter",
+            options=[
+                {"label": "All", "value": ""},
+                {"label": "B",   "value": "B"},
+                {"label": "MF",  "value": "MF"},
+                {"label": "S",   "value": "SACCO"},
+            ],
+            value=cat or "",
+            style={"display": "none"},
+        ),
         html.Div(id="issue-list"),
         html.Div(id="notify-feedback", style={"display": "none"}),
     ], style={"padding": "28px 32px", "maxWidth": "1380px", "margin": "0 auto"})
@@ -3355,16 +3297,17 @@ def _remediation_page(role: str = "bnr_admin") -> html.Div:
         # Row 5: assigned to + target date (side by side)
         html.Div([
             html.Div([
-                html.Label("Assigned To (email)", style={
+                html.Label("Assigned To", style={
                     "fontSize": "11px", "fontWeight": "900", "color": MUTED,
                     "display": "block", "marginBottom": "5px",
                 }),
-                dcc.Input(
+                dcc.Dropdown(
                     id="cr-assigned-to",
-                    type="email",
-                    placeholder="data.officer@institution.rw",
-                    debounce=False,
-                    style={**INP},
+                    options=[],
+                    value=None,
+                    placeholder="Select an institution first…",
+                    clearable=True,
+                    style={"fontSize": "12px", "fontFamily": FONT},
                 ),
             ], style={"flex": "1"}),
             html.Div([
@@ -4061,7 +4004,7 @@ def _render_page(page: str, nav_state, _rv, auth_data):
         return nav_bar, _validations_page()
 
     if page == "alerts":
-        return nav_bar, _alerts_page()
+        return nav_bar, _alerts_page(cat=cat or "")
 
     if page == "remediation":
         return nav_bar, _remediation_page(role=role)
@@ -4679,16 +4622,88 @@ def _update_user_header(auth_data):
 # ── notify button callback ────────────────────────────────────────────────────
 
 @app.callback(
-    Output("issue-list", "children"),
-    Input("alerts-cat-filter", "value"),
-    Input("notif-poll",        "n_intervals"),
+    Output("issue-list",        "children"),
+    Output("alerts-summary-bar","children"),
+    Input("alerts-cat-filter",  "value"),
+    Input("notif-poll",         "n_intervals"),
 )
 def _refresh_issue_list(cat_filter, _poll):
     from dq_issue_tracker import get_issues
+    from datetime import date as _date
+
     cat_filter = cat_filter or ""
-    issues = get_issues(status="resolved")
-    issues.sort(key=lambda x: x.get("resolved_at") or "", reverse=True)
-    return _build_resolved_by_institution(issues, cat_filter)
+
+    # Build le_book → category_type map for filtering
+    try:
+        _cats = json.loads(CATEGORIES_FILE.read_text())
+    except Exception:
+        _cats = {}
+
+    def _matches(lb: str) -> bool:
+        if not cat_filter:
+            return True
+        ct = (_cats.get(str(lb), {}).get("category_type") or "")
+        if cat_filter == "SACCO":
+            return ct in ("SACCO", "OSACCO")
+        return ct == cat_filter
+
+    all_resolved_raw = get_issues(status="resolved")
+    all_open_raw     = get_issues(status="open")
+
+    all_resolved = [i for i in all_resolved_raw if _matches(i["le_book"])]
+    all_open     = [i for i in all_open_raw     if _matches(i["le_book"])]
+
+    # ── summary chips ─────────────────────────────────────────────────────────
+    today         = _date.today()
+    this_month    = today.strftime("%Y-%m")
+    month_res     = sum(1 for i in all_resolved
+                        if (i.get("resolved_at") or "").startswith(this_month))
+    overdue_count = sum(1 for i in all_open if i.get("urgency_band") == "overdue")
+    on_time       = sum(1 for i in all_resolved
+                        if i.get("sla_deadline") and i.get("resolved_at")
+                        and i["resolved_at"] <= i["sla_deadline"])
+    late          = len(all_resolved) - on_time
+
+    fix_days = []
+    for i in all_resolved:
+        try:
+            fix_days.append(
+                (_date.fromisoformat(i["resolved_at"]) -
+                 _date.fromisoformat(i["detected_at"])).days
+            )
+        except Exception:
+            pass
+    avg_fix = f"{sum(fix_days) // len(fix_days)}d" if fix_days else "—"
+
+    def _chip(value, label, color=None, border_color=None):
+        bc = border_color or DIVIDER
+        return html.Div([
+            html.Span(str(value), style={"fontWeight": "900", "fontSize": "22px",
+                                         "color": color or TEXT}),
+            html.Span(label,      style={"fontSize": "11px", "color": MUTED,
+                                         "marginTop": "2px"}),
+        ], style={
+            "display": "flex", "flexDirection": "column", "alignItems": "center",
+            "background": CARD, "borderRadius": "8px", "padding": "12px 24px",
+            "border": f"1px solid {bc}", "minWidth": "110px",
+        })
+
+    summary_bar = html.Div([
+        _chip(len(all_open),     "Open Issues",         C_AMBER),
+        _chip(overdue_count,     "Overdue",             _URGENCY_COLORS["overdue"],
+              border_color=_URGENCY_COLORS["overdue"]),
+        _chip(month_res,         "Resolved This Month", C_GREEN),
+        _chip(len(all_resolved), "Total Resolved"),
+        _chip(on_time,           "Resolved On Time",    C_GREEN),
+        _chip(late,              "Resolved Late",       C_RED if late else MUTED),
+        _chip(avg_fix,           "Avg Days to Fix"),
+    ], style={"display": "flex", "gap": "10px", "flexWrap": "wrap"})
+
+    # ── issue list ─────────────────────────────────────────────────────────────
+    all_resolved_raw.sort(key=lambda x: x.get("resolved_at") or "", reverse=True)
+    issue_list = _build_resolved_by_institution(all_resolved_raw, cat_filter)
+
+    return issue_list, summary_bar
 
 
 @app.callback(
@@ -4976,16 +4991,35 @@ def _update_issue_checklist(le_book):
 
 
 @app.callback(
+    Output("cr-assigned-to", "options"),
     Output("cr-assigned-to", "value"),
+    Output("cr-assigned-to", "placeholder"),
     Input("cr-inst-filter",  "value"),
     prevent_initial_call=True,
 )
-def _autofill_assigned_to(le_book):
+def _populate_assigned_to(le_book):
     if not le_book:
-        return ""
-    from dq_issue_tracker import get_contact
-    contact = get_contact(le_book)
-    return contact.get("contact_email", "")
+        return [], None, "Select an institution first…"
+
+    import json as _json
+    from dq_auth import get_users_by_le_book
+
+    users = get_users_by_le_book(le_book)
+    if not users:
+        # Get institution name for a helpful placeholder
+        cats_path = Path(__file__).parent / "le_book_categories.json"
+        try:
+            cats = _json.loads(cats_path.read_text())
+            inst_name = (cats.get(le_book, {}).get("name") or le_book).title()
+        except Exception:
+            inst_name = le_book
+        return [], None, f"No users registered under {inst_name}"
+
+    options = [
+        {"label": f"{u['name']} ({u['email']})", "value": u["email"]}
+        for u in users
+    ]
+    return options, None, "Select a user…"
 
 
 @app.callback(
@@ -5074,6 +5108,8 @@ def _create_cr(n_clicks, tables, title, description,
     prevent_initial_call=True,
 )
 def _cr_action(clicks, review_notes, auth_data, version):
+    if (auth_data or {}).get("role") == "inst_user":
+        raise dash.exceptions.PreventUpdate
     if not any(c for c in (clicks or []) if c):
         raise dash.exceptions.PreventUpdate
     tid = ctx.triggered_id
@@ -5472,11 +5508,19 @@ def _inst_cr_action(clicks, status_filter, auth_data, version):
     import dq_change_request as cr_mod
     raw     = tid["index"]
     cr_id, new_status = raw.split("|", 1)
-    actor   = (auth_data or {}).get("email", "inst_user")
-    ok, msg = cr_mod.update_status(cr_id, new_status, actor=actor)
-
+    actor    = (auth_data or {}).get("email", "inst_user")
     le_books = set((auth_data or {}).get("le_books", []))
     role     = (auth_data or {}).get("role", "inst_user")
+
+    # Verify the CR belongs to this institution before mutating
+    owned_cr = cr_mod.get_cr(cr_id)
+    if not owned_cr or owned_cr.get("le_book") not in le_books:
+        return _build_cr_list([], role=role), html.Span(
+            "Unauthorized: this CR does not belong to your institution.",
+            style={"color": C_RED},
+        )
+
+    ok, msg = cr_mod.update_status(cr_id, new_status, actor=actor)
     all_crs  = cr_mod.get_crs(status=status_filter if status_filter != "all" else None)
     my_crs   = [c for c in all_crs if c["le_book"] in le_books]
     cr_list  = _build_cr_list(my_crs, role=role)
@@ -5628,6 +5672,9 @@ def _cr_table_dl(clicks):
     prevent_initial_call=True,
 )
 def _approve_table_cb(clicks, auth_data, version):
+    role = (auth_data or {}).get("role", "viewer")
+    if not _auth.is_admin(role):
+        raise dash.exceptions.PreventUpdate
     if not any(c for c in (clicks or []) if c):
         raise dash.exceptions.PreventUpdate
     tid = ctx.triggered_id

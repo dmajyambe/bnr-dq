@@ -15,7 +15,6 @@ marks them resolved when the underlying data is fixed, or overdue when the
 SLA deadline passes without a fix.
 """
 from __future__ import annotations
-
 import argparse
 import logging
 import os
@@ -23,14 +22,12 @@ import sys
 import tempfile
 from datetime import datetime
 from pathlib import Path
-
 from dotenv import load_dotenv
 from sqlalchemy import text
 
-SCRIPT_DIR        = Path(__file__).parent
+SCRIPT_DIR = Path(__file__).parent
 ISSUE_REPORTS_DIR = SCRIPT_DIR / "issue_reports"
 sys.path.insert(0, str(SCRIPT_DIR))
-
 logging.basicConfig(
     format="%(asctime)s  %(levelname)-8s  %(message)s",
     datefmt="%H:%M:%S",
@@ -49,9 +46,7 @@ TABLES = [
     "prev_loan_applications",
 ]
 
-
 # db helper functions
-
 def _db_columns(conn, schema: str, table: str) -> set[str]:
     rows = conn.execute(text("""
         SELECT column_name FROM information_schema.columns
@@ -64,17 +59,14 @@ def _needed_columns(table: str) -> set[str]:
     from dq_rules import MANDATORY_COLUMNS, VALIDITY_COLUMNS
     cols: set[str] = {"le_book"}
     cols.update(MANDATORY_COLUMNS.get(table, []))
-    cols.update(VALIDITY_COLUMNS.get(table, []))
+   # cols.update(VALIDITY_COLUMNS.get(table, []))
     return cols
 
-
 # load tables
-
 def load_full_tables(engine, schema: str, valid_le_books: frozenset,
                      tables: list[str] | None = None,
                      limit: int = 0) -> dict:
     """Load every row for each table — no date filter, le_book filter only.
-
     tables: restrict to this subset (default: all TABLES)
     limit:  row cap per table for testing (0 = no limit)
     """
@@ -198,7 +190,7 @@ def _append_table_to_zips(lb_values: list, table: str, df_full,
 def _run(eng_module, dataframes: dict, valid_le_books: frozenset,
          extra_kwargs: dict | None = None) -> dict:
     """Run evaluate_from_dataframes() for one engine; discard temp JSON output."""
-    tmp = tempfile.mktemp(suffix=".json")
+    tmp = tempfile.mkstemp(suffix=".json")
     kwargs = extra_kwargs or {}
     try:
         return eng_module.evaluate_from_dataframes(
@@ -223,7 +215,7 @@ def run_monthly_detection(engine, schema: str, run_date: str,
     Writes results to dq_open_issues via detect_and_update_issues().
 
     Loads one table at a time to avoid holding all DataFrames in memory
-    simultaneously (8 large tables × 490 institutions was causing OOM kills).
+    simultaneously.
 
     tables: restrict to a subset of tables (testing)
     limit:  row cap per table, 0 = no limit (testing)
@@ -235,6 +227,7 @@ def run_monthly_detection(engine, schema: str, run_date: str,
     from dq_pipeline_2m   import (fetch_valid_le_books, fetch_le_book_categories,
                                    _customer_dup_counts, _build_history_entry,
                                    _append_history)
+   # from db_utils import get_valid_le_books, build_connection_string
     from dq_issue_tracker import detect_and_update_issues, ensure_tables
 
     ensure_tables()

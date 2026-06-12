@@ -1,23 +1,10 @@
-"""
-dq_issue_tracker.py — DQ issue lifecycle: detect, track urgency, penalise, notify.
+#tracks issue lifecycle: detection → open issue → (escalation) → resolution
+#Issue definition: (le_book, table_name, rule_id) with failing_rows > 0 → open issue.
+#urgency definition: days since detected_at, escalates if past sla_deadline (default 30 days).
+#new: 1-3 days,attention: 4-15 days, urgent: 16-20 days, critical: 21-30 days, overdue: past SLA deadline( send notification  from "attention" onwards)
 
-An issue is a (le_book, table_name, rule_id) combination whose score fell below
-ISSUE_THRESHOLD in a pipeline run.  It persists in SQLite independent of the
-rolling window so nothing is lost after 30 days.
-
-Lifecycle:
-  open      → score < threshold, within SLA window
-  resolved  → score ≥ threshold (institution fixed the data)
-  penalized → SLA deadline passed without resolution
-
-Urgency bands (days since detected_at):
-  new       1–3 d   🔵  no auto-notification yet
-  attention 4–15 d  🟡  notify every 7 days
-  urgent    16–20 d 🟠  notify every 3 days
-  critical  21–30 d 🔴  notify every day
-"""
+#imports
 from __future__ import annotations
-
 import hashlib
 import logging
 import os
@@ -27,16 +14,14 @@ from datetime import date, timedelta
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from pathlib import Path
-
 log = logging.getLogger("dq_issue_tracker")
-
+#Path setup
 SCRIPT_DIR  = Path(__file__).parent
 DB_PATH     = SCRIPT_DIR / "dq_rules.db"
 SLA_DAYS    = 30   # days before SLA warning escalates to overdue
 
-# Urgency bands — days since detected_at; overdue = past SLA (no penalization, just warning)
+# Urgency bands 
 _URGENCY_STEPS = [(3, "new"), (15, "attention"), (20, "urgent"), (30, "critical")]
-
 URGENCY_COLORS = {
     "new":       "#2563EB",
     "attention": "#D97706",
@@ -45,10 +30,10 @@ URGENCY_COLORS = {
     "overdue":   "#7C3D1E",
 }
 
-# Notification cadence per urgency band (minimum days between emails)
+# Notification cadence per urgency band (minimum days between notification( email or dashboard alert) for the same issue_id)
 _NOTIFY_INTERVAL = {"new": None, "attention": 7, "urgent": 3, "critical": 1, "overdue": 1}
 
-# Completeness: one COMP rule per table (matches dq_rules.py _COMP_TABLE_NAMES)
+# Completeness
 _COMP_TABLE_RULE: dict[str, str] = {
     "customers_expanded":    "COMP-001",
     "accounts":              "COMP-002",
@@ -61,14 +46,12 @@ _COMP_TABLE_RULE: dict[str, str] = {
 }
 
 
-# ── SQLite helpers ─────────────────────────────────────────────────────────────
-
+# SQlite helpers
 def _conn() -> sqlite3.Connection:
     con = sqlite3.connect(DB_PATH)
     con.row_factory = sqlite3.Row
     con.execute("PRAGMA journal_mode=WAL")
     return con
-
 
 def ensure_tables() -> None:
     """Create dq_open_issues, dq_penalties, dq_institution_contacts if absent."""
@@ -138,7 +121,7 @@ def _migrate_schema(con: sqlite3.Connection) -> None:
             con.execute(f"ALTER TABLE dq_open_issues ADD COLUMN {col} {defn}")
 
 
-# ── urgency helpers ────────────────────────────────────────────────────────────
+# issue urgency helper functions
 
 def _urgency_band(detected_at: str, sla_deadline: str | None = None) -> str:
     try:
@@ -163,7 +146,7 @@ def _issue_id(le_book: str, table: str, rule_id: str) -> str:
     return hashlib.sha1(raw.encode()).hexdigest()
 
 
-# ── issue upsert / resolve ─────────────────────────────────────────────────────
+#issue upsert / resolve helpers
 
 def _lookup_rule_name(rule_id: str) -> str:
     """Return the human-readable rule name from the registry, or the rule_id itself."""
@@ -183,7 +166,7 @@ def _upsert_issue(con: sqlite3.Connection, le_book: str, inst_name: str,
     iid  = _issue_id(le_book, table, rule_id)
     name = _lookup_rule_name(rule_id)
 
-    # ── currently open/penalized → just refresh count ─────────────────────────
+    #currently open/penalized → just refresh count
     open_row = con.execute(
         "SELECT issue_id, detected_at FROM dq_open_issues "
         "WHERE issue_id=? AND status IN ('open','penalized')",
@@ -199,7 +182,7 @@ def _upsert_issue(con: sqlite3.Connection, le_book: str, inst_name: str,
         """, (failing_rows, band, inst_name, name, iid))
         return
 
-    # ── recently resolved (≤60 days) → reopen with incremented recurrence ─────
+    #recently resolved (≤60 days) → reopen with incremented recurrence
     resolved_row = con.execute("""
         SELECT issue_id, recurrence_count FROM dq_open_issues
         WHERE issue_id=? AND status='resolved'
@@ -221,7 +204,7 @@ def _upsert_issue(con: sqlite3.Connection, le_book: str, inst_name: str,
                     le_book, table, rule_id, new_recurrence, failing_rows)
         return
 
-    # ── brand new issue ────────────────────────────────────────────────────────
+    # new issue
     deadline = (date.fromisoformat(run_date) + timedelta(days=SLA_DAYS)).isoformat()
     con.execute("""
         INSERT OR REPLACE INTO dq_open_issues

@@ -25,6 +25,89 @@ from dq_rules import MANDATORY_COLUMNS  # noqa: E402 — rule definitions live i
 
 TARGET_TABLES = list(MANDATORY_COLUMNS.keys())
 
+
+# ──────────────────────────────────────────────
+#  Shared helpers (extracted to remove duplication)
+# ──────────────────────────────────────────────
+
+def _init_report() -> tuple[dict, list[float], set]:
+    """Create the standard report skeleton plus empty accumulators."""
+    report: dict = {
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "tables":       {},
+        "warnings":     {},
+    }
+    return report, [], set()
+
+
+def _le_book_breakdown_from_df(df: pd.DataFrame, found_cols: list[str]) -> dict:
+    """Compute per-le_book completeness scores from a DataFrame."""
+    breakdown: dict = {}
+    if "le_book" not in df.columns:
+        return breakdown
+    for le_val in sorted(df["le_book"].dropna().unique()):
+        sub_df = df[df["le_book"] == le_val].reset_index(drop=True)
+        if sub_df.empty:
+            continue
+        sub = check_completeness(sub_df, found_cols)
+        breakdown[str(le_val)] = {
+            "row_count":          len(sub_df),
+            "completeness_score": sub["score"],
+            "null_counts":        sub["null_counts"],
+            "null_cells":         sub["null_cells"],
+            "total_cells":        sub["total_cells"],
+        }
+    return breakdown
+
+
+def _le_book_breakdown_from_rows(rows, found_cols: list[str]) -> tuple[dict, set]:
+    """Compute per-le_book completeness scores from SQLAlchemy mapping rows."""
+    breakdown:    dict = {}
+    all_le_books: set  = set()
+    for r in rows:
+        lb             = str(r["le_book"])
+        all_le_books.add(lb)
+        lb_total       = int(r["total_rows"])
+        lb_nulls       = {c: int(r.get(f"null_{c}") or 0) for c in found_cols}
+        lb_null_cells  = sum(lb_nulls.values())
+        lb_total_cells = lb_total * len(found_cols)
+        breakdown[lb]  = {
+            "row_count":          lb_total,
+            "completeness_score": round((1 - lb_null_cells / lb_total_cells) * 100, 2)
+                                  if lb_total_cells else 100.0,
+            "null_counts":        lb_nulls,
+            "null_cells":         lb_null_cells,
+            "total_cells":        lb_total_cells,
+        }
+    return breakdown, all_le_books
+
+
+def _finalise_report(report: dict, all_scores: list[float],
+                     all_le_books: set, output_path: str,
+                     **extra_summary) -> dict:
+    """Attach executive_summary + le_books, write JSON, return report."""
+    evaluated = [v for v in report["tables"].values() if v.get("status") == "evaluated"]
+    overall   = round(sum(all_scores) / len(all_scores), 2) if all_scores else 0.0
+
+    report["le_books"] = sorted(all_le_books)
+    report["executive_summary"] = {
+        "overall_completeness_score": overall,
+        "total_tables":               len(report["tables"]),
+        "evaluated_tables":           len(evaluated),
+        **extra_summary,                          # e.g. row_limit, schema
+    }
+
+    with open(output_path, "w", encoding="utf-8") as fh:
+        json.dump(report, fh, indent=2, default=str)
+
+    log.info("Report written → %s  (overall %.2f%%)", output_path, overall)
+    return report
+
+
+# ──────────────────────────────────────────────
+#  Core logic
+# ──────────────────────────────────────────────
+
 #check if columns are present or missing
 def resolve_columns(engine, table_name: str, mandatory: list[str],
                     db_schema: str) -> tuple[list[str], list[str]]:
@@ -97,20 +180,15 @@ def check_completeness(df: pd.DataFrame, cols: list[str]) -> dict:
         "total_cells": total_cells,
     }
 
+
 #create report(per table and overall) and write to a JSON file
 def evaluate(engine, tables: list[str], db_schema: str,
              limit: int, output_path: str) -> dict:
     # orchestrate per-table fetch → completeness score → report dict → JSON output
-    valid_le_books = get_valid_le_books(engine, db_schema)
-    report: dict = {
-        "generated_at": datetime.now().isoformat(timespec="seconds"),
-        "row_limit":    limit,
-        "schema":       db_schema,
-        "tables":       {},
-        "warnings":     {},
-    }
-
-    all_scores: list[float] = []
+    valid_le_books         = get_valid_le_books(engine, db_schema)
+    report, all_scores, all_le_books = _init_report()
+    report["row_limit"]    = limit
+    report["schema"]       = db_schema
 
     for table_name in tables:
         log.info("━━  Table: %s", table_name)
@@ -123,7 +201,7 @@ def evaluate(engine, tables: list[str], db_schema: str,
         found_cols, missing_cols = resolve_columns(engine, table_name, mandatory, db_schema)
         if not found_cols:
             log.warning("  No mandatory columns found in DB — skipping.")
-            report["tables"][table_name] = {"status": "not_found"}
+            report["tables"][table_name]   = {"status": "not_found"}
             report["warnings"][table_name] = "Table not found or no mandatory columns accessible."
             continue
 
@@ -134,32 +212,20 @@ def evaluate(engine, tables: list[str], db_schema: str,
         df = fetch_table(engine, table_name, found_cols, db_schema, limit, valid_le_books)
         if df.empty:
             log.warning("  No data returned — skipping.")
-            report["tables"][table_name] = {"status": "no_data", "row_count": 0}
+            report["tables"][table_name]   = {"status": "no_data", "row_count": 0}
             report["warnings"][table_name] = "Table returned 0 rows."
             continue
 
-        result = check_completeness(df, found_cols)  # overall score across all mandatory cols
+        result           = check_completeness(df, found_cols)
         all_scores.append(result["score"])
         log.info("  completeness  score=%.2f%%  null=%d / %d cells",
                  result["score"], result["null_cells"], result["total_cells"])
 
-        le_book_breakdown: dict = {}
-        if "le_book" in df.columns:  # sub-score per le_book entity within the same table
-            for le_val in sorted(df["le_book"].dropna().unique()):
-                sub_df = df[df["le_book"] == le_val].reset_index(drop=True)
-                if sub_df.empty:
-                    continue
-                sub = check_completeness(sub_df, found_cols)
-                le_book_breakdown[str(le_val)] = {
-                    "row_count":          len(sub_df),
-                    "completeness_score": sub["score"],
-                    "null_counts":        sub["null_counts"],
-                    "null_cells":         sub["null_cells"],
-                    "total_cells":        sub["total_cells"],
-                }
-            if le_book_breakdown:
-                log.info("  le_book groups: %s",
-                         ", ".join(f"{k}({v['row_count']}r)" for k, v in le_book_breakdown.items()))
+        le_book_breakdown = _le_book_breakdown_from_df(df, found_cols)
+        all_le_books.update(le_book_breakdown.keys())
+        if le_book_breakdown:
+            log.info("  le_book groups: %s",
+                     ", ".join(f"{k}({v['row_count']}r)" for k, v in le_book_breakdown.items()))
 
         report["tables"][table_name] = {
             "status":             "evaluated",
@@ -174,45 +240,21 @@ def evaluate(engine, tables: list[str], db_schema: str,
             "le_book_breakdown":  le_book_breakdown,
         }
 
-    evaluated = [v for v in report["tables"].values() if v.get("status") == "evaluated"]
-    overall   = round(sum(all_scores) / len(all_scores), 2) if all_scores else 0.0  # average across evaluated tables
+    return _finalise_report(report, all_scores, all_le_books, output_path,
+                            row_limit=limit, schema=db_schema)
 
-    all_le_books: set = set()
-    for tdata in report["tables"].values():
-        all_le_books.update(tdata.get("le_book_breakdown", {}).keys())
-    report["le_books"] = sorted(all_le_books)
-
-    report["executive_summary"] = {  # top-level summary written to report root
-        "overall_completeness_score": overall,
-        "total_tables":               len(report["tables"]),
-        "evaluated_tables":           len(evaluated),
-        "row_limit":                  limit,
-    }
-
-    with open(output_path, "w", encoding="utf-8") as fh:
-        json.dump(report, fh, indent=2, default=str)
-
-    # log.info("*****************************************************************************")
-    # log.info("  OVERALL COMPLETENESS  %.2f%%  (%d table(s) evaluated)", overall, len(evaluated))
-    # log.info("******************************************************************************")
-
-    return report
 
 def evaluate_from_dataframes(dataframes: dict, valid_le_books: frozenset,
-                              output_path: str) -> dict:
+                              output_path: str,
+                              tables: list[str] | None = None) -> dict:
     """Run completeness checks on pre-loaded DataFrames (no DB connection needed)."""
-    report: dict = {
-        "generated_at": datetime.now().isoformat(timespec="seconds"),
-        "tables":       {},
-        "warnings":     {},
-    }
-    all_scores:   list[float] = []
-    all_le_books: set         = set()
+    report, all_scores, all_le_books = _init_report()
+    target = tables if tables is not None else TARGET_TABLES
 
-    for table_name in TARGET_TABLES:
+    for table_name in target:
         df = dataframes.get(table_name, pd.DataFrame())
         if df.empty:
-            report["tables"][table_name] = {"status": "no_data", "row_count": 0}
+            report["tables"][table_name]   = {"status": "no_data", "row_count": 0}
             report["warnings"][table_name] = "No data in this period."
             continue
 
@@ -221,28 +263,15 @@ def evaluate_from_dataframes(dataframes: dict, valid_le_books: frozenset,
         missing_cols = [c for c in mandatory if c not in df.columns]
 
         if not found_cols:
-            report["tables"][table_name] = {"status": "not_found"}
+            report["tables"][table_name]   = {"status": "not_found"}
             report["warnings"][table_name] = "No mandatory columns found in DataFrame."
             continue
 
         result = check_completeness(df, found_cols)
         all_scores.append(result["score"])
 
-        le_book_breakdown: dict = {}
-        if "le_book" in df.columns:
-            for le_val in sorted(df["le_book"].dropna().unique()):
-                sub_df = df[df["le_book"] == le_val].reset_index(drop=True)
-                if sub_df.empty:
-                    continue
-                sub = check_completeness(sub_df, found_cols)
-                le_book_breakdown[str(le_val)] = {
-                    "row_count":          len(sub_df),
-                    "completeness_score": sub["score"],
-                    "null_counts":        sub["null_counts"],
-                    "null_cells":         sub["null_cells"],
-                    "total_cells":        sub["total_cells"],
-                }
-                all_le_books.add(str(le_val))
+        le_book_breakdown = _le_book_breakdown_from_df(df, found_cols)
+        all_le_books.update(le_book_breakdown.keys())
 
         report["tables"][table_name] = {
             "status":             "evaluated",
@@ -259,36 +288,18 @@ def evaluate_from_dataframes(dataframes: dict, valid_le_books: frozenset,
         log.info("  %-30s  score=%.2f%%  null=%d/%d cells",
                  table_name, result["score"], result["null_cells"], result["total_cells"])
 
-    evaluated = [v for v in report["tables"].values() if v.get("status") == "evaluated"]
-    overall   = round(sum(all_scores) / len(all_scores), 2) if all_scores else 0.0
-
-    report["le_books"] = sorted(all_le_books)
-    report["executive_summary"] = {
-        "overall_completeness_score": overall,
-        "total_tables":               len(report["tables"]),
-        "evaluated_tables":           len(evaluated),
-    }
-
-    with open(output_path, "w", encoding="utf-8") as fh:
-        json.dump(report, fh, indent=2, default=str)
-
-    log.info("Completeness report → %s  (overall %.2f%%)", output_path, overall)
-    return report
+    return _finalise_report(report, all_scores, all_le_books, output_path)
 
 
 def evaluate_from_sql(engine, schema: str, valid_le_books: frozenset,
                        window_days: int, watermarks: dict, output_path: str,
-                       row_limit: int = 0) -> dict:
+                       row_limit: int = 0,
+                       tables: list[str] | None = None) -> dict:
     """Run completeness checks in pure SQL — one query per table, no DataFrames."""
     from sqlalchemy import text as _text
 
-    report: dict = {
-        "generated_at": datetime.now().isoformat(timespec="seconds"),
-        "tables":       {},
-        "warnings":     {},
-    }
-    all_scores:   list[float] = []
-    all_le_books: set         = set()
+    report, all_scores, all_le_books = _init_report()
+    target = tables if tables is not None else TARGET_TABLES
 
     lb_clause = (
         'AND "le_book" IN (' + ", ".join(f"'{lb}'" for lb in sorted(valid_le_books)) + ")"
@@ -296,13 +307,13 @@ def evaluate_from_sql(engine, schema: str, valid_le_books: frozenset,
     )
 
     with engine.connect() as conn:
-        for table in TARGET_TABLES:
+        for table in target:
             log.info("━━  %s", table)
             mandatory = MANDATORY_COLUMNS.get(table, [])
             if not mandatory:
                 continue
 
-            sq = f'"{schema}"."{table}"'
+            sq     = f'"{schema}"."{table}"'
             wanted = list(set(mandatory) | {"le_book", "date_creation", "date_last_modified"})
             existing = {
                 r[0] for r in conn.execute(_text("""
@@ -315,7 +326,7 @@ def evaluate_from_sql(engine, schema: str, valid_le_books: frozenset,
             found_cols   = [c for c in mandatory if c in existing]
             missing_cols = [c for c in mandatory if c not in existing]
             if not found_cols:
-                report["tables"][table] = {"status": "not_found"}
+                report["tables"][table]   = {"status": "not_found"}
                 report["warnings"][table] = "No mandatory columns found in DB."
                 continue
 
@@ -334,8 +345,7 @@ def evaluate_from_sql(engine, schema: str, valid_le_books: frozenset,
                 )
             date_clause = "(" + " OR ".join(date_parts) + ")" if date_parts else "TRUE"
 
-            scope_cols  = sorted(({"le_book"} if "le_book" in existing else set()) | set(found_cols))
-            null_exprs  = ",\n        ".join(
+            null_exprs = ",\n        ".join(
                 f'SUM(CASE WHEN "{c}" IS NULL THEN 1 ELSE 0 END) AS "null_{c}"'
                 for c in found_cols
             )
@@ -346,7 +356,7 @@ def evaluate_from_sql(engine, schema: str, valid_le_books: frozenset,
             limit_clause = f"LIMIT {row_limit}" if row_limit > 0 else ""
             sql = f"""
                 WITH scope AS (
-                    SELECT {", ".join(f'"{c}"' for c in scope_cols)}
+                    SELECT {", ".join(f'"{c}"' for c in sorted(({"le_book"} if has_lb else set()) | set(found_cols)))}
                     FROM   {sq}
                     WHERE  {date_clause}
                     {lb_clause}
@@ -363,12 +373,12 @@ def evaluate_from_sql(engine, schema: str, valid_le_books: frozenset,
             except Exception as exc:
                 log.error("  %s: query failed — %s", table, exc)
                 conn.rollback()
-                report["tables"][table] = {"status": "no_data", "row_count": 0}
+                report["tables"][table]   = {"status": "no_data", "row_count": 0}
                 report["warnings"][table] = str(exc)
                 continue
 
             if not rows:
-                report["tables"][table] = {"status": "no_data", "row_count": 0}
+                report["tables"][table]   = {"status": "no_data", "row_count": 0}
                 report["warnings"][table] = "No rows in window."
                 continue
 
@@ -381,21 +391,8 @@ def evaluate_from_sql(engine, schema: str, valid_le_books: frozenset,
 
             lb_breakdown: dict = {}
             if has_lb:
-                for r in rows:
-                    lb             = str(r["le_book"])
-                    all_le_books.add(lb)
-                    lb_total       = int(r["total_rows"])
-                    lb_nulls       = {c: int(r.get(f"null_{c}") or 0) for c in found_cols}
-                    lb_null_cells  = sum(lb_nulls.values())
-                    lb_total_cells = lb_total * len(found_cols)
-                    lb_breakdown[lb] = {
-                        "row_count":          lb_total,
-                        "completeness_score": round((1 - lb_null_cells / lb_total_cells) * 100, 2)
-                                              if lb_total_cells else 100.0,
-                        "null_counts":        lb_nulls,
-                        "null_cells":         lb_null_cells,
-                        "total_cells":        lb_total_cells,
-                    }
+                lb_breakdown, lb_books = _le_book_breakdown_from_rows(rows, found_cols)
+                all_le_books.update(lb_books)
 
             report["tables"][table] = {
                 "status":             "evaluated",
@@ -412,19 +409,7 @@ def evaluate_from_sql(engine, schema: str, valid_le_books: frozenset,
             log.info("  %-30s  score=%.2f%%  null=%d/%d cells",
                      table, score, null_cells, total_cells)
 
-    evaluated = [v for v in report["tables"].values() if v.get("status") == "evaluated"]
-    overall   = round(sum(all_scores) / len(all_scores), 2) if all_scores else 0.0
-    report["le_books"] = sorted(all_le_books)
-    report["executive_summary"] = {
-        "overall_completeness_score": overall,
-        "total_tables":               len(report["tables"]),
-        "evaluated_tables":           len(evaluated),
-    }
-
-    with open(output_path, "w", encoding="utf-8") as fh:
-        json.dump(report, fh, indent=2, default=str)
-    log.info("Completeness report → %s  (overall %.2f%%)", output_path, overall)
-    return report
+    return _finalise_report(report, all_scores, all_le_books, output_path)
 
 
 #main function
@@ -439,14 +424,14 @@ Examples:
   python dq_engine.py --limit 1000
   python dq_engine.py --limit 0          # full tables, no cap
   python dq_engine.py --tables accounts contracts_expanded
-  python dq_engine.py --schema data_quality_program --output dq_report.json
+  python dq_engine.py --schema dqp --output dq_report.json
   python dq_engine.py --env /path/to/.env
         """,
     )
     parser.add_argument("--tables", nargs="+", default=TARGET_TABLES,
                         help="Tables to evaluate (default: all defined tables)")
-    parser.add_argument("--schema", default="data_quality_program",
-                        help="PostgreSQL schema (default: data_quality_program)")
+    parser.add_argument("--schema", default="dqp",
+                        help="PostgreSQL schema (default: dqp)")
     parser.add_argument("--limit",  type=int, default=100,
                         help="Max rows per table (default: 100 | 0 = full table)")
     parser.add_argument("--output", default="dq_report.json",
