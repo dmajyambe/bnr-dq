@@ -192,7 +192,6 @@ COMP_RULE_META: dict[str, dict] = {
 }
 
 #accuracy
-
 VALID_ACCOUNT_STATUS    = frozenset({0, 1, 2, 3, 4, 5, 9})
 VALID_PERFORMANCE_CLASS = frozenset({"NL", "WL", "SL", "DL", "LL", "WO"})
 VALID_GENDER            = frozenset({"M", "F", "C"})
@@ -271,11 +270,19 @@ ACC_TABLE_RULES: dict[str, list[str]] = {
     #"prev_loan_applications": ["ACC-001"],
 }
 
-# # ── TIMELINESS ─────────────────────────────────────────────────────────────────
+# ── TIMELINESS ─────────────────────────────────────────────────────────────────
+# DISABLED for now (no SQL engine yet). Active empty placeholders keep every importer
+# working (dq_issue_tracker, dq_inst_portal, the --reports stage) instead of raising
+# ImportError — which previously made rule-name lookups silently fall back to raw IDs.
+# Re-enable by populating these + adding a timeliness evaluate_from_sql engine.
+TIM_RULE_META: dict[str, dict] = {}
+TIMELINESS_COLUMNS: dict[str, list[str]] = {}
+TIM_TABLE_RULES: dict[str, list[str]] = {}
 
 # FRESHNESS_WINDOW_DAYS = 90
 MIN_AGE_AT_OPEN       = 18
 
+# TIM_RULE_META full definitions (restore when timeliness is implemented):
 # TIM_RULE_META: dict[str, dict] = {
 #     "TIM-001": {
 #         "name":     "Customer open date must not be in the future",

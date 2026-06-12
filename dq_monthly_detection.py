@@ -331,7 +331,8 @@ def _zip_failing_rows_sql(engine, schema: str, table: str,
 
 def run_monthly_detection(engine, schema: str, run_date: str,
                           tables: list[str] | None = None,
-                          limit: int = 0) -> None:
+                          limit: int = 0,
+                          le_books: frozenset | None = None) -> None:
     """
     Full-table DQ scan across all dimensions, run entirely in SQL (memory-safe).
 
@@ -341,8 +342,9 @@ def run_monthly_detection(engine, schema: str, run_date: str,
       3. _build_history_entry / _append_history  → dq_history.json (dashboard trends)
       4. per-institution failing-row ZIPs streamed from SQL → issue_reports/
 
-    tables: restrict to a subset of tables (testing)
-    limit:  row cap per table, 0 = no limit (testing)
+    tables:   restrict to a subset of tables (testing)
+    limit:    row cap per table, 0 = no limit (testing)
+    le_books: restrict to these institution codes (testing); default = all in-scope
     """
     import completeness_check as comp_eng
     import accuracy_check     as acc_eng
@@ -354,8 +356,10 @@ def run_monthly_detection(engine, schema: str, run_date: str,
     ensure_tables()
 
     log.info("Fetching institution metadata …")
-    valid_le_books = get_valid_le_books(engine, schema)
+    valid_le_books = le_books if le_books is not None else get_valid_le_books(engine, schema)
     categories     = get_le_book_categories(engine, schema)
+    if le_books is not None:
+        log.info("Institution filter: %s", ", ".join(sorted(valid_le_books)))
 
     if tables:
         log.info("Table filter: %s", ", ".join(tables))
@@ -426,6 +430,8 @@ if __name__ == "__main__":
                         help="Restrict to these tables only (testing)")
     parser.add_argument("--limit", type=int, default=0,
                         help="Row cap per table, 0 = no limit (testing)")
+    parser.add_argument("--le-book", nargs="+", default=None, metavar="CODE",
+                        help="Restrict to these institution codes only (testing)")
     args = parser.parse_args()
 
     from db_utils import get_engine, build_connection_string
@@ -441,7 +447,8 @@ if __name__ == "__main__":
     log.info("=" * 60)
 
     run_monthly_detection(engine, args.schema, args.date,
-                          tables=args.tables, limit=args.limit)
+                          tables=args.tables, limit=args.limit,
+                          le_books=frozenset(args.le_book) if args.le_book else None)
 
     log.info("=" * 60)
     log.info("Done.")

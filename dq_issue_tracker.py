@@ -152,9 +152,9 @@ def _lookup_rule_name(rule_id: str) -> str:
     """Return the human-readable rule name from the registry, or the rule_id itself."""
     try:
         from dq_rules import (ACC_RULE_META, TIM_RULE_META, VAL_RULE_META,
-                               COMP_RULE_META, REL_RULE_META)
+                               UNI_RULE_META, COMP_RULE_META, REL_RULE_META)
         all_meta = {**COMP_RULE_META, **ACC_RULE_META, **TIM_RULE_META,
-                    **VAL_RULE_META, **REL_RULE_META}
+                    **VAL_RULE_META, **UNI_RULE_META, **REL_RULE_META}
         return all_meta.get(rule_id, {}).get("name") or rule_id
     except Exception:
         return rule_id
