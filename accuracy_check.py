@@ -360,10 +360,6 @@ def _acc_rule_sql(rule_id: str, existing: set) -> tuple[str, str] | None:
             f'AND ("legal_status"::TEXT NOT IN ({corp}) OR UPPER(TRIM("customer_gender"::TEXT)) = \'C\') THEN 1 ELSE 0 END)',
         )
 
-    # ACC-011 (account_type vs vision_sbu pension consistency) is intentionally SKIPPED:
-    # it needs PENSION_ACCOUNT_TYPES, which is not defined in dq_rules. Define that
-    # constant and add an "ACC-011" branch here to enable it.
-
     if rule_id == "ACC-012":            # child (gender 'C') ⇒ marital_status must be 'NA'
         if not has("customer_gender", "marital_status"):
             return None

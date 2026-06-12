@@ -236,11 +236,6 @@ ACC_RULE_META: dict[str, dict] = {
         "category": "Cross-field Consistency",
         "fields":   ["customer_gender", "legal_status"],
     },
-    "ACC-011": {
-        "name":     "Pension account types must not appear for RETL segment",
-        "category": "Cross-field Consistency",
-        "fields":   ["account_type", "vision_sbu"],
-    },
     "ACC-012": {
         "name":     "Marital Status must be NA for corporate customers",
         "category": "Cross-field Consistency",
@@ -256,7 +251,7 @@ ACC_RULE_META: dict[str, dict] = {
 
 ACCURACY_COLUMNS: dict[str, list[str]] = {
     "customers_expanded":     ["le_book", "customer_gender", "legal_status", "marital_status"],
-    "accounts":               ["le_book", "account_status", "account_type", "vision_sbu"],
+    "accounts":               ["le_book", "account_status", "account_type"],
     "contracts_expanded":     ["le_book", "performance_class"],
     "contract_loans":         ["le_book", "performance_class"],
     "contracts_disburse":     ["le_book"],
@@ -267,7 +262,7 @@ ACCURACY_COLUMNS: dict[str, list[str]] = {
 
 ACC_TABLE_RULES: dict[str, list[str]] = {
     "customers_expanded":     [ "ACC-004", "ACC-010", "ACC-012"],
-    "accounts":               [ "ACC-002", "ACC-005", "ACC-011"],
+    "accounts":               [ "ACC-002", "ACC-005"],
     "contracts_expanded":     ["ACC-003"],
     "contract_loans":         ["ACC-003"],
     # "contracts_disburse":     ["ACC-001"],
