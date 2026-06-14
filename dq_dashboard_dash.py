@@ -3477,6 +3477,35 @@ def _serve_issue_report(le_book):
     return _flask_send_file(str(zips[0]), as_attachment=True, download_name=zips[0].name)
 
 
+@server.route("/download/issue-report/<le_book>/<table>")
+def _serve_issue_table(le_book, table):
+    """Stream a single {table}.xlsx out of an institution's latest report ZIP."""
+    import re as _re, io as _io, zipfile as _zip
+    from flask import abort, send_file as _flask_send_file
+    if (not _re.fullmatch(r"[A-Za-z0-9_-]{1,20}", le_book or "")
+            or not _re.fullmatch(r"[A-Za-z0-9_]{1,40}", table or "")):
+        abort(400)
+    d = _DIR / "issue_reports"
+    zips = sorted([z for z in d.glob(f"{le_book}_*.zip")
+                   if not z.name.endswith("_resolved.zip")], reverse=True) if d.exists() else []
+    if not zips:
+        abort(404)
+    member = f"{table}.xlsx"
+    try:
+        with _zip.ZipFile(zips[0]) as zf:
+            if member not in zf.namelist():
+                abort(404)
+            data = zf.read(member)
+    except Exception:
+        abort(404)
+    month = zips[0].stem.split("_", 1)[-1]
+    return _flask_send_file(
+        _io.BytesIO(data), as_attachment=True,
+        download_name=f"{table}_{le_book}_{month}.xlsx",
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
+
 dq_auth.ensure_users_table()
 
 
@@ -5636,7 +5665,7 @@ def _on_issues_download(n_clicks, cat_filter):
 # ── CR: per-table CSV download ────────────────────────────────────────────────
 
 @app.callback(
-    Output("cr-tbl-dl", "data"),
+    Output("dl-nav", "href", allow_duplicate=True),
     Input({"type": "cr-tbl-dl-btn", "index": ALL}, "n_clicks"),
     prevent_initial_call=True,
 )
@@ -5654,26 +5683,15 @@ def _cr_table_dl(clicks):
         raise dash.exceptions.PreventUpdate
     le_book, table_name = raw.split("|", 1)
 
-    import zipfile, io as _io
     issue_reports_dir = _DIR / "issue_reports"
-    if not issue_reports_dir.exists():
-        raise dash.exceptions.PreventUpdate
-
-    zips = sorted([z for z in issue_reports_dir.glob(f"{le_book}_*.zip")
-                   if not z.name.endswith("_resolved.zip")], reverse=True)
+    zips = (sorted([z for z in issue_reports_dir.glob(f"{le_book}_*.zip")
+                    if not z.name.endswith("_resolved.zip")], reverse=True)
+            if issue_reports_dir.exists() else [])
     if not zips:
         raise dash.exceptions.PreventUpdate
 
-    try:
-        with zipfile.ZipFile(zips[0]) as zf:
-            if f"{table_name}.xlsx" not in zf.namelist():
-                raise dash.exceptions.PreventUpdate
-            xlsx_bytes = zf.read(f"{table_name}.xlsx")
-    except Exception:
-        raise dash.exceptions.PreventUpdate
-
-    month = zips[0].stem.split("_", 1)[-1]
-    return dcc.send_bytes(xlsx_bytes, filename=f"{table_name}_{le_book}_{month}.xlsx")
+    # stream the single {table}.xlsx via the Flask route (no base64 inlining)
+    return f"/download/issue-report/{le_book}/{table_name}?t={ctx.triggered[0]['value']}"
 
 
 # ── CR: table-level approval ───────────────────────────────────────────────────
