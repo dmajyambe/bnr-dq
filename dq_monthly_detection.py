@@ -244,67 +244,124 @@ def _append_history(entry: dict) -> None:
 
 def _zip_failing_rows_sql(engine, schema: str, table: str,
                           valid_le_books: frozenset, categories: dict,
-                          month: str, limit: int = 0) -> None:
-    """Stream FAILING rows across all dimensions (completeness/accuracy/validity/
-    uniqueness) for `table` from SQL, grouped by institution, and append a
-    per-institution CSV into their monthly ZIP.
+                          month: str, limit: int = 0,
+                          max_rows_per_sheet: int = 50000) -> None:
+    """Stream FAILING rows (all dimensions) for `table` from SQL and write a
+    per-institution {table}.xlsx into their monthly ZIP — ONE SHEET PER ISSUE
+    (sheet name = issue type), with the affected column(s) highlighted red.
 
-    Memory-safe: server-side filter + streamed result written straight to a temp
-    file per institution (no full-table load, no large in-RAM buffer).
-
-    CSV columns: identifiers (left) → issue_type → failing rule columns (rightmost),
-    with stakeholder_name/category_type inserted after le_book.
+    Memory-safe: rows are capped per (institution, issue) server-side, streamed
+    ORDER BY le_book, issue_type, and written through an openpyxl write_only
+    workbook saved to a temp file per institution. Excel caps a sheet at ~1.05M
+    rows; max_rows_per_sheet bounds it well below that (truncation noted on-sheet).
     """
-    import csv
     import os
+    import re
     import tempfile
     import zipfile
+    from datetime import date as _date, datetime as _datetime
+    from decimal import Decimal
+    from openpyxl import Workbook
+    from openpyxl.cell import WriteOnlyCell
+    from openpyxl.styles import Font, PatternFill
     from failing_rows_sql import build_failing_union
+
+    RED_FILL = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
+    RED_FONT = Font(color="9C0006")
+    HDR_FONT = Font(bold=True)
+    HDR_RED  = Font(bold=True, color="9C0006")
+
+    def _coerce(v):
+        if v is None or isinstance(v, (str, int, float, bool, _date, _datetime)):
+            return v
+        if isinstance(v, Decimal):
+            return float(v)
+        return str(v)
 
     with engine.connect() as conn:
         existing = _db_columns(conn, schema, table)
-        built = build_failing_union(schema, table, existing, valid_le_books, limit)
+        built = build_failing_union(schema, table, existing, valid_le_books, limit,
+                                    per_issue_cap=max_rows_per_sheet)
         if not built:
             return
-        sql, out_cols = built
+        sql, out_cols, issue_cols = built
 
-        # header: le_book, stakeholder_name, category_type, <other ids>, issue_type, <fail cols>
+        # sheet columns = output cols minus issue_type; insert enrichment after le_book
+        sheet_cols = [c for c in out_cols if c != "issue_type"]
         header: list[str] = []
-        for c in out_cols:
+        for c in sheet_cols:
             header.append(c)
             if c == "le_book":
                 header += ["stakeholder_name", "category_type"]
 
-        def _row_values(m: dict, name: str, ctype: str) -> list:
-            vals: list = []
-            for c in out_cols:
-                vals.append(m.get(c))
-                if c == "le_book":
-                    vals += [name, ctype]
-            return vals
+        def _sheet_title(label: str, used: set) -> str:
+            name = re.sub(r"[\[\]:*?/\\]", " ", label)[:31].strip() or "issue"
+            base, i = name, 1
+            while name.lower() in used:
+                sfx = f" ({i})"
+                name = base[:31 - len(sfx)] + sfx
+                i += 1
+            used.add(name.lower())
+            return name
 
         result = conn.execution_options(stream_results=True).execute(text(sql))
+        st = {"wb": None, "path": None, "ws": None, "issue": None,
+              "affected": set(), "n": 0, "used": set(), "trunc": False}
 
-        state = {"path": None, "fh": None, "writer": None, "n": 0}
+        def _finish_sheet():
+            if st["ws"] is not None and st["trunc"]:
+                st["ws"].append([WriteOnlyCell(
+                    st["ws"], value=f"... truncated at {max_rows_per_sheet:,} rows")])
 
-        def _open() -> None:
-            fd, path = tempfile.mkstemp(suffix=".csv")
-            fh = os.fdopen(fd, "w", newline="", encoding="utf-8-sig")
-            w = csv.writer(fh)
-            w.writerow(header)
-            state.update(path=path, fh=fh, writer=w, n=0)
+        def _start_sheet(issue: str):
+            _finish_sheet()
+            ws = st["wb"].create_sheet(title=_sheet_title(issue, st["used"]))
+            affected = set(issue_cols.get(issue, []))
+            cells = []
+            for col in header:
+                cell = WriteOnlyCell(ws, value=col)
+                if col in affected:
+                    cell.font, cell.fill = HDR_RED, RED_FILL
+                else:
+                    cell.font = HDR_FONT
+                cells.append(cell)
+            ws.append(cells)
+            st.update(ws=ws, issue=issue, affected=affected, n=0, trunc=False)
 
-        def _close(lb: str) -> None:
-            if state["fh"] is None:
+        def _write_row(m: dict, name: str, ctype: str):
+            if st["n"] >= max_rows_per_sheet:
+                st["trunc"] = True
                 return
-            state["fh"].close()
-            if state["n"] > 0:
-                zip_path = ISSUE_REPORTS_DIR / f"{lb}_{month}.zip"
-                with zipfile.ZipFile(zip_path, "a", zipfile.ZIP_DEFLATED) as zf:
-                    zf.write(state["path"], arcname=f"{table}.csv")
-                log.info("  ZIP %-6s  %s.csv  %d rows", lb, table, state["n"])
-            os.unlink(state["path"])
-            state.update(path=None, fh=None, writer=None, n=0)
+            affected = st["affected"]
+            cells = []
+            for col in sheet_cols:
+                cell = WriteOnlyCell(st["ws"], value=_coerce(m.get(col)))
+                if col in affected:
+                    cell.fill, cell.font = RED_FILL, RED_FONT
+                cells.append(cell)
+                if col == "le_book":
+                    cells.append(WriteOnlyCell(st["ws"], value=name))
+                    cells.append(WriteOnlyCell(st["ws"], value=ctype))
+            st["ws"].append(cells)
+            st["n"] += 1
+
+        def _new_workbook():
+            fd, path = tempfile.mkstemp(suffix=".xlsx")
+            os.close(fd)
+            st.update(wb=Workbook(write_only=True), path=path, ws=None,
+                      issue=None, used=set())
+
+        def _close(lb: str):
+            if st["wb"] is None:
+                return
+            _finish_sheet()
+            st["wb"].save(st["path"])
+            zip_path = ISSUE_REPORTS_DIR / f"{lb}_{month}.zip"
+            with zipfile.ZipFile(zip_path, "a", zipfile.ZIP_DEFLATED) as zf:
+                zf.write(st["path"], arcname=f"{table}.xlsx")
+            os.unlink(st["path"])
+            log.info("  ZIP %-6s  %s.xlsx", lb, table)
+            st.update(wb=None, path=None, ws=None)
 
         cur_lb: str | None = None
         for row in result:
@@ -312,17 +369,20 @@ def _zip_failing_rows_sql(engine, schema: str, table: str,
             lb = str(m["le_book"]).strip() if m.get("le_book") is not None else None
             if lb is None:
                 continue
-            if lb != cur_lb:
-                if cur_lb is not None:
-                    _close(cur_lb)
-                cur_lb = lb
-                _open()
+            issue = m.get("issue_type")
             info  = categories.get(lb, {})
             name  = info.get("name") or lb
             name  = name.title() if isinstance(name, str) else name
             ctype = info.get("category_type") or ""
-            state["writer"].writerow(_row_values(m, name, ctype))
-            state["n"] += 1
+            if lb != cur_lb:
+                if cur_lb is not None:
+                    _close(cur_lb)
+                cur_lb = lb
+                _new_workbook()
+                _start_sheet(issue)
+            elif issue != st["issue"]:
+                _start_sheet(issue)
+            _write_row(m, name, ctype)
         if cur_lb is not None:
             _close(cur_lb)
 

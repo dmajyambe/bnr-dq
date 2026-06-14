@@ -185,12 +185,16 @@ def _failing_columns(table: str, existing: set) -> list[str]:
 
 
 def build_failing_union(schema: str, table: str, existing: set,
-                        valid_le_books: frozenset, limit: int = 0):
-    """Return (sql, output_columns) selecting failing rows across all dimensions for
-    `table`, or None if nothing is applicable.
+                        valid_le_books: frozenset, limit: int = 0,
+                        extra_where: str = "", per_issue_cap: int = 0):
+    """Return (sql, output_columns, issue_cols) selecting failing rows across all
+    dimensions for `table`, or None if nothing is applicable.
 
     output_columns order: identifiers → 'issue_type' → failing columns (rightmost).
-    Rows are ORDER BY le_book so the caller can group per institution while streaming.
+    issue_cols: {issue_label: [affected column(s)]} — for red-highlighting per sheet.
+    Rows are ORDER BY le_book, issue_type so the caller can stream one (institution,
+    issue) group at a time. per_issue_cap > 0 caps rows per (institution, issue)
+    server-side (one Excel sheet's worth).
     """
     if "le_book" not in existing:
         return None
@@ -210,6 +214,9 @@ def build_failing_union(schema: str, table: str, existing: set,
     if valid_le_books:
         codes     = ", ".join(f"'{lb}'" for lb in sorted(valid_le_books))
         lb_clause = f'AND "le_book" IN ({codes})'
+    # optional extra row filter (e.g. a date_last_modified month) applied to every branch
+    if extra_where:
+        lb_clause += f' AND ({extra_where})'
 
     sq = f'"{schema}"."{table}"'
     branches: list[str] = []
@@ -219,18 +226,26 @@ def build_failing_union(schema: str, table: str, existing: set,
     # is collected per rule; the table is pre-filtered to rows failing ANY rule,
     # then unnest expands only those — avoids both one-scan-per-rule and an M×N
     # CASE blow-up over all rows.
+    # issue label -> affected column(s), for red-highlighting in the Excel report
+    issue_cols: dict[str, list[str]] = {}
     rule_conds: list[tuple[str, str]] = []
     for col in MANDATORY_COLUMNS.get(table, []):
         if col in existing:
-            rule_conds.append((f'"{col}" IS NULL', f"Missing {col}"))
+            label = f"Missing {col}"
+            rule_conds.append((f'"{col}" IS NULL', label))
+            issue_cols[label] = [col]
     for rid in ACC_TABLE_RULES.get(table, []):
         r = _acc_invalid(rid, existing)
         if r:
-            rule_conds.append((r[0], "{}: {}".format(rid, ACC_RULE_META[rid].get("name", rid))))
+            label = "{}: {}".format(rid, ACC_RULE_META[rid].get("name", rid))
+            rule_conds.append((r[0], label))
+            issue_cols[label] = r[1]
     for rid in VAL_TABLE_RULES.get(table, []):
         r = _val_invalid(rid, existing)
         if r:
-            rule_conds.append((r[0], "{}: {}".format(rid, VAL_RULE_META[rid].get("name", rid))))
+            label = "{}: {}".format(rid, VAL_RULE_META[rid].get("name", rid))
+            rule_conds.append((r[0], label))
+            issue_cols[label] = r[1]
 
     if rule_conds:
         case_arr = ",\n            ".join(
@@ -250,6 +265,7 @@ def build_failing_union(schema: str, table: str, existing: set,
         if anchor in existing and keys:
             part = ", ".join(f'"{c}"' for c in (["le_book"] + keys))
             issue = f"{rid}: {UNI_RULE_META[rid]['name']}"
+            issue_cols[issue] = keys
             sub = (f'SELECT {data_sel}, '
                    f'ROW_NUMBER() OVER (PARTITION BY {part} ORDER BY {part}) AS _rn '
                    f'FROM {sq} WHERE "{anchor}" IS NOT NULL {lb_clause}')
@@ -260,9 +276,24 @@ def build_failing_union(schema: str, table: str, existing: set,
     if not branches:
         return None
 
-    sql = " UNION ALL ".join(branches) + ' ORDER BY "le_book"'
+    output_cols = id_cols + ["issue_type"] + fail_cols
+    inner = " UNION ALL ".join(branches)
+
+    if per_issue_cap and per_issue_cap > 0:
+        # Cap rows per (institution, issue) server-side so the client receives a
+        # bounded set (one Excel sheet's worth) instead of streaming millions.
+        cols_q = ", ".join("issue_type" if c == "issue_type" else f'"{c}"'
+                           for c in output_cols)
+        sql = (f'SELECT {cols_q} FROM ('
+               f'SELECT {cols_q}, ROW_NUMBER() OVER (PARTITION BY "le_book", issue_type) AS _srn '
+               f'FROM ({inner}) _w) _c WHERE _srn <= {per_issue_cap} '
+               f'ORDER BY "le_book", issue_type')
+    else:
+        # order by institution then issue so the writer can stream one
+        # (institution, issue) group at a time → one Excel sheet per issue.
+        sql = inner + ' ORDER BY "le_book", issue_type'
+
     if limit and limit > 0:
         sql += f" LIMIT {limit}"
 
-    output_cols = id_cols + ["issue_type"] + fail_cols
-    return sql, output_cols
+    return sql, output_cols, issue_cols
