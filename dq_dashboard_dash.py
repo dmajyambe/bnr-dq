@@ -1316,7 +1316,7 @@ def _institution_reports_table(display_insts: dict) -> html.Div:
             try:
                 size_kb    = zp.stat().st_size // 1024
                 namelist   = _zf.ZipFile(zp).namelist()
-                table_names = [n.replace(".csv", "") for n in namelist]
+                table_names = [n.rsplit(".", 1)[0] for n in namelist]
             except Exception:
                 size_kb, table_names = 0, []
             with_zip.append((lb, name, size_kb, table_names, zp))
@@ -4789,51 +4789,48 @@ def _resolved_dl_generate(le_book):
 
             try:
                 with zipfile.ZipFile(zip_path) as src_zf:
-                    if f"{table}.csv" not in src_zf.namelist():
+                    if f"{table}.xlsx" not in src_zf.namelist():
                         continue
-                    df = pd.read_csv(
-                        _io.BytesIO(src_zf.read(f"{table}.csv")),
-                        encoding="utf-8-sig", low_memory=False,
-                    )
+                    xls = pd.ExcelFile(_io.BytesIO(src_zf.read(f"{table}.xlsx")))
             except Exception:
                 continue
 
-            if df.empty or "issue_type" not in df.columns:
+            # Reports are now one Excel sheet per issue (sheet name = issue type).
+            # Map each sheet to the resolved issue it belongs to: completeness issues
+            # cover the "Missing *" sheets; dimension issues match the sheet whose
+            # name starts with their rule_id ("VAL-001 ...", "ACC-002 ...", etc.).
+            comp_present = any(i["rule_id"] in comp_rule_ids for i in issues)
+            dim_issues   = [i for i in issues if i["rule_id"] not in comp_rule_ids]
+
+            sheet_issue: dict[str, dict] = {}
+            for sheet in xls.sheet_names:
+                name = str(sheet)
+                if comp_present and name.startswith("Missing "):
+                    sheet_issue[sheet] = next(
+                        (i for i in issues if i["rule_id"] in comp_rule_ids), {})
+                else:
+                    iss = next((i for i in dim_issues if name.startswith(i["rule_id"])), None)
+                    if iss is not None:
+                        sheet_issue[sheet] = iss
+            if not sheet_issue:
                 continue
 
-            # build filter: which issue_type values correspond to these resolved issues?
-            has_comp      = any(i["rule_id"] in comp_rule_ids for i in issues)
-            dim_types     = {i["rule_name"] for i in issues
-                             if i["rule_id"] not in comp_rule_ids and i.get("rule_name")}
-
-            mask = pd.Series(False, index=df.index)
-            if dim_types:
-                mask |= df["issue_type"].isin(dim_types)
-            if has_comp:
-                mask |= df["issue_type"].str.startswith("Missing ", na=False)
-
-            filtered = df[mask].copy()
-            if filtered.empty:
+            frames = []
+            for sheet, iss in sheet_issue.items():
+                try:
+                    sdf = xls.parse(sheet)
+                except Exception:
+                    continue
+                if sdf.empty:
+                    continue
+                sdf["issue_type"]   = sheet
+                sdf["resolved_at"]  = iss.get("resolved_at", "")
+                sdf["sla_deadline"] = iss.get("sla_deadline", "")
+                frames.append(sdf)
+            if not frames:
                 continue
 
-            # build lookup: issue_type value → resolved issue metadata
-            meta: dict[str, dict] = {}
-            for iss in issues:
-                if iss["rule_id"] in comp_rule_ids:
-                    meta["__comp__"] = iss
-                elif iss.get("rule_name"):
-                    meta[iss["rule_name"]] = iss
-
-            def _resolved_at(itype: str) -> str:
-                key = "__comp__" if str(itype).startswith("Missing ") else itype
-                return (meta.get(key) or {}).get("resolved_at", "")
-
-            def _sla(itype: str) -> str:
-                key = "__comp__" if str(itype).startswith("Missing ") else itype
-                return (meta.get(key) or {}).get("sla_deadline", "")
-
-            filtered["resolved_at"]  = filtered["issue_type"].map(_resolved_at)
-            filtered["sla_deadline"] = filtered["issue_type"].map(_sla)
+            filtered = pd.concat(frames, ignore_index=True)
             filtered["on_time"] = filtered.apply(
                 lambda r: (
                     "On Time" if r["resolved_at"] and r["sla_deadline"]
@@ -5651,14 +5648,14 @@ def _cr_table_dl(clicks):
 
     try:
         with zipfile.ZipFile(zips[0]) as zf:
-            if f"{table_name}.csv" not in zf.namelist():
+            if f"{table_name}.xlsx" not in zf.namelist():
                 raise dash.exceptions.PreventUpdate
-            csv_bytes = zf.read(f"{table_name}.csv")
+            xlsx_bytes = zf.read(f"{table_name}.xlsx")
     except Exception:
         raise dash.exceptions.PreventUpdate
 
     month = zips[0].stem.split("_", 1)[-1]
-    return dcc.send_bytes(csv_bytes, filename=f"{table_name}_{le_book}_{month}.csv")
+    return dcc.send_bytes(xlsx_bytes, filename=f"{table_name}_{le_book}_{month}.xlsx")
 
 
 # ── CR: table-level approval ───────────────────────────────────────────────────
