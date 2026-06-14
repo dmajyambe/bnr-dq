@@ -660,16 +660,16 @@ def _build_rows() -> list[dict]:
     #     })
 
     # validity
-    # for rid, meta in VAL_RULE_META.items():
-    #     tables = sorted({t for t, rules in VAL_TABLE_RULES.items() if rid in rules})
-    #     rows.append({
-    #         "rule_id":   rid,
-    #         "dimension": "validity",
-    #         "category":  meta["category"],
-    #         "rule_name": meta["name"],
-    #         "tables":    ", ".join(tables),
-    #         "fields":    ", ".join(meta["fields"]),
-    #     })
+    for rid, meta in VAL_RULE_META.items():
+        tables = sorted({t for t, rules in VAL_TABLE_RULES.items() if rid in rules})
+        rows.append({
+            "rule_id":   rid,
+            "dimension": "validity",
+            "category":  meta["category"],
+            "rule_name": meta["name"],
+            "tables":    ", ".join(tables),
+            "fields":    ", ".join(meta["fields"]),
+        })
 
     # referential-integrity rules — classified under accuracy
     # for rid, meta in REL_RULE_META.items():
