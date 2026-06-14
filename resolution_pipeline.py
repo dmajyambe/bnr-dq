@@ -5,7 +5,6 @@ import os
 import sys
 from datetime import datetime
 from pathlib import Path
-
 from dotenv import load_dotenv
 from sqlalchemy import text
 
@@ -46,16 +45,15 @@ def get_last_detection_time(conn, schema: str):
             WHERE schema_name = :sc
         """), {"sc": schema}).fetchone()
 
+        
+
         return row[0] if row and row[0] else None
 
     except Exception as exc:
         log.warning("Could not fetch last_detection_time: %s", exc)
         return None
 
-
-# ─────────────────────────────────────────────────────────────
 # ISSUE FETCH
-# ─────────────────────────────────────────────────────────────
 
 def fetch_active_issues(conn, last_time):
     """
@@ -88,49 +86,9 @@ def fetch_active_issues(conn, last_time):
 # CORE RULE ENGINE HOOKS (unchanged)
 # ─────────────────────────────────────────────────────────────
 
-def _build_dispatch():
-    import accuracy_check
-    import timeliness_check
-    import validity_check
-
-    from accuracy_check   import RULE_META as ACC_META
-    from timeliness_check import RULE_META as TIM_META
-    from validity_check   import RULE_META as VAL_META
-
-    dispatch = {}
-
-    for rid in ACC_META:
-        dispatch[rid] = accuracy_check
-    for rid in TIM_META:
-        dispatch[rid] = timeliness_check
-    for rid in VAL_META:
-        dispatch[rid] = validity_check
-
-    return dispatch
-
-
-def _db_columns(conn, schema: str, table: str):
-    rows = conn.execute(text("""
-        SELECT column_name
-        FROM information_schema.columns
-        WHERE table_schema = :s AND table_name = :t
-    """), {"s": schema, "t": table}).fetchall()
-
-    return {r[0].lower() for r in rows}
-
-
-# ─────────────────────────────────────────────────────────────
-# CORE EVALUATION (UNCHANGED LOGIC)
-# ─────────────────────────────────────────────────────────────
-
-def _record(conn, issue, invalid, run_id, stats):
-    from dq_issue_tracker import (
-        resolve_issue,
-        update_issue_count,
-        reopen_issue,
-    )
-
-    from dq_resolution_history import append_event
+def _record(issue, invalid, run_id, stats):
+    """Apply a re-evaluation result to one issue: resolve / reopen / update count."""
+    from dq_issue_tracker import resolve_issue, update_issue_count, reopen_issue
 
     tid = issue["issue_id"]
     cur = issue.get("status", STATUS_OPEN)
@@ -138,104 +96,97 @@ def _record(conn, issue, invalid, run_id, stats):
     if invalid == 0:
         if cur != STATUS_RESOLVED:
             resolve_issue(tid, run_id)
-            append_event(conn, tid, "RESOLVED", cur, STATUS_RESOLVED, run_id)
             stats["resolved"] += 1
-
     else:
         if cur == STATUS_RESOLVED:
-            reopen_issue(tid, run_id)
-            append_event(conn, tid, "REOPENED", STATUS_RESOLVED, STATUS_REOPENED, run_id)
+            reopen_issue(tid)
             stats["reopened"] += 1
         else:
             update_issue_count(tid, invalid)
-            append_event(conn, tid, "STATUS_CHECKED", cur, cur, run_id)
             stats["unchanged"] += 1
 
 
 # ─────────────────────────────────────────────────────────────
-# MAIN RESOLUTION ENGINE
+# MAIN RESOLUTION ENGINE — re-evaluate open issues via the SQL engines
 # ─────────────────────────────────────────────────────────────
 
 def run_resolution_scan(engine, schema: str, run_id: str):
+    """Re-check every active (OPEN/REOPENED) issue against current data and
+    resolve / reopen / update it.
 
-    from dq_issue_tracker import get_issues, _conn
+    Re-evaluation reuses the detection engines' evaluate_from_sql (full-table scan,
+    memory-safe) restricted to the tables + institutions that actually have open
+    issues, then matches each issue to its current failing count:
+      completeness → null_cells   |   accuracy/validity/uniqueness → rule 'invalid'
+    Issues whose rule no longer exists simply get a count of 0 → resolved.
+    """
+    import os
+    import tempfile
+    import completeness_check as comp_eng
+    import accuracy_check     as acc_eng
+    import validity_check     as val_eng
+    import uniqueness_check   as uni_eng
+    from dq_issue_tracker import _COMP_TABLE_RULE
 
-    stats = {
-        "resolved": 0,
-        "unchanged": 0,
-        "reopened": 0,
-        "errors": 0,
-    }
+    stats = {"resolved": 0, "unchanged": 0, "reopened": 0, "skipped": 0, "errors": 0}
 
     with engine.connect() as conn:
-
-        log.info("Starting resolution scan run_id=%s", run_id)
-
-        # ─────────────────────────────────────────────
-        # INCREMENTAL BASELINE (NEW CORE FIX)
-        # ─────────────────────────────────────────────
         last_time = get_last_detection_time(conn, schema)
+    log.info("Resolution scan run_id=%s  (incremental baseline=%s)", run_id, last_time)
 
-        log.info("Incremental mode: last_detection_time=%s", last_time)
+    issues = fetch_active_issues(None, last_time)
+    if not issues:
+        log.info("No active issues.")
+        return stats
+    log.info("Active issues: %d", len(issues))
 
-        # ─────────────────────────────────────────────
-        # FETCH ACTIVE ISSUES
-        # ─────────────────────────────────────────────
-        issues = fetch_active_issues(conn, last_time)
+    tables   = sorted({i["table_name"] for i in issues})
+    le_books = frozenset(str(i["le_book"]) for i in issues)
+    log.info("Re-evaluating %d table(s) for %d institution(s) …", len(tables), len(le_books))
 
-        if not issues:
-            log.info("No active issues.")
-            return stats
+    def _run(eng):
+        fd, path = tempfile.mkstemp(suffix=".json")
+        os.close(fd)
+        try:
+            return eng.evaluate_from_sql(engine, schema, le_books, 0, {}, path, tables=tables)
+        except Exception as exc:
+            log.warning("  %s re-eval failed: %s", eng.__name__, exc)
+            return {}
+        finally:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
 
-        log.info("Active issues: %d", len(issues))
+    reports = {"comp": _run(comp_eng), "acc": _run(acc_eng),
+               "val": _run(val_eng),  "uni": _run(uni_eng)}
 
-        dispatch = _build_dispatch()
+    # build (le_book, rule_id) -> current failing count
+    counts: dict[tuple, int] = {}
+    for table, tdata in (reports["comp"] or {}).get("tables", {}).items():
+        if tdata.get("status") != "evaluated":
+            continue
+        rid = _COMP_TABLE_RULE.get(table)
+        if not rid:
+            continue
+        for lb, b in tdata.get("le_book_breakdown", {}).items():
+            counts[(str(lb), rid)] = int(b.get("null_cells") or 0)
+    for key in ("acc", "val", "uni"):
+        for table, tdata in (reports[key] or {}).get("tables", {}).items():
+            if tdata.get("status") != "evaluated":
+                continue
+            for lb, b in tdata.get("le_book_breakdown", {}).items():
+                for rid, rd in b.get("rules", {}).items():
+                    counts[(str(lb), rid)] = int(rd.get("invalid") or 0)
 
-        # group by table/le_book (optimization from detection design)
-        groups = {}
-        for i in issues:
-            groups.setdefault((i["table_name"], i["le_book"]), []).append(i)
-
-        # ─────────────────────────────────────────────
-        # PROCESS GROUPS
-        # ─────────────────────────────────────────────
-        for (table, le_book), group in groups.items():
-
-            log.info("Processing table=%s le_book=%s issues=%d",
-                     table, le_book, len(group))
-
-            with engine.connect() as conn:
-
-                conn.execute(text("SET work_mem = '256MB'"))
-
-                for iss in group:
-
-                    rule_id = iss["rule_id"]
-                    mod = dispatch.get(rule_id)
-
-                    try:
-                        if not mod:
-                            stats["errors"] += 1
-                            continue
-
-                        # load minimal required data
-                        df = mod.load_data(engine, schema, table, le_book)
-
-                        result = mod.run_rule(rule_id, df)
-
-                        if result is None:
-                            stats["errors"] += 1
-                            continue
-
-                        _, invalid, _ = result
-
-                        _record(conn, iss, invalid, run_id, stats)
-
-                    except Exception as exc:
-                        log.warning("Rule failed %s: %s", rule_id, exc)
-                        stats["errors"] += 1
-
-                conn.commit()
+    # re-record every active issue (default 0 = no current failure → resolve)
+    for iss in issues:
+        try:
+            cnt = counts.get((str(iss["le_book"]), iss["rule_id"]), 0)
+            _record(iss, cnt, run_id, stats)
+        except Exception as exc:
+            log.warning("  record failed for %s: %s", iss.get("issue_id"), exc)
+            stats["errors"] += 1
 
     log.info("DONE %s", stats)
     return stats
