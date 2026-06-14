@@ -3460,6 +3460,23 @@ app = dash.Dash(
 )
 server = app.server  # exposed for gunicorn: gunicorn dq_dashboard_dash:server
 server.secret_key = os.environ.get("SECRET_KEY", os.urandom(32))
+
+
+@server.route("/download/issue-report/<le_book>")
+def _serve_issue_report(le_book):
+    """Stream an institution's latest issue-report ZIP directly (no base64 inlining).
+    Used by the download buttons so large reports (100 MB+) download reliably."""
+    import re as _re
+    from flask import abort, send_file as _flask_send_file
+    if not _re.fullmatch(r"[A-Za-z0-9_-]{1,20}", le_book or ""):
+        abort(400)
+    d = _DIR / "issue_reports"
+    zips = sorted(d.glob(f"{le_book}_*.zip"), reverse=True) if d.exists() else []
+    if not zips:
+        abort(404)
+    return _flask_send_file(str(zips[0]), as_attachment=True, download_name=zips[0].name)
+
+
 dq_auth.ensure_users_table()
 
 
@@ -3709,6 +3726,7 @@ app.layout = html.Div([
     dcc.Download(id="inst-csv-download"),
     dcc.Download(id="resolved-inst-download"),
     dcc.Download(id="open-issue-dl"),
+    dcc.Location(id="dl-nav", refresh=True),  # drives large-file downloads via /download route
     dcc.Download(id="cr-tbl-dl"),
     dcc.Store(id="resolved-dl-lb",  data=None),
     dcc.Store(id="dl-preview-lb", data=None),
@@ -4314,6 +4332,7 @@ def _populate_dl_modal(le_book):
 
 @app.callback(
     Output("inst-download", "data"),
+    Output("dl-nav", "href", allow_duplicate=True),
     Input("dl-modal-confirm", "n_clicks"),
     State("dl-preview-lb", "data"),
     prevent_initial_call=True,
@@ -4322,19 +4341,17 @@ def _on_inst_download_confirm(n_clicks, le_book):
     """
     Download the latest issue report for this institution.
     Preference order:
-      1. issue_reports/{le_book}_{YYYY-MM}.zip  (monthly detection ZIP)
+      1. issue_reports/{le_book}_{YYYY-MM}.zip  (monthly detection ZIP, via /download route)
       2. reports/ CSV bundle (legacy pipeline CSVs)
       3. reports/ XLSX fallback
     """
     if not n_clicks or not le_book:
         raise dash.exceptions.PreventUpdate
 
-    # ── 1. monthly detection issue ZIP ────────────────────────────────────────
+    # ── 1. monthly detection issue ZIP — streamed via Flask route (any size) ──
     issue_reports_dir = _DIR / "issue_reports"
-    if issue_reports_dir.exists():
-        zips = sorted(issue_reports_dir.glob(f"{le_book}_*.zip"), reverse=True)
-        if zips:
-            return dcc.send_file(str(zips[0]))
+    if issue_reports_dir.exists() and sorted(issue_reports_dir.glob(f"{le_book}_*.zip")):
+        return dash.no_update, f"/download/issue-report/{le_book}?t={n_clicks}"
 
     # ── 2. legacy pipeline CSVs ───────────────────────────────────────────────
     if REPORTS_DIR.exists():
@@ -4351,20 +4368,21 @@ def _on_inst_download_confirm(n_clicks, le_book):
             month_files = [f for f in csv_files
                            if f.stem.endswith(f"_{latest_month}")]
             if len(month_files) == 1:
-                return dcc.send_file(str(month_files[0]))
+                return dcc.send_file(str(month_files[0])), dash.no_update
             if len(month_files) > 1:
                 buf = _io.BytesIO()
                 with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
                     for f in month_files:
                         zf.write(f, arcname=f.name)
                 buf.seek(0)
-                return dcc.send_bytes(buf.read(),
-                                      filename=f"dq_report_{le_book}_{latest_month}.zip")
+                return (dcc.send_bytes(buf.read(),
+                                       filename=f"dq_report_{le_book}_{latest_month}.zip"),
+                        dash.no_update)
 
         # ── 3. XLSX fallback ──────────────────────────────────────────────────
         matches = sorted(REPORTS_DIR.glob(f"{le_book}_*.xlsx"), reverse=True)
         if matches:
-            return dcc.send_file(str(matches[0]))
+            return dcc.send_file(str(matches[0])), dash.no_update
 
     raise dash.exceptions.PreventUpdate
 
@@ -5700,7 +5718,7 @@ def _approve_table_cb(clicks, auth_data, version):
 # ── open-issue ZIP download (alerts page, per institution) ────────────────────
 
 @app.callback(
-    Output("open-issue-dl", "data"),
+    Output("dl-nav", "href", allow_duplicate=True),
     Input({"type": "open-issue-dl-btn", "index": ALL}, "n_clicks"),
     prevent_initial_call=True,
 )
@@ -5715,10 +5733,10 @@ def _on_open_issue_dl(clicks):
 
     lb = tid["index"]
     issue_reports_dir = _DIR / "issue_reports"
-    if issue_reports_dir.exists():
-        zips = sorted(issue_reports_dir.glob(f"{lb}_*.zip"), reverse=True)
-        if zips:
-            return dcc.send_file(str(zips[0]))
+    if issue_reports_dir.exists() and sorted(issue_reports_dir.glob(f"{lb}_*.zip")):
+        # stream via the Flask route (handles 100 MB+ reports; no base64 inlining).
+        # ?t= makes the href change each click so dcc.Location re-navigates.
+        return f"/download/issue-report/{lb}?t={ctx.triggered[0]['value']}"
 
     raise dash.exceptions.PreventUpdate
 
