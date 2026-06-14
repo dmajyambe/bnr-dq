@@ -281,7 +281,7 @@ def _zip_failing_rows_sql(engine, schema: str, table: str,
     with engine.connect() as conn:
         existing = _db_columns(conn, schema, table)
         built = build_failing_union(schema, table, existing, valid_le_books, limit,
-                                    per_issue_cap=max_rows_per_sheet)
+                                    per_issue_cap=max_rows_per_sheet + 1)
         if not built:
             return
         sql, out_cols, issue_cols = built
