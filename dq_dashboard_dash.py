@@ -3226,9 +3226,24 @@ def _remediation_page(role: str = "bnr_admin") -> html.Div:
 
         # Row 2: issue checklist (options filled by callback)
         html.Div([
-            html.Label("Select Issues to Address *", style={
-                "fontSize": "11px", "fontWeight": "900", "color": MUTED,
-                "display": "block", "marginBottom": "6px",
+            html.Div([
+                html.Label("Select Issues to Address *", style={
+                    "fontSize": "11px", "fontWeight": "900", "color": MUTED,
+                }),
+                html.Div([
+                    html.Span("Select all", id="cr-select-all", n_clicks=0, style={
+                        "cursor": "pointer", "fontSize": "10px", "fontWeight": "700",
+                        "color": BRAND, "userSelect": "none",
+                    }),
+                    html.Span("·", style={"color": MUTED, "fontSize": "10px"}),
+                    html.Span("Clear", id="cr-clear-all", n_clicks=0, style={
+                        "cursor": "pointer", "fontSize": "10px", "fontWeight": "700",
+                        "color": MUTED, "userSelect": "none",
+                    }),
+                ], style={"display": "flex", "gap": "8px", "alignItems": "center"}),
+            ], style={
+                "display": "flex", "justifyContent": "space-between",
+                "alignItems": "center", "marginBottom": "6px",
             }),
             html.Div(
                 dcc.Checklist(
@@ -5068,6 +5083,23 @@ def _update_issue_checklist(le_book):
     ], style={"display": "flex", "gap": "6px", "flexWrap": "wrap"})
 
     return options, [], hint, dl_buttons
+
+
+@app.callback(
+    Output("cr-issue-checklist", "value", allow_duplicate=True),
+    Input("cr-select-all", "n_clicks"),
+    Input("cr-clear-all", "n_clicks"),
+    State("cr-issue-checklist", "options"),
+    prevent_initial_call=True,
+)
+def _cr_select_all_issues(sel_clicks, clr_clicks, options):
+    """Select-all / clear shortcuts for the issue checklist."""
+    trig = ctx.triggered_id
+    if trig == "cr-clear-all":
+        return []
+    if trig == "cr-select-all":
+        return [o["value"] if isinstance(o, dict) else o for o in (options or [])]
+    raise dash.exceptions.PreventUpdate
 
 
 @app.callback(
