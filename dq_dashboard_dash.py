@@ -3506,6 +3506,29 @@ def _serve_issue_table(le_book, table):
     )
 
 
+@server.route("/download/resolved/<le_book>/<token>")
+def _serve_resolved_report(le_book, token):
+    """Stream a freshly-built resolved-issues ZIP (written to a temp file by the
+    resolved-download callback). The temp file is deleted as it is served."""
+    import re as _re, os as _os, io as _io
+    from datetime import date as _date
+    from flask import abort, send_file as _flask_send_file
+    if (not _re.fullmatch(r"[A-Za-z0-9_-]{1,20}", le_book or "")
+            or not _re.fullmatch(r"[a-f0-9]{32}", token or "")):
+        abort(400)
+    path = _DIR / "issue_reports" / ".tmp" / f"{token}.zip"
+    if not path.exists():
+        abort(404)
+    data = path.read_bytes()
+    try:
+        _os.unlink(path)            # one-shot: delete as we serve it
+    except OSError:
+        pass
+    return _flask_send_file(
+        _io.BytesIO(data), as_attachment=True, mimetype="application/zip",
+        download_name=f"dq_resolved_{le_book}_{_date.today().strftime('%Y-%m')}.zip")
+
+
 dq_auth.ensure_users_table()
 
 
@@ -4796,7 +4819,7 @@ def _resolved_dl_select(clicks):
 
 
 @app.callback(
-    Output("resolved-inst-download", "data"),
+    Output("dl-nav", "href", allow_duplicate=True),
     Input("resolved-dl-lb", "data"),
     prevent_initial_call=True,
 )
@@ -4893,9 +4916,22 @@ def _resolved_dl_generate(le_book):
     if not found_any:
         raise dash.exceptions.PreventUpdate
 
+    # Stream via a Flask route instead of base64-inlining: write the built zip to a
+    # temp file and navigate to /download/resolved/... (the route streams + deletes it).
+    import uuid as _uuid, time as _time
+    tmp_dir = _DIR / "issue_reports" / ".tmp"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    # sweep orphaned temp downloads (route never hit) older than 10 minutes
+    for _f in tmp_dir.glob("*.zip"):
+        try:
+            if _time.time() - _f.stat().st_mtime > 600:
+                _f.unlink()
+        except OSError:
+            pass
+    token = _uuid.uuid4().hex
     out_buf.seek(0)
-    return dcc.send_bytes(out_buf.read(),
-                          filename=f"dq_resolved_{le_book}_{today_str}.zip")
+    (tmp_dir / f"{token}.zip").write_bytes(out_buf.read())
+    return f"/download/resolved/{le_book}/{token}"
 
 
 @app.callback(
