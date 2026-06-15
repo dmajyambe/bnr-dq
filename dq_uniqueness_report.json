@@ -1,0 +1,110 @@
+{
+  "generated_at": "2026-06-14T22:27:57",
+  "tables": {
+    "contract_loans": {
+      "status": "evaluated",
+      "row_count": 13685805,
+      "rules_evaluated": [
+        "UNI-001"
+      ],
+      "uniqueness_score": 59.43,
+      "le_book_breakdown": {
+        "040": {
+          "row_count": 13685805,
+          "uniqueness_score": 59.43,
+          "rules": {
+            "UNI-001": {
+              "rule_name": "No duplicate loan records within the period",
+              "category": "Duplicate Detection",
+              "fields": [
+                "contract_sequence_number",
+                "date_of_provision",
+                "disbursed_amount",
+                "prin_outstanding_amt_fcy",
+                "prin_outstanding_amt_lcy"
+              ],
+              "valid": 8134041,
+              "invalid": 5551764,
+              "total": 13685805,
+              "uniqueness_score": 59.43
+            }
+          }
+        }
+      }
+    },
+    "contracts_disburse": {
+      "status": "evaluated",
+      "row_count": 821096,
+      "rules_evaluated": [
+        "UNI-002"
+      ],
+      "uniqueness_score": 98.75,
+      "le_book_breakdown": {
+        "040": {
+          "row_count": 821096,
+          "uniqueness_score": 98.75,
+          "rules": {
+            "UNI-002": {
+              "rule_name": "No duplicate disbursement records within the period",
+              "category": "Duplicate Detection",
+              "fields": [
+                "contract_id",
+                "currency",
+                "current_disbursed_amt",
+                "previous_disbursed_amt",
+                "first_payment_date"
+              ],
+              "valid": 810857,
+              "invalid": 10239,
+              "total": 821096,
+              "uniqueness_score": 98.75
+            }
+          }
+        }
+      }
+    },
+    "contracts_expanded": {
+      "status": "evaluated",
+      "row_count": 1554671,
+      "rules_evaluated": [
+        "UNI-003"
+      ],
+      "uniqueness_score": 100.0,
+      "le_book_breakdown": {
+        "040": {
+          "row_count": 1554671,
+          "uniqueness_score": 100.0,
+          "rules": {
+            "UNI-003": {
+              "rule_name": "No duplicate contract records within the period",
+              "category": "Duplicate Detection",
+              "fields": [
+                "contract_sequence_number",
+                "start_date",
+                "maturity_date",
+                "principal_amount_lcy",
+                "vision_sbu",
+                "contract_status"
+              ],
+              "valid": 1554671,
+              "invalid": 0,
+              "total": 1554671,
+              "uniqueness_score": 100.0
+            }
+          }
+        }
+      }
+    }
+  },
+  "warnings": {},
+  "le_books": [
+    "040"
+  ],
+  "executive_summary": {
+    "overall_uniqueness_score": 86.06,
+    "total_tables": 3,
+    "evaluated_tables": 3,
+    "schema": "dqp",
+    "row_limit": 0
+  }
+}
