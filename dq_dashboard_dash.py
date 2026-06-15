@@ -3717,6 +3717,58 @@ def _nav_tabs(active: str) -> html.Div:
     })
 
 
+def _executive_nav(name: str = "") -> html.Div:
+    """Minimal nav bar for the executive (Management) view — single section."""
+    return html.Div([
+        html.Div("MANAGEMENT OVERVIEW", style={
+            "padding": "11px 24px", "fontSize": "13px", "fontWeight": "900",
+            "color": CARD, "borderBottom": f"3px solid {BNR_GOLD}",
+            "whiteSpace": "nowrap", "userSelect": "none",
+        }),
+    ], style={
+        "display": "flex", "background": "#753918",
+        "padding": "0 32px", "borderTop": "1px solid rgba(255,255,255,0.12)",
+    })
+
+
+def _executive_page(role: str, le_books: list | None = None) -> html.Div:
+    """Placeholder for the Executive / Management high-level view.
+
+    Scope: bnr_executive → all institutions; inst_executive → own institution(s).
+    The visuals (KPIs, sector comparison, dimension health, risk leaderboard, SLA
+    tracking) are wired in a later pass — this confirms auth + routing for executives.
+    """
+    le_books = le_books or []
+    if role == "bnr_executive":
+        scope = "National Bank of Rwanda — all supervised institutions"
+    else:
+        scope = "Institution view — " + (", ".join(le_books) if le_books else "—")
+
+    return html.Div([
+        html.Div([
+            html.Div("Executive Dashboard", style={
+                "fontSize": "20px", "fontWeight": "900", "color": TEXT}),
+            html.Div(scope, style={
+                "fontSize": "12px", "color": MUTED, "marginTop": "4px"}),
+        ], style={"marginBottom": "24px"}),
+
+        html.Div([
+            html.Div("📊", style={"fontSize": "44px", "marginBottom": "10px"}),
+            html.Div("Management visuals coming soon", style={
+                "fontSize": "15px", "fontWeight": "900", "color": TEXT}),
+            html.Div(
+                "High-level KPIs, sector comparison, dimension health, a risk "
+                "leaderboard and SLA / remediation tracking will appear here.",
+                style={"fontSize": "12px", "color": MUTED, "marginTop": "8px",
+                       "maxWidth": "460px", "textAlign": "center"}),
+        ], style={
+            "background": CARD, "border": f"1px solid {DIVIDER}",
+            "borderRadius": "10px", "padding": "48px",
+            "display": "flex", "flexDirection": "column", "alignItems": "center",
+        }),
+    ], style={"padding": "32px"})
+
+
 app.layout = html.Div([
 
     # ── header ────────────────────────────────────────────────────────────────
@@ -4040,6 +4092,10 @@ def _render_page(page: str, nav_state, _rv, auth_data):
 
     role     = auth.get("role", "viewer")
     le_books = auth.get("le_books", [])
+
+    # ── executive → high-level Management view only ───────────────────────────
+    if dq_auth.is_executive(role):
+        return _executive_nav(auth.get("name", "")), _executive_page(role, le_books)
 
     # ── institution user → hand off to inst portal ────────────────────────────
     if role == "inst_user":
@@ -4634,10 +4690,10 @@ def _do_login(n_clicks, n_submit, email, password, login_type):
     if not user:
         return {"error": "Incorrect email or password.", "tab": login_type}
 
-    if login_type == "bnr" and user["role"] == "inst_user":
+    if login_type == "bnr" and user["role"] in dq_auth.INST_ROLES:
         return {"error": "Institution accounts must use the Institution login.", "tab": login_type}
 
-    if login_type == "inst" and user["role"] != "inst_user":
+    if login_type == "inst" and user["role"] not in dq_auth.INST_ROLES:
         return {"error": "BNR staff accounts must use the BNR Staff login.", "tab": login_type}
 
     flask_session["user_email"] = user["email"]
@@ -4645,7 +4701,7 @@ def _do_login(n_clicks, n_submit, email, password, login_type):
     flask_session["user_role"]  = user["role"]
     flask_session.permanent     = True
 
-    le_books = dq_auth.get_user_institutions(user["user_id"]) if user["role"] == "inst_user" else []
+    le_books = dq_auth.get_user_institutions(user["user_id"]) if user["role"] in dq_auth.INST_ROLES else []
 
     return {
         "email":    user["email"],

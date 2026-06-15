@@ -27,8 +27,9 @@ SCRIPT_DIR     = Path(__file__).parent
 DB_PATH        = SCRIPT_DIR / "dq_rules.db"
 ALLOWED_DOMAIN = "bnr.rw"
 
-BNR_ROLES  = {"bnr_admin", "bnr_viewer", "admin", "viewer"}
-INST_ROLES = {"inst_user"}
+BNR_ROLES  = {"bnr_admin", "bnr_viewer", "admin", "viewer", "bnr_executive"}
+INST_ROLES = {"inst_user", "inst_executive"}
+EXEC_ROLES = {"bnr_executive", "inst_executive"}   # high-level "Management" view
 ALL_ROLES  = BNR_ROLES | INST_ROLES
 
 
@@ -90,6 +91,11 @@ def is_bnr_role(role: str) -> bool:
 
 def is_admin(role: str) -> bool:
     return role in {"bnr_admin", "admin"}
+
+
+def is_executive(role: str) -> bool:
+    """Executive (Management) view — BNR-wide for bnr_executive, own-institution for inst_executive."""
+    return role in EXEC_ROLES
 
 
 # ── password helpers ───────────────────────────────────────────────────────────
