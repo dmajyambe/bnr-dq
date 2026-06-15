@@ -442,7 +442,7 @@ def inst_issues_page(le_books: list[str]) -> html.Div:
             band_counts[b] += 1
 
     chips = []
-    for band, label in [("overdue", "⚠ SLA Overdue"), ("critical", "Critical"),
+    for band, label in [("overdue", "⚠ Overdue"), ("critical", "Critical"),
                          ("urgent", "Urgent"), ("attention", "Attention"), ("new", "New")]:
         n   = band_counts.get(band, 0)
         clr = _URGENCY_COLORS.get(band, MUTED)
