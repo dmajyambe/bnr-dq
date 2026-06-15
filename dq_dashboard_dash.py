@@ -90,6 +90,32 @@ LANDING_CATS = [
 ]
 
 
+# ── small UI helpers ─────────────────────────────────────────────────────────
+def _fmt_int(n, fallback: str = "—") -> str:
+    """Thousands-separated integer for display; falls back to a dash for non-numbers."""
+    try:
+        return f"{int(n):,}"
+    except (TypeError, ValueError):
+        return fallback
+
+
+def _empty_state(title: str, subtitle: str = "", icon: str = "✓") -> html.Div:
+    """Friendly empty-state block, shown when a list/table has nothing to display."""
+    kids = [
+        html.Div(icon,  style={"fontSize": "32px", "marginBottom": "8px", "opacity": "0.85"}),
+        html.Div(title, style={"fontSize": "14px", "fontWeight": "900", "color": TEXT}),
+    ]
+    if subtitle:
+        kids.append(html.Div(subtitle, style={
+            "fontSize": "12px", "color": MUTED, "marginTop": "4px",
+            "maxWidth": "380px", "textAlign": "center"}))
+    return html.Div(kids, style={
+        "display": "flex", "flexDirection": "column", "alignItems": "center",
+        "justifyContent": "center", "padding": "44px 24px", "textAlign": "center",
+        "background": CARD, "border": f"1px dashed {DIVIDER}", "borderRadius": "10px",
+    })
+
+
 # ── issue tracker (loaded fresh each render — SQLite is fast) ─────────────────
 def _issue_summary() -> dict:
     try:
@@ -1131,7 +1157,7 @@ def _dashboard_content(cat: str, inst: str | None) -> html.Div:
     last = issue_trend_data[-1] if issue_trend_data else {}
     def _issue_chip(value, label, color):
         return html.Div([
-            html.Span(str(value), style={"fontWeight": "900", "fontSize": "20px",
+            html.Span(_fmt_int(value, str(value)), style={"fontWeight": "900", "fontSize": "20px",
                                          "color": color}),
             html.Span(label, style={"fontSize": "10px", "color": MUTED,
                                     "marginTop": "2px"}),
@@ -2892,11 +2918,10 @@ def _build_cr_list(crs: list[dict], role: str = "bnr_admin") -> html.Div:
     is_inst      = role == "inst_user"
 
     if not crs:
-        return html.Div(
-            "No change requests found for this filter.",
-            style={"color": MUTED, "padding": "24px", "textAlign": "center",
-                   "fontSize": "12px"},
-        )
+        return _empty_state(
+            "No change requests",
+            "Nothing matches this filter. Change Requests assigned to you will appear here.",
+            icon="🗂")
 
     H = {"fontSize": "11px", "fontWeight": "900", "color": MUTED,
          "textTransform": "uppercase", "letterSpacing": "0.05em",
@@ -3819,13 +3844,18 @@ app.layout = html.Div([
     # ── page nav ──────────────────────────────────────────────────────────────
     html.Div(id="page-nav-bar"),
 
-    # ── page content ──────────────────────────────────────────────────────────
-    html.Div(id="page-content", style={
-        "maxWidth":   "1440px",
-        "margin":     "0 auto",
-        "padding":    "24px 32px",
-        "fontFamily": FONT,
-    }),
+    # ── page content (wrapped in a loader → spinner on every page transition) ──
+    dcc.Loading(
+        id="page-loading", type="circle", color=BRAND,
+        delay_show=250,                      # don't flash on instant renders
+        children=html.Div(id="page-content", style={
+            "maxWidth":   "1440px",
+            "margin":     "0 auto",
+            "padding":    "24px 32px",
+            "fontFamily": FONT,
+            "minHeight":  "60vh",
+        }),
+    ),
 
     # ── notification overlay (fixed, shown on top of page content) ────────────
     html.Div(id="notif-overlay", style={
@@ -3847,13 +3877,21 @@ app.layout = html.Div([
     dcc.Store(id="inst-active-page", data="inst_dashboard"),
     dcc.Store(id="inst-notif-show",  data=False),
     dcc.Store(id="login-type",       data="bnr"),
-    dcc.Download(id="inst-download"),
-    dcc.Download(id="issues-download"),
-    dcc.Download(id="inst-csv-download"),
-    dcc.Download(id="resolved-inst-download"),
-    dcc.Download(id="open-issue-dl"),
-    dcc.Location(id="dl-nav", refresh=True),  # drives large-file downloads via /download route
-    dcc.Download(id="cr-tbl-dl"),
+    # Downloads wrapped in a fullscreen loader → "preparing your download" overlay
+    # while a report/zip is built server-side (no effect on instant route redirects).
+    dcc.Loading(
+        id="download-loading", fullscreen=True, type="circle", color=BRAND,
+        delay_show=300,
+        children=html.Div([
+            dcc.Download(id="inst-download"),
+            dcc.Download(id="issues-download"),
+            dcc.Download(id="inst-csv-download"),
+            dcc.Download(id="resolved-inst-download"),
+            dcc.Download(id="open-issue-dl"),
+            dcc.Location(id="dl-nav", refresh=True),  # large-file downloads via /download route
+            dcc.Download(id="cr-tbl-dl"),
+        ]),
+    ),
     dcc.Store(id="resolved-dl-lb",  data=None),
     dcc.Store(id="dl-preview-lb", data=None),
 
@@ -5411,8 +5449,9 @@ def _inst_issue_list(status, table_filter, _poll, auth_data):
         issues = [i for i in get_issues(status=status) if i["le_book"] in le_books]
         label  = {"penalized": "Delayed", "resolved": "Resolved"}.get(status, status.title())
         if not issues:
-            return html.Div(f"No {label.lower()} issues.",
-                            style={"color": MUTED, "padding": "20px", "fontSize": "12px"})
+            _sub = {"resolved": "Resolved issues will appear here once fixes are confirmed.",
+                    "penalized": "No issues have breached their deadline."}.get(status, "")
+            return _empty_state(f"No {label.lower()} issues", _sub, icon="✓")
         return _build_resolved_rows(issues)
 
     # ── open: one row per affected table ──────────────────────────────────────
@@ -5455,8 +5494,10 @@ def _inst_issue_list(status, table_filter, _poll, auth_data):
             })
 
     if not table_summary:
-        return html.Div("No open issues.",
-                        style={"color": MUTED, "padding": "20px", "fontSize": "12px"})
+        return _empty_state(
+            "No open issues",
+            "Nothing needs attention right now — your data is passing all checks.",
+            icon="✓")
 
     # sort worst-urgency first, then most failing rows
     table_summary.sort(key=lambda r: (_BO.index(r["worst"]), -r["total_rows"]), reverse=True)
