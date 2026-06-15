@@ -615,7 +615,7 @@ def _build_assignment_email(cr: dict, issues: list[dict]) -> tuple[str, str, str
               <th style="padding:8px 10px;text-align:left">Table</th>
               <th style="padding:8px 10px;text-align:left">Dimension</th>
               <th style="padding:8px 10px;text-align:right">Failing Rows</th>
-              <th style="padding:8px 10px;text-align:left">SLA Deadline</th>
+              <th style="padding:8px 10px;text-align:left">Deadline</th>
               <th style="padding:8px 10px;text-align:left">Remaining</th>
             </tr>
           </thead>
