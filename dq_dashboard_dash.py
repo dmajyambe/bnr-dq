@@ -3555,7 +3555,9 @@ def _login_page(error: str = "", login_type: str = "bnr") -> html.Div:
         "boxSizing": "border-box", "outline": "none", "background": CARD,
     }
 
-    is_bnr = (login_type == "bnr")
+    is_bnr  = (login_type == "bnr")
+    is_inst = (login_type == "inst")
+    is_exec = (login_type == "exec")
 
     def _tab(label, tab_id, active):
         return html.Div(
@@ -3576,20 +3578,24 @@ def _login_page(error: str = "", login_type: str = "bnr") -> html.Div:
         )
 
     tab_bar = html.Div([
-        _tab("🏛  BNR Staff",      "login-tab-bnr",  is_bnr),
-        _tab("🏦  Institution",    "login-tab-inst", not is_bnr),
+        _tab("🏛  BNR Staff",   "login-tab-bnr",  is_bnr),
+        _tab("🏦  Institution", "login-tab-inst", is_inst),
+        _tab("👔  Executive",   "login-tab-exec", is_exec),
     ], style={
         "display": "flex",
         "borderBottom": f"1px solid {DIVIDER}",
         "background": CARD,
     })
 
-    placeholder = "your.name@bnr.rw" if is_bnr else "focal.point@yourbank.com"
-    hint = (
-        "BNR staff accounts only — @bnr.rw required."
-        if is_bnr else
-        "Use the email address provided to you by BNR."
-    )
+    if is_exec:
+        placeholder = "executive@bnr.rw / your email"
+        hint = "Executive (Management) accounts — BNR or institution."
+    elif is_bnr:
+        placeholder = "your.name@bnr.rw"
+        hint = "BNR staff accounts only — @bnr.rw required."
+    else:
+        placeholder = "focal.point@yourbank.com"
+        hint = "Use the email address provided to you by BNR."
     btn_color = BRAND
 
     return html.Div([
@@ -3616,6 +3622,7 @@ def _login_page(error: str = "", login_type: str = "bnr") -> html.Div:
             # Form body
             html.Div([
                 html.Div(
+                    "Executive Sign In" if is_exec else
                     "BNR Staff Sign In" if is_bnr else "Institution Sign In",
                     style={
                         "fontSize": "15px", "fontWeight": "900", "color": TEXT,
@@ -4653,11 +4660,14 @@ def _submit_complex_rule(n_clicks, rule_id, dim, name,
     Output("login-type",  "data"),
     Input("login-tab-bnr",  "n_clicks"),
     Input("login-tab-inst", "n_clicks"),
+    Input("login-tab-exec", "n_clicks"),
     prevent_initial_call=True,
 )
-def _switch_login_tab(n_bnr, n_inst):
+def _switch_login_tab(n_bnr, n_inst, n_exec):
     tid = ctx.triggered_id
-    lt  = "inst" if tid == "login-tab-inst" else "bnr"
+    lt  = ("inst" if tid == "login-tab-inst"
+           else "exec" if tid == "login-tab-exec"
+           else "bnr")
     # Return a "tab-switch" marker so _render_page re-draws the login page
     return {"tab_switch": lt}, lt
 
@@ -4685,16 +4695,20 @@ def _do_login(n_clicks, n_submit, email, password, login_type):
     if login_type == "bnr" and not dq_auth.is_valid_bnr_email(email):
         return {"error": "BNR Staff login requires a @bnr.rw email address.", "tab": login_type}
 
-    # Reject inst_user credentials on the BNR tab
     user = dq_auth.verify_credentials(email, password)
     if not user:
         return {"error": "Incorrect email or password.", "tab": login_type}
 
-    if login_type == "bnr" and user["role"] in dq_auth.INST_ROLES:
-        return {"error": "Institution accounts must use the Institution login.", "tab": login_type}
-
-    if login_type == "inst" and user["role"] not in dq_auth.INST_ROLES:
-        return {"error": "BNR staff accounts must use the BNR Staff login.", "tab": login_type}
+    role = user["role"]
+    if login_type == "exec":
+        if not dq_auth.is_executive(role):
+            return {"error": "This isn't an Executive account — use the BNR Staff or Institution login.", "tab": login_type}
+    elif login_type == "bnr":
+        if dq_auth.is_executive(role) or role in dq_auth.INST_ROLES:
+            return {"error": "Use the Executive or Institution login for this account.", "tab": login_type}
+    elif login_type == "inst":
+        if role != "inst_user":
+            return {"error": "Use the Executive or BNR Staff login for this account.", "tab": login_type}
 
     flask_session["user_email"] = user["email"]
     flask_session["user_name"]  = user["name"]
