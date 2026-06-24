@@ -226,8 +226,17 @@ def _fresh_pipeline() -> dict:
 
 # ── data access helpers ────────────────────────────────────────────────────────
 
-def _today_entry()      -> dict: h = _fresh_history(); return h[-1]         if h           else {}
-def _yesterday_entry()  -> dict: h = _fresh_history(); return h[-2]         if len(h) >= 2 else {}
+def _today_entry()      -> dict:
+    # Most recent run that actually scored institutions — skip empty/no-data runs
+    # (e.g. a month with no rows in scope) so the overview never renders blank.
+    h = _fresh_history()
+    for e in reversed(h):
+        if e.get("by_institution"):
+            return e
+    return h[-1] if h else {}
+def _yesterday_entry()  -> dict:
+    h = [e for e in _fresh_history() if e.get("by_institution")]
+    return h[-2] if len(h) >= 2 else {}
 def _trend_entries(n=7) -> list: h = _fresh_history(); return h[-n:]        if h           else []
 
 
@@ -2867,6 +2876,60 @@ def _complex_rule_form(next_id: str) -> html.Div:
     })
 
 
+def _rules_table(rules: list[dict]) -> html.Div:
+    """Full, scannable list of every rule currently being checked, grouped by
+    dimension. Sourced from the live registry, so it always matches what the
+    pipeline actually runs."""
+    from collections import defaultdict
+    by_dim: dict[str, list] = defaultdict(list)
+    for r in rules:
+        by_dim[r.get("dimension", "")].append(r)
+    dim_order = ["completeness", "accuracy", "validity",
+                 "uniqueness", "timeliness", "relationship"]
+
+    H = {"fontSize": "10px", "fontWeight": "900", "color": MUTED,
+         "textTransform": "uppercase", "letterSpacing": "0.05em", "padding": "8px 10px"}
+    hdr = html.Div([
+        html.Span("Rule ID",   style={**H, "width": "92px"}),
+        html.Span("Dimension", style={**H, "width": "120px"}),
+        html.Span("Rule",      style={**H, "flex": "3"}),
+        html.Span("Tables",    style={**H, "flex": "2"}),
+        html.Span("Fields",    style={**H, "flex": "2"}),
+    ], style={"display": "flex", "alignItems": "center", "background": BG,
+              "borderBottom": f"2px solid {DIVIDER}", "borderRadius": "8px 8px 0 0"})
+
+    rows = [hdr]
+    for dim in dim_order:
+        drules = sorted(by_dim.get(dim, []), key=lambda r: r.get("rule_id", ""))
+        for r in drules:
+            mut = {"padding": "9px 10px", "fontSize": "11px", "color": MUTED}
+            rows.append(html.Div([
+                html.Span(r.get("rule_id", ""),
+                          style={"width": "92px", "padding": "9px 10px",
+                                 "fontSize": "12px", "fontWeight": "800",
+                                 "fontFamily": "monospace", "color": TEXT}),
+                html.Div(_dim_pill(dim), style={"width": "120px", "padding": "9px 10px"}),
+                html.Div([
+                    html.Div(r.get("rule_name", ""),
+                             style={"fontSize": "12px", "color": TEXT}),
+                    html.Div(r.get("category", ""),
+                             style={"fontSize": "10px", "color": MUTED, "marginTop": "2px"}),
+                ], style={"flex": "3", "padding": "9px 10px"}),
+                html.Span(r.get("tables", ""), style={**mut, "flex": "2"}),
+                html.Span(r.get("fields", ""), style={**mut, "flex": "2"}),
+            ], style={"display": "flex", "alignItems": "center",
+                      "borderBottom": f"1px solid {DIVIDER}"}))
+
+    return html.Div([
+        html.Div("ALL RULES CURRENTLY CHECKED", style={
+            "fontSize": "11px", "fontWeight": "900", "color": MUTED,
+            "textTransform": "uppercase", "letterSpacing": "0.06em", "marginBottom": "8px"}),
+        html.Div(rows, style={
+            "background": CARD, "borderRadius": "8px",
+            "border": f"1px solid {DIVIDER}", "overflow": "hidden"}),
+    ], style={"marginBottom": "20px"})
+
+
 def _validations_page() -> html.Div:
     builtin_rules = get_all_rules()
     n_tables  = len({t.strip() for r in builtin_rules
@@ -2901,8 +2964,9 @@ def _validations_page() -> html.Div:
         _rule_form("USR-001"),
         _complex_rule_form("USR-001"),
 
-        # ── chart + download ──────────────────────────────────────────────────
+        # ── chart + full rule list + download ─────────────────────────────────
         _rules_charts(builtin_rules, []),
+        _rules_table(builtin_rules),
         dcc.Download(id="rules-download"),
     ])
 
@@ -3184,11 +3248,12 @@ def _remediation_page(role: str = "bnr_admin") -> html.Div:
     # Summary banner
     stats  = cr_mod.get_stats()
     chips  = []
-    for key, lbl in cr_mod.STATUS_LABELS.items():
+    for key in ("open", "in_progress", "submitted"):   # minimalist: active pipeline only
+        lbl = cr_mod.STATUS_LABELS.get(key, key.title())
         n   = stats.get(key, 0)
         clr = cr_mod.STATUS_COLORS[key]
         chips.append(html.Div([
-            html.Span(str(n), style={
+            html.Span(_fmt_int(n, str(n)), style={
                 "fontSize": "24px", "fontWeight": "900",
                 "color": clr, "lineHeight": "1",
             }),
@@ -3605,7 +3670,7 @@ def _login_page(error: str = "", login_type: str = "bnr") -> html.Div:
     tab_bar = html.Div([
         _tab("🏛  BNR Staff",   "login-tab-bnr",  is_bnr),
         _tab("🏦  Institution", "login-tab-inst", is_inst),
-        _tab("👔  Executive",   "login-tab-exec", is_exec),
+        _tab("👔  Management",   "login-tab-exec", is_exec),
     ], style={
         "display": "flex",
         "borderBottom": f"1px solid {DIVIDER}",
@@ -3763,41 +3828,209 @@ def _executive_nav(name: str = "") -> html.Div:
     })
 
 
-def _executive_page(role: str, le_books: list | None = None) -> html.Div:
-    """Placeholder for the Executive / Management high-level view.
-
-    Scope: bnr_executive → all institutions; inst_executive → own institution(s).
-    The visuals (KPIs, sector comparison, dimension health, risk leaderboard, SLA
-    tracking) are wired in a later pass — this confirms auth + routing for executives.
-    """
-    le_books = le_books or []
-    if role == "bnr_executive":
-        scope = "National Bank of Rwanda — all supervised institutions"
+def _exec_overall_avg(entry: dict, le_books: list[str] | None) -> float | None:
+    """Mean of by_institution[*]['overall'] — the per-institution score already
+    excludes dims that didn't run (e.g. timeliness), unlike the raw entry['overall']
+    dict which phantom-zeros unscored dims. le_books=None -> every institution in
+    the entry; otherwise restrict to just those le_books (institution-scoped view)."""
+    insts = entry.get("by_institution", {}) if entry else {}
+    if le_books is None:
+        vals = [d.get("overall", 0.0) for d in insts.values()]
     else:
-        scope = "Institution view — " + (", ".join(le_books) if le_books else "—")
+        vals = [insts[lb]["overall"] for lb in le_books if lb in insts]
+    return round(sum(vals) / len(vals), 2) if vals else None
+
+
+def _exec_delta_sub(delta: float | None, invert: bool = False,
+                    no_data_label: str = "No prior data") -> html.Div:
+    """Small delta line for an executive KPI card ('▲ 1.2pp vs last month')."""
+    if delta is None:
+        return html.Div(no_data_label, style={"color": MUTED, "fontSize": "11px"})
+    good   = (delta < 0) if invert else (delta > 0)
+    bad    = (delta > 0) if invert else (delta < 0)
+    d_col  = C_GREEN if good else C_RED if bad else MUTED
+    d_icon = "▲" if delta > 0 else "▼" if delta < 0 else "─"
+    return html.Div([
+        html.Span(f"{d_icon} {abs(delta):.1f}", style={
+            "color": d_col, "fontWeight": "700", "fontSize": "12px"}),
+        html.Span(" vs last month", style={"color": MUTED, "fontSize": "11px"}),
+    ], style={"marginTop": "4px", "lineHeight": "1.15"})
+
+
+def _exec_kpi_card(label: str, value_str: str, sub=None,
+                   color: str = TEXT, accent: str = BRAND) -> html.Div:
+    kids = [
+        html.Div(label, style={
+            "fontSize": "11px", "fontWeight": "900", "color": MUTED,
+            "letterSpacing": "0.06em", "textTransform": "uppercase", "lineHeight": "1.15",
+        }),
+        html.Div(value_str, style={
+            "fontSize": "30px", "fontWeight": "700", "color": color,
+            "lineHeight": "1.1", "marginTop": "6px", "fontVariantNumeric": "tabular-nums",
+        }),
+    ]
+    if sub is not None:
+        kids.append(sub)
+    return html.Div(kids, style={
+        "background":   CARD,
+        "borderRadius": "8px",
+        "padding":      "16px",
+        "flex":         "1",
+        "minWidth":     "180px",
+        "borderTop":    f"3px solid {accent}",
+        "boxShadow":    "0 1px 4px rgba(117,57,24,0.08)",
+    })
+
+
+def _exec_hero_kpis(role: str, le_books: list[str]) -> html.Div:
+    """Hero KPI row: overall DQ score (+Δ), open-issue coverage, overdue count,
+    on-time remediation rate. Scoped to all institutions for bnr_executive, or to
+    the executive's own institution(s) for inst_executive."""
+    from dq_issue_tracker import get_issues
+
+    is_bnr   = (role == "bnr_executive")
+    today    = _today_entry()
+    prev     = _yesterday_entry()
+    scope_lb = None if is_bnr else [str(lb) for lb in le_books]
+
+    overall_now  = _exec_overall_avg(today, scope_lb)
+    overall_prev = _exec_overall_avg(prev,  scope_lb)
+    score_delta  = (round(overall_now - overall_prev, 1)
+                    if overall_now is not None and overall_prev is not None else None)
+
+    all_open = get_issues(status="open")
+    if not is_bnr:
+        lb_set   = set(scope_lb or [])
+        all_open = [i for i in all_open if str(i.get("le_book")) in lb_set]
+
+    if is_bnr:
+        kpi2_label = "INSTITUTIONS WITH OPEN ISSUES"
+        kpi2_value = len({i["le_book"] for i in all_open})
+    else:
+        kpi2_label = "TABLES WITH OPEN ISSUES"
+        kpi2_value = len({i["table_name"] for i in all_open})
+
+    overdue_count = sum(1 for i in all_open if i.get("urgency_band") == "overdue")
+
+    all_resolved = get_issues(status="resolved")
+    if not is_bnr:
+        all_resolved = [i for i in all_resolved if str(i.get("le_book")) in (scope_lb or [])]
+    on_time = sum(1 for i in all_resolved
+                  if i.get("sla_deadline") and i.get("resolved_at")
+                  and i["resolved_at"] <= i["sla_deadline"])
+    remediation_rate = round(on_time / len(all_resolved) * 100, 1) if all_resolved else None
+
+    score_color = _score_color(overall_now) if overall_now is not None else MUTED
+    rate_color  = _score_color(remediation_rate) if remediation_rate is not None else MUTED
+
+    cards = [
+        _exec_kpi_card(
+            "OVERALL DQ SCORE",
+            f"{overall_now:.1f}%" if overall_now is not None else "—",
+            sub=_exec_delta_sub(score_delta),
+            color=score_color, accent=score_color if overall_now is not None else DIVIDER,
+        ),
+        _exec_kpi_card(
+            kpi2_label, _fmt_int(kpi2_value),
+            color=C_RED if kpi2_value else TEXT,
+            accent=C_RED if kpi2_value else C_GREEN,
+        ),
+        _exec_kpi_card(
+            "OVERDUE ISSUES", _fmt_int(overdue_count),
+            color=C_RED if overdue_count else TEXT,
+            accent=C_RED if overdue_count else C_GREEN,
+        ),
+        _exec_kpi_card(
+            "REMEDIATION RATE",
+            f"{remediation_rate:.1f}%" if remediation_rate is not None else "—",
+            sub=None if remediation_rate is not None else html.Div(
+                "No issues resolved yet", style={"fontSize": "11px", "color": MUTED}),
+            color=rate_color, accent=rate_color if remediation_rate is not None else DIVIDER,
+        ),
+    ]
+    return html.Div(cards, style={
+        "display": "flex", "gap": "16px", "marginBottom": "20px", "flexWrap": "wrap",
+    })
+
+
+def _exec_sector_block(role: str, le_books: list[str]) -> html.Div:
+    """bnr_executive: B / MF / SACCO sector comparison bars (blended overall score).
+    inst_executive: 4-dimension breakdown bars for their own institution(s) instead,
+    since there's nothing to compare against."""
+    is_bnr = (role == "bnr_executive")
+    entry  = _today_entry()
+
+    if is_bnr:
+        insts   = entry.get("by_institution", {}) if entry else {}
+        buckets: dict[str, list[float]] = {}
+        for lb, d in insts.items():
+            ct = d.get("category_type")
+            if ct == "OSACCO":
+                ct = "SACCO"
+            if ct in {c["code"] for c in LANDING_CATS}:
+                buckets.setdefault(ct, []).append(float(d.get("overall") or 0.0))
+
+        title   = "SECTOR COMPARISON"
+        x_vals  = [c["label"] for c in LANDING_CATS]
+        colors  = [c["color"] for c in LANDING_CATS]
+        values  = [round(sum(buckets[c["code"]]) / len(buckets[c["code"]]), 1)
+                   if buckets.get(c["code"]) else None for c in LANDING_CATS]
+        counts  = [len(buckets.get(c["code"], [])) for c in LANDING_CATS]
+    else:
+        lb_set   = [str(lb) for lb in le_books]
+        dim_vals = {d: [_inst_scores(entry, lb)[d] for lb in lb_set if lb in
+                        (entry.get("by_institution", {}) if entry else {})] for d in DIMS}
+
+        title  = "DIMENSION BREAKDOWN"
+        x_vals = [DIM_LABELS[d] for d in DIMS]
+        colors = [DIM_COLORS[d] for d in DIMS]
+        values = [round(sum(dim_vals[d]) / len(dim_vals[d]), 1) if dim_vals[d] else None
+                  for d in DIMS]
+        counts = [len(dim_vals[d]) for d in DIMS]
+
+    bar_y = [v if v is not None else 0 for v in values]
+    text  = [f"{v:.1f}%" if v is not None else "No data" for v in values]
+
+    fig = go.Figure(go.Bar(
+        x=x_vals, y=bar_y,
+        marker=dict(color=colors),
+        text=text, textposition="outside",
+        customdata=counts,
+        hovertemplate="%{x}: %{y:.1f}%<br>%{customdata} institution(s)<extra></extra>",
+    ))
+    fig.update_layout(
+        height=260,
+        paper_bgcolor=CARD, plot_bgcolor=CARD,
+        margin=dict(l=8, r=8, t=24, b=8),
+        font=dict(family=FONT, size=11, color=TEXT),
+        yaxis=dict(title="Score (%)", range=[0, 108], gridcolor=DIVIDER, zeroline=False),
+        xaxis=dict(tickfont=dict(size=11)),
+        showlegend=False,
+    )
 
     return html.Div([
-        html.Div([
-            html.Div("Executive Dashboard", style={
-                "fontSize": "20px", "fontWeight": "900", "color": TEXT}),
-            html.Div(scope, style={
-                "fontSize": "12px", "color": MUTED, "marginTop": "4px"}),
-        ], style={"marginBottom": "24px"}),
-
-        html.Div([
-            html.Div("📊", style={"fontSize": "44px", "marginBottom": "10px"}),
-            html.Div("Management visuals coming soon", style={
-                "fontSize": "15px", "fontWeight": "900", "color": TEXT}),
-            html.Div(
-                "High-level KPIs, sector comparison, dimension health, a risk "
-                "leaderboard and SLA / remediation tracking will appear here.",
-                style={"fontSize": "12px", "color": MUTED, "marginTop": "8px",
-                       "maxWidth": "460px", "textAlign": "center"}),
-        ], style={
-            "background": CARD, "border": f"1px solid {DIVIDER}",
-            "borderRadius": "10px", "padding": "48px",
-            "display": "flex", "flexDirection": "column", "alignItems": "center",
+        html.Div(title, style={
+            "fontSize": "11px", "fontWeight": "900", "color": MUTED,
+            "textTransform": "uppercase", "letterSpacing": "0.06em", "marginBottom": "6px",
         }),
+        dcc.Graph(figure=fig, config={"displayModeBar": False}),
+    ], style={
+        "background": CARD, "borderRadius": "8px",
+        "padding": "16px 16px 8px",
+        "boxShadow": "0 1px 4px rgba(117,57,24,0.08)",
+        "border": f"1px solid {DIVIDER}",
+    })
+
+
+def _executive_page(role: str, le_books: list | None = None) -> html.Div:
+    """Executive / Management high-level view: hero KPIs + sector/dimension
+    comparison. Scope: bnr_executive → all institutions; inst_executive → own
+    institution(s)."""
+    le_books = le_books or []
+
+    return html.Div([
+        _exec_hero_kpis(role, le_books),
+        _exec_sector_block(role, le_books),
     ], style={"padding": "32px"})
 
 
@@ -3885,7 +4118,6 @@ app.layout = html.Div([
         children=html.Div([
             dcc.Download(id="inst-download"),
             dcc.Download(id="issues-download"),
-            dcc.Download(id="inst-csv-download"),
             dcc.Download(id="resolved-inst-download"),
             dcc.Download(id="open-issue-dl"),
             dcc.Location(id="dl-nav", refresh=True),  # large-file downloads via /download route
@@ -4881,15 +5113,12 @@ def _refresh_issue_list(cat_filter, _poll):
             "border": f"1px solid {bc}", "minWidth": "110px",
         })
 
+    # Minimalist: the three that matter for triage — current load, what's breached, momentum.
     summary_bar = html.Div([
-        _chip(len(all_open),     "Open Issues",         C_AMBER),
-        _chip(overdue_count,     "Overdue",             _URGENCY_COLORS["overdue"],
+        _chip(len(all_open), "Open Issues",         C_AMBER),
+        _chip(overdue_count, "Overdue",             _URGENCY_COLORS["overdue"],
               border_color=_URGENCY_COLORS["overdue"]),
-        _chip(month_res,         "Resolved This Month", C_GREEN),
-        _chip(len(all_resolved), "Total Resolved"),
-        _chip(on_time,           "Resolved On Time",    C_GREEN),
-        _chip(late,              "Resolved Late",       C_RED if late else MUTED),
-        _chip(avg_fix,           "Avg Days to Fix"),
+        _chip(month_res,     "Resolved This Month", C_GREEN),
     ], style={"display": "flex", "gap": "10px", "flexWrap": "wrap"})
 
     # ── issue list ─────────────────────────────────────────────────────────────
@@ -5387,11 +5616,12 @@ def _refresh_cr_stats(version, _poll):
     import dq_change_request as cr_mod
     stats = cr_mod.get_stats()
     chips = []
-    for key, lbl in cr_mod.STATUS_LABELS.items():
+    for key in ("open", "in_progress", "submitted"):   # minimalist: active pipeline only
+        lbl = cr_mod.STATUS_LABELS.get(key, key.title())
         n   = stats.get(key, 0)
         clr = cr_mod.STATUS_COLORS[key]
         chips.append(html.Div([
-            html.Span(str(n), style={
+            html.Span(_fmt_int(n, str(n)), style={
                 "fontSize": "24px", "fontWeight": "900",
                 "color": clr, "lineHeight": "1",
             }),
@@ -5558,13 +5788,13 @@ def _inst_issue_list(status, table_filter, _poll, auth_data):
                    "whiteSpace": "nowrap"},
         )
 
-        # download icon — links to the institution's report file
+        # download icon — table-specific xlsx pulled from the institution's report zip
         if rpt_file:
             dl_icon = html.Div(
                 "⬇",
-                id={"type": "inst-dl-btn", "index": le_book or ""},
+                id={"type": "inst-tbl-dl-btn", "index": f"{le_book}|{row['table']}"},
                 n_clicks=0,
-                title=f"Download full report ({rpt_date})",
+                title=f"Download {row['label']} report ({rpt_date})",
                 style={"fontSize": "16px", "color": BRAND,
                        "cursor": "pointer", "textAlign": "center",
                        "userSelect": "none"},
@@ -5618,95 +5848,31 @@ def _inst_issue_list(status, table_filter, _poll, auth_data):
 
 
 @app.callback(
-    Output("inst-csv-download", "data"),
     Output("dl-nav", "href", allow_duplicate=True),
-    Input("inst-csv-dl-btn",   "n_clicks"),
-    State("inst-issue-filter", "value"),
-    State("inst-table-filter", "value"),
-    State("auth-store",        "data"),
+    Input({"type": "inst-tbl-dl-btn", "index": ALL}, "n_clicks"),
+    State("auth-store", "data"),
     prevent_initial_call=True,
 )
-def _inst_download_csv(n_clicks, status_filter, table_filter, auth_data):
-    """Download issues for the institution.
-
-    Resolved → the EXACT failing rows from the report (one CSV per table, streamed
-    via the /download/resolved route). Other statuses → the summary issue list CSV.
-    """
-    if not n_clicks:
+def _inst_table_dl(clicks, auth_data):
+    """My Issues page: per-row download — just that table's xlsx, not the full zip."""
+    if not any(c for c in (clicks or []) if c):
+        raise dash.exceptions.PreventUpdate
+    tid = ctx.triggered_id
+    if not isinstance(tid, dict) or tid.get("type") != "inst-tbl-dl-btn":
+        raise dash.exceptions.PreventUpdate
+    if not ctx.triggered[0]["value"]:
         raise dash.exceptions.PreventUpdate
 
-    from dq_issue_tracker import get_issues
-    from datetime import date as _date
-    import io as _io
-    import csv as _csv
+    raw = tid["index"]
+    if "|" not in raw:
+        raise dash.exceptions.PreventUpdate
+    le_book, table_name = raw.split("|", 1)
 
     le_books = set(str(lb) for lb in (auth_data or {}).get("le_books", []))
-    inst_name = (auth_data or {}).get("institution_name", "institution")
-    status    = status_filter or "open"
-    today     = _date.today()
+    if le_book not in le_books:
+        raise dash.exceptions.PreventUpdate
 
-    # Resolved → exact failing rows (from the report), streamed via the route.
-    if status == "resolved":
-        zb = _build_resolved_zip(sorted(le_books))
-        if not zb:
-            raise dash.exceptions.PreventUpdate
-        lb_label = sorted(le_books)[0] if le_books else "issues"
-        return dash.no_update, _stage_resolved_download(zb, lb_label)
-
-    issues = [i for i in get_issues(status=status) if i["le_book"] in le_books]
-
-    # apply table filter
-    if table_filter:
-        issues = [i for i in issues if i["table_name"] in set(table_filter)]
-
-    _PRETTY = {
-        "accounts":               "Accounts",
-        "contract_loans":         "Contract Loans",
-        "contract_schedules":     "Contract Schedules",
-        "contracts_disburse":     "Contracts Disburse",
-        "contracts_expanded":     "Contracts",
-        "customers_expanded":     "Customers",
-        "loan_applications_2":    "Loan Applications",
-        "prev_loan_applications": "Prev Loan Apps",
-    }
-
-    buf = _io.StringIO()
-    w   = _csv.writer(buf)
-    w.writerow([
-        "Table", "Rule ID", "Issue", "Dimension",
-        "Failing Rows", "Prev Count", "Detected", "Deadline",
-        "Days Remaining", "Urgency", "Status", "Recurrence",
-    ])
-
-    for iss in sorted(issues, key=lambda x: (x.get("table_name",""), x.get("sla_deadline",""))):
-        try:
-            days = (_date.fromisoformat(iss["sla_deadline"]) - today).days
-            days_str = f"{days}d" if days >= 0 else f"⚠ {abs(days)}d overdue"
-        except Exception:
-            days_str = "—"
-
-        recur = int(iss.get("recurrence_count") or 0)
-        prev  = iss.get("last_failing_rows")
-
-        w.writerow([
-            _PRETTY.get(iss["table_name"], iss["table_name"]),
-            iss.get("rule_id", ""),
-            iss.get("rule_name") or iss.get("rule_id", ""),
-            (iss.get("dimension") or "").title(),
-            iss.get("failing_rows", 0),
-            prev if prev is not None else "",
-            iss.get("detected_at", ""),
-            iss.get("sla_deadline", ""),
-            days_str,
-            (iss.get("urgency_band") or "").title(),
-            (iss.get("status") or "").replace("_", " ").title(),
-            f"#{recur + 1}" if recur > 0 else "1st occurrence",
-        ])
-
-    tbl_suffix  = "_" + "_".join(table_filter) if table_filter else ""
-    safe_name   = inst_name.lower().replace(" ", "_").replace("/", "")[:20]
-    filename    = f"issues_{safe_name}{tbl_suffix}_{today.isoformat()}.csv"
-    return dcc.send_string(buf.getvalue(), filename=filename), dash.no_update
+    return f"/download/issue-report/{le_book}/{table_name}?t={ctx.triggered[0]['value']}"
 
 
 @app.callback(

@@ -1,15 +1,3 @@
-"""
-Generate per-institution DQ issue CSV reports.
-
-Called from dq_pipeline_2m.py --reports stage.
-
-Output:
-  reports/{table}_{le_book}_{YYYY-MM}.csv  -- one file per institution per table.
-
-  Each CSV follows the BNR template format:
-    le_book | stakeholder_name | category_type | <table columns> | issue_type
-  One row per failing record.  issue_type = rule name (filterable column).
-"""
 from __future__ import annotations
 import logging
 from datetime import datetime

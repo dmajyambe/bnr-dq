@@ -193,7 +193,8 @@ def _val_rule_sql(rule_id: str, existing: set) -> tuple[str, str] | None:
 def evaluate_from_sql(engine, schema: str, valid_le_books: frozenset,
                       window_days: int, watermarks: dict, output_path: str,
                       row_limit: int = 0,
-                      tables: list[str] | None = None) -> dict:
+                      tables: list[str] | None = None,
+                      extra_where: str = "") -> dict:
     """Run validity checks in pure SQL via the shared rule-dimension runner."""
     return run_rule_dimension_sql(
         engine, schema, valid_le_books, window_days, watermarks, output_path,
@@ -201,7 +202,7 @@ def evaluate_from_sql(engine, schema: str, valid_le_books: frozenset,
         table_rules=VAL_TABLE_RULES, rule_meta=VAL_RULE_META,
         rule_sql_fn=_val_rule_sql,
         score_key="validity_score", overall_key="overall_validity_score",
-        dim_label="validity",
+        dim_label="validity", extra_where=extra_where,
     )
 
 

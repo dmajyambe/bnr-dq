@@ -11,9 +11,6 @@ import pandas as pd
 from dotenv import load_dotenv
 from sqlalchemy import text
 
-# =========================
-# Missing imports (EXPECTED from dq_rules or future extensions)
-# =========================
 # from dq_rules import PENSION_ACCOUNT_TYPES
 # from dq_rules import VALID_LOAN_DEAL_SUB_TYPES
 # from dq_rules import VALID_DEP_DEAL_SUB_TYPES
@@ -374,7 +371,8 @@ def _acc_rule_sql(rule_id: str, existing: set) -> tuple[str, str] | None:
 def evaluate_from_sql(engine, schema: str, valid_le_books: frozenset,
                       window_days: int, watermarks: dict, output_path: str,
                       row_limit: int = 0,
-                      tables: list[str] | None = None) -> dict:
+                      tables: list[str] | None = None,
+                      extra_where: str = "") -> dict:
     """Run accuracy checks in pure SQL via the shared rule-dimension runner."""
     return run_rule_dimension_sql(
         engine, schema, valid_le_books, window_days, watermarks, output_path,
@@ -382,7 +380,7 @@ def evaluate_from_sql(engine, schema: str, valid_le_books: frozenset,
         table_rules=ACC_TABLE_RULES, rule_meta=ACC_RULE_META,
         rule_sql_fn=_acc_rule_sql,
         score_key="accuracy_score", overall_key="overall_accuracy_score",
-        dim_label="accuracy",
+        dim_label="accuracy", extra_where=extra_where,
     )
 
 

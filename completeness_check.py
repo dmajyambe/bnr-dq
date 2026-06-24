@@ -294,7 +294,8 @@ def evaluate_from_dataframes(dataframes: dict, valid_le_books: frozenset,
 def evaluate_from_sql(engine, schema: str, valid_le_books: frozenset,
                        window_days: int, watermarks: dict, output_path: str,
                        row_limit: int = 0,
-                       tables: list[str] | None = None) -> dict:
+                       tables: list[str] | None = None,
+                       extra_where: str = "") -> dict:
     """Run completeness checks in pure SQL — one query per table, no DataFrames."""
     from sqlalchemy import text as _text
 
@@ -305,6 +306,7 @@ def evaluate_from_sql(engine, schema: str, valid_le_books: frozenset,
         'AND "le_book" IN (' + ", ".join(f"'{lb}'" for lb in sorted(valid_le_books)) + ")"
         if valid_le_books else ""
     )
+    extra_clause = f"AND ({extra_where})" if extra_where else ""
 
     with engine.connect() as conn:
         for table in target:
@@ -363,6 +365,7 @@ def evaluate_from_sql(engine, schema: str, valid_le_books: frozenset,
                     FROM   {sq}
                     WHERE  {date_clause}
                     {lb_clause}
+                    {extra_clause}
                     {limit_clause}
                 )
                 SELECT {lb_select}COUNT(*) AS total_rows,

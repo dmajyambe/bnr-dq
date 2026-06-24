@@ -64,7 +64,8 @@ def _date_clause(existing: set, wm: str | None, window_days: int) -> str:
 def evaluate_from_sql(engine, schema: str, valid_le_books: frozenset,
                       window_days: int, watermarks: dict, output_path: str,
                       row_limit: int = 0,
-                      tables: list[str] | None = None) -> dict:
+                      tables: list[str] | None = None,
+                      extra_where: str = "") -> dict:
     """Run uniqueness (duplicate-detection) checks in pure SQL — one window query
     per (table, rule), grouped by le_book."""
     report: dict = {
@@ -80,6 +81,7 @@ def evaluate_from_sql(engine, schema: str, valid_le_books: frozenset,
         'AND "le_book" IN (' + ", ".join(f"'{lb}'" for lb in sorted(valid_le_books)) + ")"
         if valid_le_books else ""
     )
+    extra_clause = f"AND ({extra_where})" if extra_where else ""
 
     with engine.connect() as conn:
         for table in target:
@@ -121,6 +123,7 @@ def evaluate_from_sql(engine, schema: str, valid_le_books: frozenset,
                         FROM   "{schema}"."{table}"
                         WHERE  {date_clause} AND "{anchor}" IS NOT NULL
                         {lb_clause}
+                        {extra_clause}
                         {limit_sql}
                     ),
                     flagged AS (

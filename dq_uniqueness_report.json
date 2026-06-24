@@ -1,17 +1,17 @@
 {
-  "generated_at": "2026-06-14T22:27:57",
+  "generated_at": "2026-06-22T13:22:59",
   "tables": {
     "contract_loans": {
       "status": "evaluated",
-      "row_count": 13685805,
+      "row_count": 263038,
       "rules_evaluated": [
         "UNI-001"
       ],
-      "uniqueness_score": 59.43,
+      "uniqueness_score": 100.0,
       "le_book_breakdown": {
         "040": {
-          "row_count": 13685805,
-          "uniqueness_score": 59.43,
+          "row_count": 263038,
+          "uniqueness_score": 100.0,
           "rules": {
             "UNI-001": {
               "rule_name": "No duplicate loan records within the period",
@@ -23,10 +23,10 @@
                 "prin_outstanding_amt_fcy",
                 "prin_outstanding_amt_lcy"
               ],
-              "valid": 8134041,
-              "invalid": 5551764,
-              "total": 13685805,
-              "uniqueness_score": 59.43
+              "valid": 263038,
+              "invalid": 0,
+              "total": 263038,
+              "uniqueness_score": 100.0
             }
           }
         }
@@ -34,15 +34,15 @@
     },
     "contracts_disburse": {
       "status": "evaluated",
-      "row_count": 821096,
+      "row_count": 58783,
       "rules_evaluated": [
         "UNI-002"
       ],
-      "uniqueness_score": 98.75,
+      "uniqueness_score": 82.9,
       "le_book_breakdown": {
         "040": {
-          "row_count": 821096,
-          "uniqueness_score": 98.75,
+          "row_count": 58783,
+          "uniqueness_score": 82.9,
           "rules": {
             "UNI-002": {
               "rule_name": "No duplicate disbursement records within the period",
@@ -54,10 +54,10 @@
                 "previous_disbursed_amt",
                 "first_payment_date"
               ],
-              "valid": 810857,
-              "invalid": 10239,
-              "total": 821096,
-              "uniqueness_score": 98.75
+              "valid": 48730,
+              "invalid": 10053,
+              "total": 58783,
+              "uniqueness_score": 82.9
             }
           }
         }
@@ -65,14 +65,14 @@
     },
     "contracts_expanded": {
       "status": "evaluated",
-      "row_count": 1554671,
+      "row_count": 95178,
       "rules_evaluated": [
         "UNI-003"
       ],
       "uniqueness_score": 100.0,
       "le_book_breakdown": {
         "040": {
-          "row_count": 1554671,
+          "row_count": 95178,
           "uniqueness_score": 100.0,
           "rules": {
             "UNI-003": {
@@ -86,9 +86,9 @@
                 "vision_sbu",
                 "contract_status"
               ],
-              "valid": 1554671,
+              "valid": 95178,
               "invalid": 0,
-              "total": 1554671,
+              "total": 95178,
               "uniqueness_score": 100.0
             }
           }
@@ -101,7 +101,7 @@
     "040"
   ],
   "executive_summary": {
-    "overall_uniqueness_score": 86.06,
+    "overall_uniqueness_score": 94.3,
     "total_tables": 3,
     "evaluated_tables": 3,
     "schema": "dqp",

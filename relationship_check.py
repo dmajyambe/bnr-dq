@@ -59,6 +59,7 @@ def run_rule(
     schema: str,
     valid_le_books: frozenset,
     sample: int,
+    extra_where: str = "",
 ) -> dict | None:
     """
     Execute one RI rule entirely in SQL.
@@ -90,6 +91,10 @@ def run_rule(
         codes     = ", ".join(f"'{lb}'" for lb in sorted(valid_le_books))
         lb_filter = f'AND c.le_book IN ({codes})'
 
+    # extra_where (e.g. month filter on date_last_modified) scopes the CHILD rows;
+    # unqualified column names resolve to the single child table `c`.
+    extra_clause = f"AND ({extra_where})" if extra_where else ""
+
     limit_clause = f"LIMIT {sample}" if sample > 0 else ""
 
     sql = text(f"""
@@ -99,6 +104,7 @@ def run_rule(
             FROM   "{schema}"."{child_t}" c
             WHERE  c."{child_c}" IS NOT NULL
                    {lb_filter}
+                   {extra_clause}
             {limit_clause}
         )
         SELECT
@@ -158,6 +164,79 @@ def run_rule(
 # ── orchestration ─────────────────────────────────────────────────────────────
 
 _RI_WORK_MEM = "512MB"
+
+
+def evaluate_from_sql(engine, schema: str, valid_le_books: frozenset,
+                      window_days: int, watermarks: dict, output_path: str,
+                      row_limit: int = 0,
+                      tables: list[str] | None = None,
+                      extra_where: str = "") -> dict:
+    """Run referential-integrity (anti-join) rules in pure SQL — uniform engine
+    contract, memory-safe (LEFT JOIN + GROUP BY le_book, no DataFrames).
+
+    Report shape matches dq_issue_tracker._process_relationship:
+        tables[child_table] = {status, rules{rid: {..., le_book_breakdown{lb:{invalid}}}}}
+    """
+    report: dict = {
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "tables":       {},
+        "warnings":     {},
+    }
+    target = tables if tables is not None else sorted(_TABLE_RULES.keys())
+
+    with engine.connect() as conn:
+        try:
+            conn.execute(text(f"SET work_mem = '{_RI_WORK_MEM}'"))
+        except Exception:
+            conn.rollback()
+
+        for table in target:
+            rule_ids = _TABLE_RULES.get(table, [])
+            if not rule_ids:
+                continue
+            log.info("━━  %s  (%d RI rule(s))", table, len(rule_ids))
+
+            rules_out: dict = {}
+            for rule_id in rule_ids:
+                meta = RULE_META[rule_id]
+                try:
+                    result = run_rule(rule_id, meta, conn, schema, valid_le_books,
+                                      row_limit, extra_where)
+                except Exception as exc:
+                    log.warning("  %s failed: %s", rule_id, exc)
+                    conn.rollback()
+                    result = None
+                if result is None:
+                    continue
+                rules_out[rule_id] = {
+                    "rule_name":         meta["name"],
+                    "category":          meta["category"],
+                    "child_table":       meta["child_table"],
+                    "child_col":         meta["child_col"],
+                    "parent_table":      meta["parent_table"],
+                    "parent_col":        meta["parent_col"],
+                    "nullable":          meta["nullable"],
+                    "invalid":           result["invalid"],
+                    "valid":             result["valid"],
+                    "total":             result["total"],
+                    "ri_score":          result["ri_score"],
+                    "le_book_breakdown": result["le_book_breakdown"],
+                }
+                log.info("  %s  score=%.2f%%  orphans=%d  (of %d)",
+                         rule_id, result["ri_score"], result["invalid"], result["total"])
+
+            report["tables"][table] = (
+                {"status": "evaluated", "rules": rules_out} if rules_out
+                else {"status": "no_data", "row_count": 0}
+            )
+
+    if output_path:
+        try:
+            with open(output_path, "w") as fh:
+                json.dump(report, fh, default=str)
+        except Exception:
+            pass
+    return report
 
 
 def evaluate_all(engine, schema: str, sample: int) -> dict:

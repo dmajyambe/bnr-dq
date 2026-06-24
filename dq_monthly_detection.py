@@ -245,7 +245,8 @@ def _append_history(entry: dict) -> None:
 def _zip_failing_rows_sql(engine, schema: str, table: str,
                           valid_le_books: frozenset, categories: dict,
                           month: str, limit: int = 0,
-                          max_rows_per_sheet: int = 50000) -> None:
+                          max_rows_per_sheet: int = 50000,
+                          extra_where: str = "") -> None:
     """Stream FAILING rows (all dimensions) for `table` from SQL and write a
     per-institution {table}.xlsx into their monthly ZIP — ONE SHEET PER ISSUE
     (sheet name = issue type), with the affected column(s) highlighted red.
@@ -281,6 +282,7 @@ def _zip_failing_rows_sql(engine, schema: str, table: str,
     with engine.connect() as conn:
         existing = _db_columns(conn, schema, table)
         built = build_failing_union(schema, table, existing, valid_le_books, limit,
+                                    extra_where=extra_where,
                                     per_issue_cap=max_rows_per_sheet + 1)
         if not built:
             return
@@ -389,10 +391,30 @@ def _zip_failing_rows_sql(engine, schema: str, table: str,
 
 # orchestration
 
+def month_filter(month: str) -> tuple[str, str]:
+    """For a 'YYYY-MM' reporting month, return (extra_where, month_end_date):
+
+      • extra_where   — a date_last_modified predicate scoping to that calendar
+                        month (the same slice the --month detection run uses)
+      • month_end_date — 'YYYY-MM-DD' month-end, used to tag the run's detected_at
+
+    Shared by the --month CLI and the month-aware resolution scan so detection and
+    resolution always re-evaluate the SAME data slice.
+    """
+    from calendar import monthrange
+    y, m   = (int(p) for p in month.split("-")[:2])
+    last   = monthrange(y, m)[1]
+    ny, nm = (y + (m == 12), (m % 12) + 1)
+    extra_where = (f"\"date_last_modified\" >= '{y:04d}-{m:02d}-01' "
+                   f"AND \"date_last_modified\" < '{ny:04d}-{nm:02d}-01'")
+    return extra_where, f"{y:04d}-{m:02d}-{last:02d}"
+
+
 def run_monthly_detection(engine, schema: str, run_date: str,
                           tables: list[str] | None = None,
                           limit: int = 0,
-                          le_books: frozenset | None = None) -> None:
+                          le_books: frozenset | None = None,
+                          extra_where: str = "") -> None:
     """
     Full-table DQ scan across all dimensions, run entirely in SQL (memory-safe).
 
@@ -432,19 +454,19 @@ def run_monthly_detection(engine, schema: str, run_date: str,
     log.info("Running completeness …")
     comp_report = comp_eng.evaluate_from_sql(engine, schema, valid_le_books, FULL_SCAN, wm,
                                              str(SCRIPT_DIR / "dq_report.json"),
-                                             row_limit=limit, tables=tables)
+                                             row_limit=limit, tables=tables, extra_where=extra_where)
     log.info("Running accuracy …")
     acc_report  = acc_eng.evaluate_from_sql(engine, schema, valid_le_books, FULL_SCAN, wm,
                                             str(SCRIPT_DIR / "dq_accuracy_report.json"),
-                                            row_limit=limit, tables=tables)
+                                            row_limit=limit, tables=tables, extra_where=extra_where)
     log.info("Running validity …")
     val_report  = val_eng.evaluate_from_sql(engine, schema, valid_le_books, FULL_SCAN, wm,
                                             str(SCRIPT_DIR / "dq_validity_report.json"),
-                                            row_limit=limit, tables=tables)
+                                            row_limit=limit, tables=tables, extra_where=extra_where)
     log.info("Running uniqueness …")
     uni_report  = uni_eng.evaluate_from_sql(engine, schema, valid_le_books, FULL_SCAN, wm,
                                             str(SCRIPT_DIR / "dq_uniqueness_report.json"),
-                                            row_limit=limit, tables=tables)
+                                            row_limit=limit, tables=tables, extra_where=extra_where)
 
     R = {"comp": comp_report, "acc": acc_report, "val": val_report, "uni": uni_report}
 
@@ -457,7 +479,12 @@ def run_monthly_detection(engine, schema: str, run_date: str,
 
     log.info("Writing history entry …")
     entry = _build_history_entry(run_date, R, categories, dup_counts, cat_dup_counts)
-    _append_history(entry)
+    if entry.get("by_institution"):
+        _append_history(entry)
+    else:
+        log.warning("No institution data in scope (empty run) — skipping history entry "
+                    "for run_date=%s (would otherwise render as a 0%% cliff / blank overview)",
+                    run_date)
 
     # ── per-institution failing-row ZIPs: streamed from SQL (memory-safe) ──────
     month = run_date[:7]
@@ -467,7 +494,8 @@ def run_monthly_detection(engine, schema: str, run_date: str,
         log.info("Removed stale ZIP: %s", old.name)
     log.info("Streaming per-institution failing-row ZIPs …")
     for table in (tables or TABLES):
-        _zip_failing_rows_sql(engine, schema, table, valid_le_books, categories, month, limit)
+        _zip_failing_rows_sql(engine, schema, table, valid_le_books, categories, month, limit,
+                              extra_where=extra_where)
 
     log.info("Monthly detection complete — run_date=%s", run_date)
 
@@ -492,7 +520,17 @@ if __name__ == "__main__":
                         help="Row cap per table, 0 = no limit (testing)")
     parser.add_argument("--le-book", nargs="+", default=None, metavar="CODE",
                         help="Restrict to these institution codes only (testing)")
+    parser.add_argument("--month", default=None, metavar="YYYY-MM",
+                        help="Scope detection to one reporting month by "
+                             "date_last_modified (e.g. 2026-05). Sets detected_at "
+                             "to the month-end date.")
     args = parser.parse_args()
+
+    # --month: restrict data to that calendar month (by date_last_modified) and
+    # date the run at month-end so issues are tagged to the reporting period.
+    extra_where = ""
+    if args.month:
+        extra_where, args.date = month_filter(args.month)
 
     from db_utils import get_engine, build_connection_string
     engine = get_engine(build_connection_string())
@@ -508,7 +546,8 @@ if __name__ == "__main__":
 
     run_monthly_detection(engine, args.schema, args.date,
                           tables=args.tables, limit=args.limit,
-                          le_books=frozenset(args.le_book) if args.le_book else None)
+                          le_books=frozenset(args.le_book) if args.le_book else None,
+                          extra_where=extra_where)
 
     log.info("=" * 60)
     log.info("Done.")

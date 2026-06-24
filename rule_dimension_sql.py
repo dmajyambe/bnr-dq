@@ -39,6 +39,7 @@ def run_rule_dimension_sql(
     score_key: str,
     overall_key: str,
     dim_label: str = "rule",
+    extra_where: str = "",
 ) -> dict:
     """Run a rule-based dimension in pure SQL. See module docstring for the shape.
 
@@ -113,6 +114,7 @@ def run_rule_dimension_sql(
             lb_select  = '"le_book", ' if has_lb else ""
             group_by   = 'GROUP BY "le_book" ORDER BY "le_book"' if has_lb else ""
             limit_sql  = f"LIMIT {row_limit}" if row_limit > 0 else ""
+            extra_clause = f"AND ({extra_where})" if extra_where else ""
 
             rule_selects = []
             for rid, (tot_expr, val_expr) in rule_exprs.items():
@@ -125,6 +127,7 @@ def run_rule_dimension_sql(
                     FROM   {sq}
                     WHERE  {date_clause}
                     {lb_clause}
+                    {extra_clause}
                     {limit_sql}
                 )
                 SELECT {lb_select}COUNT(*) AS total_rows,

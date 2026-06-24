@@ -502,25 +502,6 @@ def inst_issues_page(le_books: list[str]) -> html.Div:
                 style={"fontSize": "12px", "fontFamily": FONT, "minWidth": "280px"},
             ),
         ], style={"display": "flex", "alignItems": "center", "flex": "1"}),
-
-        html.Span(style={"width": "1px", "background": DIVIDER,
-                          "alignSelf": "stretch", "margin": "0 16px"}),
-
-        # CSV download button
-        html.Div([
-            html.Span("⬇ ", style={"fontSize": "13px"}),
-            html.Span("Download CSV", style={"fontSize": "12px"}),
-        ], id="inst-csv-dl-btn", n_clicks=0,
-           title="Download filtered issues as CSV",
-           style={
-               "display": "inline-flex", "alignItems": "center", "gap": "4px",
-               "cursor": "pointer", "background": BRAND, "color": CARD,
-               "fontSize": "12px", "fontWeight": "700",
-               "padding": "7px 16px", "borderRadius": "6px",
-               "userSelect": "none", "whiteSpace": "nowrap",
-           }),
-
-        dcc.Download(id="inst-csv-download"),
     ], style={
         "display": "flex", "alignItems": "center", "flexWrap": "wrap",
         "gap": "6px", "background": CARD, "borderRadius": "8px",
@@ -533,8 +514,8 @@ def inst_issues_page(le_books: list[str]) -> html.Div:
             html.H2("My Issues", style={"fontSize": "18px", "fontWeight": "900",
                                          "color": TEXT, "margin": "0 0 4px"}),
             html.P(
-                "Filter by table, then download as CSV. "
-                "Each row in the table below is a data category with open issues.",
+                "Filter by table. Each row in the table below is a data category "
+                "with open issues — download the full report from the Report column.",
                 style={"fontSize": "12px", "color": MUTED, "margin": "0"},
             ),
         ], style={"marginBottom": "20px"}),
@@ -561,7 +542,8 @@ def inst_remediation_page(le_books: list[str], role: str = "inst_user") -> html.
         stats[s] = stats.get(s, 0) + 1
 
     chips = []
-    for key, lbl in cr_mod.STATUS_LABELS.items():
+    for key in ("open", "in_progress", "submitted"):   # minimalist: active pipeline only
+        lbl = cr_mod.STATUS_LABELS.get(key, key.title())
         n   = stats.get(key, 0)
         clr = cr_mod.STATUS_COLORS[key]
         chips.append(html.Div([

@@ -279,7 +279,7 @@ TIM_RULE_META: dict[str, dict] = {}
 TIMELINESS_COLUMNS: dict[str, list[str]] = {}
 TIM_TABLE_RULES: dict[str, list[str]] = {}
 
-FRESHNESS_WINDOW_DAYS = 90
+# FRESHNESS_WINDOW_DAYS = 90
 MIN_AGE_AT_OPEN       = 18
 
 # TIM_RULE_META full definitions (restore when timeliness is implemented):

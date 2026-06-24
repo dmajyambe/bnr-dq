@@ -202,6 +202,10 @@ def build_failing_union(schema: str, table: str, existing: set,
     id_cols   = [c for c in IDENTIFIER_COLS.get(table, ["le_book"]) if c in existing]
     if "le_book" not in id_cols:
         id_cols = ["le_book"] + id_cols
+    # context columns — appended when the table actually has them
+    for ctx_col in ("date_creation", "date_last_modified"):
+        if ctx_col in existing and ctx_col not in id_cols:
+            id_cols.append(ctx_col)
     fail_cols = [c for c in _failing_columns(table, existing) if c not in id_cols]
     if not fail_cols:
         return None

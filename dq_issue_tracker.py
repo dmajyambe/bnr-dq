@@ -33,6 +33,13 @@ URGENCY_COLORS = {
 # Notification cadence per urgency band (minimum days between notification( email or dashboard alert) for the same issue_id)
 _NOTIFY_INTERVAL = {"new": None, "attention": 7, "urgent": 3, "critical": 1, "overdue": 1}
 
+# Statuses that count as an unresolved ("open") issue in every tally and UI view.
+# pending_resolution = an open issue that passed ONE clean re-scan and is awaiting a
+# second confirming scan (resolution debounce) — it is NOT yet resolved, so it still
+# counts as open. Keep this the single source of truth for "what is open".
+OPEN_STATUSES = ("open", "penalized", "pending_resolution")
+_OPEN_SQL     = "('" + "','".join(OPEN_STATUSES) + "')"
+
 # Completeness
 _COMP_TABLE_RULE: dict[str, str] = {
     "customers_expanded":    "COMP-001",
@@ -122,7 +129,6 @@ def _migrate_schema(con: sqlite3.Connection) -> None:
 
 
 # issue urgency helper functions
-
 def _urgency_band(detected_at: str, sla_deadline: str | None = None) -> str:
     try:
         days = (date.today() - date.fromisoformat(detected_at)).days
@@ -182,11 +188,11 @@ def _upsert_issue(con: sqlite3.Connection, le_book: str, inst_name: str,
         """, (failing_rows, band, inst_name, name, iid))
         return
 
-    #recently resolved (≤60 days) → reopen with incremented recurrence
+    #recently resolved (≤30 days) → reopen with incremented recurrence
     resolved_row = con.execute("""
         SELECT issue_id, recurrence_count FROM dq_open_issues
         WHERE issue_id=? AND status='resolved'
-          AND resolved_at >= date(?, '-60 days')
+          AND resolved_at >= date(?, '-30 days')
         ORDER BY resolved_at DESC LIMIT 1
     """, (iid, run_date)).fetchone()
     if resolved_row:
@@ -248,6 +254,24 @@ def resolve_issue(issue_id: str, run_id: str) -> None:
                SET status='resolved', resolved_at=?, resolution_run_id=?
              WHERE issue_id=? AND status IN ('open','penalized','pending_resolution')
         """, (today, run_id, issue_id))
+        con.commit()
+    finally:
+        con.close()
+
+
+def mark_pending_resolution(issue_id: str) -> None:
+    """First clean full-scan → park an open issue in pending_resolution (debounce).
+    A second consecutive clean scan resolves it; any failing scan flips it back to
+    open. Guards against a transient 0 (e.g. reading the warehouse mid-reload)
+    permanently resolving a still-failing issue."""
+    ensure_tables()
+    con = _conn()
+    try:
+        con.execute(
+            "UPDATE dq_open_issues SET status='pending_resolution' "
+            "WHERE issue_id=? AND status IN ('open','penalized')",
+            (issue_id,),
+        )
         con.commit()
     finally:
         con.close()
@@ -350,7 +374,7 @@ def sync_cr_failing_rows() -> None:
         log.warning("sync_cr_failing_rows failed: %s", exc)
 
 
-# ── main detection logic ───────────────────────────────────────────────────────
+#main detection logic
 
 def detect_and_update_issues(R: dict, categories: dict, run_date: str) -> None:
     """
@@ -415,7 +439,7 @@ def _inst_name(lb: str, categories: dict) -> str:
 def _refresh_urgency_bands(con: sqlite3.Connection) -> None:
     """Recompute urgency_band for all open issues (picks up overdue once SLA passes)."""
     rows = con.execute(
-        "SELECT issue_id, detected_at, sla_deadline FROM dq_open_issues WHERE status='open'"
+        f"SELECT issue_id, detected_at, sla_deadline FROM dq_open_issues WHERE status IN {_OPEN_SQL}"
     ).fetchall()
     for row in rows:
         band = _urgency_band(row["detected_at"], row["sla_deadline"])
@@ -523,12 +547,11 @@ def _process_relationship(con, report: dict, categories: dict, run_date: str) ->
 #     return penalised
 
 
-# ── query helpers (used by dashboard) ─────────────────────────────────────────
-
+#query helpers
 def _count_open() -> int:
     con = _conn()
     try:
-        return con.execute("SELECT COUNT(*) FROM dq_open_issues WHERE status='open'").fetchone()[0]
+        return con.execute(f"SELECT COUNT(*) FROM dq_open_issues WHERE status IN {_OPEN_SQL}").fetchone()[0]
     finally:
         con.close()
 
@@ -570,7 +593,10 @@ def get_issues(status: str | None = None, le_book: str | None = None) -> list[di
     con = _conn()
     try:
         clauses, params = [], []
-        if status:
+        if status == "open":
+            # "open" means the whole unresolved bucket (incl. pending_resolution)
+            clauses.append(f"status IN {_OPEN_SQL}")
+        elif status:
             clauses.append("status=?");  params.append(status)
         if le_book:
             clauses.append("le_book=?"); params.append(le_book)
@@ -592,7 +618,7 @@ def get_institution_issue_summary() -> dict[str, dict]:
     con = _conn()
     try:
         rows = con.execute(
-            "SELECT le_book, detected_at, sla_deadline FROM dq_open_issues WHERE status='open'"
+            f"SELECT le_book, detected_at, sla_deadline FROM dq_open_issues WHERE status IN {_OPEN_SQL}"
         ).fetchall()
     finally:
         con.close()
