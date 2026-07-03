@@ -1,16 +1,16 @@
 {
-  "generated_at": "2026-06-22T13:22:59",
+  "generated_at": "2026-07-03T10:10:33",
   "tables": {
     "contract_loans": {
       "status": "evaluated",
-      "row_count": 263038,
+      "row_count": 1966,
       "rules_evaluated": [
         "UNI-001"
       ],
       "uniqueness_score": 100.0,
       "le_book_breakdown": {
-        "040": {
-          "row_count": 263038,
+        "015": {
+          "row_count": 1966,
           "uniqueness_score": 100.0,
           "rules": {
             "UNI-001": {
@@ -23,9 +23,9 @@
                 "prin_outstanding_amt_fcy",
                 "prin_outstanding_amt_lcy"
               ],
-              "valid": 263038,
+              "valid": 1966,
               "invalid": 0,
-              "total": 263038,
+              "total": 1966,
               "uniqueness_score": 100.0
             }
           }
@@ -34,15 +34,15 @@
     },
     "contracts_disburse": {
       "status": "evaluated",
-      "row_count": 58783,
+      "row_count": 65,
       "rules_evaluated": [
         "UNI-002"
       ],
-      "uniqueness_score": 82.9,
+      "uniqueness_score": 100.0,
       "le_book_breakdown": {
-        "040": {
-          "row_count": 58783,
-          "uniqueness_score": 82.9,
+        "015": {
+          "row_count": 65,
+          "uniqueness_score": 100.0,
           "rules": {
             "UNI-002": {
               "rule_name": "No duplicate disbursement records within the period",
@@ -54,10 +54,10 @@
                 "previous_disbursed_amt",
                 "first_payment_date"
               ],
-              "valid": 48730,
-              "invalid": 10053,
-              "total": 58783,
-              "uniqueness_score": 82.9
+              "valid": 65,
+              "invalid": 0,
+              "total": 65,
+              "uniqueness_score": 100.0
             }
           }
         }
@@ -65,14 +65,15 @@
     },
     "contracts_expanded": {
       "status": "evaluated",
-      "row_count": 95178,
+      "row_count": 54,
       "rules_evaluated": [
-        "UNI-003"
+        "UNI-003",
+        "UNI-005"
       ],
       "uniqueness_score": 100.0,
       "le_book_breakdown": {
-        "040": {
-          "row_count": 95178,
+        "015": {
+          "row_count": 54,
           "uniqueness_score": 100.0,
           "rules": {
             "UNI-003": {
@@ -86,9 +87,101 @@
                 "vision_sbu",
                 "contract_status"
               ],
-              "valid": 95178,
+              "valid": 54,
               "invalid": 0,
-              "total": 95178,
+              "total": 54,
+              "uniqueness_score": 100.0
+            },
+            "UNI-005": {
+              "rule_name": "Contract ID must not repeat within the period",
+              "category": "Duplicate Detection",
+              "fields": [
+                "contract_id"
+              ],
+              "valid": 54,
+              "invalid": 0,
+              "total": 54,
+              "uniqueness_score": 100.0
+            }
+          }
+        }
+      }
+    },
+    "accounts": {
+      "status": "evaluated",
+      "row_count": 875,
+      "rules_evaluated": [
+        "UNI-004"
+      ],
+      "uniqueness_score": 100.0,
+      "le_book_breakdown": {
+        "015": {
+          "row_count": 875,
+          "uniqueness_score": 100.0,
+          "rules": {
+            "UNI-004": {
+              "rule_name": "Account Number must not repeat within the period",
+              "category": "Duplicate Detection",
+              "fields": [
+                "account_no"
+              ],
+              "valid": 875,
+              "invalid": 0,
+              "total": 875,
+              "uniqueness_score": 100.0
+            }
+          }
+        }
+      }
+    },
+    "customers_expanded": {
+      "status": "evaluated",
+      "row_count": 240,
+      "rules_evaluated": [
+        "UNI-006"
+      ],
+      "uniqueness_score": 100.0,
+      "le_book_breakdown": {
+        "015": {
+          "row_count": 240,
+          "uniqueness_score": 100.0,
+          "rules": {
+            "UNI-006": {
+              "rule_name": "Customer ID must not repeat within the period",
+              "category": "Duplicate Detection",
+              "fields": [
+                "customer_id"
+              ],
+              "valid": 240,
+              "invalid": 0,
+              "total": 240,
+              "uniqueness_score": 100.0
+            }
+          }
+        }
+      }
+    },
+    "loan_applications_2": {
+      "status": "evaluated",
+      "row_count": 54,
+      "rules_evaluated": [
+        "UNI-007"
+      ],
+      "uniqueness_score": 100.0,
+      "le_book_breakdown": {
+        "015": {
+          "row_count": 54,
+          "uniqueness_score": 100.0,
+          "rules": {
+            "UNI-007": {
+              "rule_name": "Loan Application ID must not repeat within the period",
+              "category": "Duplicate Detection",
+              "fields": [
+                "loan_application_id"
+              ],
+              "valid": 54,
+              "invalid": 0,
+              "total": 54,
               "uniqueness_score": 100.0
             }
           }
@@ -98,12 +191,12 @@
   },
   "warnings": {},
   "le_books": [
-    "040"
+    "015"
   ],
   "executive_summary": {
-    "overall_uniqueness_score": 94.3,
-    "total_tables": 3,
-    "evaluated_tables": 3,
+    "overall_uniqueness_score": 100.0,
+    "total_tables": 6,
+    "evaluated_tables": 6,
     "schema": "dqp",
     "row_limit": 0
   }

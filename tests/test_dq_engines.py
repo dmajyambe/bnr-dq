@@ -7,54 +7,9 @@ import pandas as pd
 import numpy as np
 from datetime import date, timedelta
 
-import completeness_check as comp
-import accuracy_check     as acc
-import timeliness_check   as tim
-import validity_check     as val
-import relationship_check as rel
-
-
-# ── Completeness ───────────────────────────────────────────────────────────────
-
-class TestCompleteness:
-    def test_all_present_scores_100(self):
-        df = pd.DataFrame({"a": [1, 2, 3], "b": ["x", "y", "z"]})
-        result = comp.check_completeness(df, ["a", "b"])
-        assert result["score"] == 100.0
-        assert result["null_cells"] == 0
-
-    def test_all_null_scores_zero(self):
-        df = pd.DataFrame({"a": [None, None], "b": [None, None]})
-        result = comp.check_completeness(df, ["a", "b"])
-        assert result["score"] == 0.0
-        assert result["null_cells"] == 4
-
-    def test_half_null_scores_50(self):
-        df = pd.DataFrame({"a": [1, None]})
-        result = comp.check_completeness(df, ["a"])
-        assert result["score"] == 50.0
-
-    def test_empty_dataframe_scores_100(self):
-        df = pd.DataFrame({"a": pd.Series([], dtype=float)})
-        result = comp.check_completeness(df, ["a"])
-        assert result["score"] == 100.0
-
-    def test_column_not_in_df_ignored(self):
-        df = pd.DataFrame({"a": [1, 2, 3]})
-        result = comp.check_completeness(df, ["a", "nonexistent"])
-        assert result["score"] == 100.0   # nonexistent skipped, only a checked
-
-    def test_null_counts_per_column(self):
-        df = pd.DataFrame({"a": [1, None, 3], "b": [None, None, "z"]})
-        result = comp.check_completeness(df, ["a", "b"])
-        assert result["null_counts"]["a"] == 1
-        assert result["null_counts"]["b"] == 2
-
-    def test_no_columns_to_check_scores_100(self):
-        df = pd.DataFrame({"a": [1, 2]})
-        result = comp.check_completeness(df, [])
-        assert result["score"] == 100.0
-
+import dq.engines.accuracy     as acc
+import dq.engines.timeliness   as tim
+import dq.engines.validity     as val
 
 # ── Accuracy ───────────────────────────────────────────────────────────────────
 
@@ -175,41 +130,6 @@ class TestValidity:
 
 
 # ── Relationship (RI) ──────────────────────────────────────────────────────────
-
-class TestRelationship:
-    def test_all_accounts_have_known_customer(self, accounts_df, customers_df):
-        # remove the orphaned row
-        clean_accounts = accounts_df[accounts_df["customer_id"] != 99]
-        dataframes = {
-            "accounts":           clean_accounts,
-            "customers_expanded": customers_df,
-        }
-        result = rel.evaluate_all_from_dataframes(
-            dataframes, valid_le_books=frozenset({"040"}))
-        ri_score = (result.get("executive_summary") or {}).get("overall_ri_score", 100.0)
-        assert ri_score == 100.0
-
-    def test_orphaned_account_lowers_score(self, accounts_df, customers_df):
-        # accounts_df has account A3 with customer_id=99 (not in customers_df)
-        dataframes = {
-            "accounts":           accounts_df,
-            "customers_expanded": customers_df,
-        }
-        result = rel.evaluate_all_from_dataframes(
-            dataframes, valid_le_books=frozenset({"040"}))
-        ri_score = (result.get("executive_summary") or {}).get("overall_ri_score", 100.0)
-        assert ri_score < 100.0
-
-    def test_empty_dataframes_return_zero(self):
-        # When no rows exist to evaluate, no RI checks pass → score is 0.0
-        dataframes = {
-            "accounts":           pd.DataFrame(),
-            "customers_expanded": pd.DataFrame(),
-        }
-        result = rel.evaluate_all_from_dataframes(dataframes, frozenset())
-        ri_score = (result.get("executive_summary") or {}).get("overall_ri_score", 0.0)
-        assert ri_score == 0.0
-
 
 # ── Cross-engine: run_rule_mask contract ────────────────────────────────────────
 

@@ -1,0 +1,35 @@
+#shared SQL filtering utilities for all engines (accuracy, timeliness, relationship, uniqueness)
+from __future__ import annotations
+
+#date window to filter on, or None for no date window (e.g. for a full-table scan)
+def date_window_clause(existing: set[str], wm: str | None, window_days: int) -> str:
+
+    if not window_days:
+        return "TRUE"
+    anchor = f"'{wm[:10]}'::date" if wm else "CURRENT_DATE"
+    parts = []
+    if "date_creation" in existing:
+        parts.append(f'"date_creation" BETWEEN {anchor} - INTERVAL \'{window_days} days\' AND {anchor}')
+    if "date_last_modified" in existing:
+        parts.append(
+            f'"date_last_modified" > \'{wm}\'' if wm else
+            f'"date_last_modified" BETWEEN {anchor} - INTERVAL \'{window_days} days\' AND {anchor}')
+    return "(" + " OR ".join(parts) + ")" if parts else "TRUE"
+
+#institution filter for the in-scope LE books, or empty string if no filter (e.g. for a full-table scan)
+def le_book_clause(valid_le_books: frozenset) -> str:
+    """AND-able SQL fragment restricting rows to the in-scope institutions."""
+    return (
+        'AND "le_book" IN (' + ", ".join(f"'{lb}'" for lb in sorted(valid_le_books)) + ")"
+        if valid_le_books else ""
+    )
+
+#month filter for a YYYY-MM reporting month, or empty string if no filter (e.g. for a full-table scan)
+def month_filter(month: str) -> tuple[str, str]:
+    from calendar import monthrange
+    y, m   = (int(p) for p in month.split("-")[:2])
+    last   = monthrange(y, m)[1]
+    ny, nm = (y + (m == 12), (m % 12) + 1)
+    extra_where = (f"\"date_last_modified\" >= '{y:04d}-{m:02d}-01' "
+                   f"AND \"date_last_modified\" < '{ny:04d}-{nm:02d}-01'")
+    return extra_where, f"{y:04d}-{m:02d}-{last:02d}"

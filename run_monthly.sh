@@ -20,7 +20,7 @@ cd "$DIR"
 
 # ── Stage 1: full-table detection (all dimensions, all tables) ────────────────
 echo "Stage 1 (detection): full-table scan …" >> "$LOG"
-$PYTHON dq_monthly_detection.py --schema dqp >> "$LOG" 2>&1
+$PYTHON -m jobs.monthly_detection --schema dqp >> "$LOG" 2>&1
 DETECT_CODE=$?
 
 if [ $DETECT_CODE -ne 0 ]; then
@@ -39,7 +39,7 @@ echo "Dashboard restarted after detection: $(date '+%Y-%m-%d %H:%M:%S')" >> "$LO
 
 # ── Stage 2: resolution scan (re-checks all open issues, pre-computes ZIPs) ──
 echo "Stage 2 (resolution): daily scanner run …" >> "$LOG"
-$PYTHON dq_resolution_pipeline.py --schema dqp >> "$LOG" 2>&1
+$PYTHON -m jobs.resolution_scan --schema dqp >> "$LOG" 2>&1
 RESOLUTION_CODE=$?
 
 if [ $RESOLUTION_CODE -eq 0 ]; then

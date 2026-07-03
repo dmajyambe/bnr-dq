@@ -16,7 +16,7 @@ done
 
 echo "=== BNR DQ Deploy — $(date '+%Y-%m-%d %H:%M:%S') ==="
 
-# ── 1. Pull latest code ───────────────────────────────────────────────────────
+# pull latest code
 if [ "$NO_GIT" = false ]; then
     if git -C "$DIR" rev-parse --is-inside-work-tree > /dev/null 2>&1; then
         echo "Pulling latest code..."
@@ -26,27 +26,19 @@ if [ "$NO_GIT" = false ]; then
     fi
 fi
 
-# ── 2. Install/update dependencies ───────────────────────────────────────────
+#install/update dependencies
 echo "Checking dependencies..."
 pip3 install -q -r requirements.txt
 
-# ── 3. Sync rules to PostgreSQL ───────────────────────────────────────────────
-echo "Syncing built-in rules to PostgreSQL..."
-/usr/bin/python3 - << 'PYEOF'
-import dq_rules
-dq_rules.ensure_pg_tables()
-print("  dqp.dq_rules synced OK")
-PYEOF
-
-# ── 4. Restart dashboard ──────────────────────────────────────────────────────
+#restart the dashboard
 echo "Restarting dashboard..."
 bash "$DIR/stop_dashboard.sh"
 sleep 2
 bash "$DIR/start_dashboard.sh"
 sleep 3
 
-# ── 5. Health check ───────────────────────────────────────────────────────────
-if pgrep -f "gunicorn.*dq_dashboard_dash" > /dev/null 2>&1; then
+# health check
+if pgrep -f "gunicorn.*dashboard.app" > /dev/null 2>&1; then
     echo "Dashboard is up — http://$(hostname -I | awk '{print $1}'):8050"
 else
     echo "ERROR: Dashboard did not start. Check logs/dashboard.log"

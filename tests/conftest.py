@@ -102,7 +102,7 @@ def yesterday_entry(history_entry):
 @pytest.fixture
 def mock_engine_results():
     """
-    Simulates the R dict returned by _run_parallel in dq_pipeline_2m.
+    Simulates the R dict passed into dq_monthly_detection._build_history_entry.
     Keys: comp, acc, tim, val, rel — each structured as an engine report.
     """
     def _make_report(overall_key, overall_score, lb_score_key, lb_scores):

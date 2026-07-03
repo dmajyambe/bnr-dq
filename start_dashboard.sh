@@ -9,7 +9,7 @@ PIDFILE="$DIR/logs/dashboard.pid"
 mkdir -p "$DIR/logs"
 
 # Primary guard: check by process name to catch processes not tracked by pidfile
-if pgrep -f "gunicorn.*dq_dashboard_dash" > /dev/null 2>&1; then
+if pgrep -f "gunicorn.*dashboard.app" > /dev/null 2>&1; then
     exit 0   # already running
 fi
 
@@ -18,7 +18,7 @@ cd "$DIR"
 
 # 1 worker keeps in-memory state (history, gen_procs) consistent across requests.
 # 4 threads handle concurrent browser connections without spawning extra processes.
-nohup gunicorn dq_dashboard_dash:server \
+nohup gunicorn dashboard.app:server \
     --bind 0.0.0.0:8050 \
     --workers 1 \
     --threads 4 \
