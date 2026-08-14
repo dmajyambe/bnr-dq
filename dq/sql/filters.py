@@ -30,6 +30,6 @@ def month_filter(month: str) -> tuple[str, str]:
     y, m   = (int(p) for p in month.split("-")[:2])
     last   = monthrange(y, m)[1]
     ny, nm = (y + (m == 12), (m % 12) + 1)
-    extra_where = (f"\"date_last_modified\" >= '{y:04d}-{m:02d}-01' "
-                   f"AND \"date_last_modified\" < '{ny:04d}-{nm:02d}-01'")
+    extra_where = (f"\"date_creation\" >= '{y:04d}-{m:02d}-01' "
+                   f"AND \"date_creation\" < '{ny:04d}-{nm:02d}-01'")
     return extra_where, f"{y:04d}-{m:02d}-{last:02d}"

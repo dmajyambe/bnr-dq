@@ -1,4 +1,4 @@
-# Report/CR/issue download callbacks — moved from dq_dashboard_dash.py.
+# Report/CR/issue download callbacks
 from __future__ import annotations
 
 import csv
@@ -45,9 +45,16 @@ def _populate_dl_modal(le_book):
     if not le_book:
         raise dash.exceptions.PreventUpdate
 
+    from datetime import datetime as _datetime
+    from dashboard.data import latest_run_month
     from issues.repositories import get_issues
 
-    issues = get_issues(le_book=le_book)
+    this_month  = latest_run_month()
+    month_label = _datetime.strptime(this_month, "%Y-%m").strftime("%B %Y")
+
+    all_issues = get_issues(le_book=le_book)
+    issues     = [i for i in all_issues
+                  if (i.get("detected_at") or "").startswith(this_month)]
 
     # institution name from categories JSON
     try:
@@ -61,9 +68,9 @@ def _populate_dl_modal(le_book):
     n_issues = len(issues)
     tables   = len({i.get("table_name", "") for i in issues})
     subtitle = (
-        f"{n_issues} issue{'s' if n_issues != 1 else ''} across "
-        f"{tables} table{'s' if tables != 1 else ''} will be included in the report"
-        if issues else "No open issues recorded — report will contain schema data only."
+        f"{n_issues} new issue{'s' if n_issues != 1 else ''} across "
+        f"{tables} table{'s' if tables != 1 else ''} detected in {month_label}"
+        if issues else f"No new issues detected in {month_label} — report will contain schema data only."
     )
 
     # ── table header ─────────────────────────────────────────────────────────
@@ -213,152 +220,71 @@ def _on_rules_download(n_clicks):
     return dict(content=buf.getvalue(), filename="dq_validation_rules.csv")
 
 
-def _build_resolved_zip(le_books):
-    """Build a ZIP of the EXACT resolved-issue rows (pulled from the report xlsx
-    sheets) for the given institution(s). Returns zip bytes, or None if nothing
-    matches. Shared by the BNR and institution resolved-download flows."""
-    import zipfile, io as _io
-    import pandas as pd
-    from issues.repositories import get_issues
-    from dq.rules.completeness import COMP_RULE_META
-
-    lb_set = {str(x) for x in (le_books or [])}
-    if not lb_set:
-        return None
-    resolved = [i for i in get_issues(status="resolved") if str(i["le_book"]) in lb_set]
-    if not resolved:
-        return None
-
-    issue_reports_dir = _DIR / "issue_reports"
-    comp_rule_ids     = set(COMP_RULE_META.keys())
-    out_buf           = _io.BytesIO()
-    found_any         = False
-
-    # group by (le_book, detected month, table)
-    groups: dict[tuple, list] = {}
-    for iss in resolved:
-        month = (iss.get("detected_at") or "")[:7]
-        if month:
-            groups.setdefault((str(iss["le_book"]), month, iss["table_name"]), []).append(iss)
-
-    with zipfile.ZipFile(out_buf, "w", zipfile.ZIP_DEFLATED) as out_zf:
-        for (le_book, month, table), issues in sorted(groups.items()):
-            zip_path = issue_reports_dir / f"{le_book}_{month}.zip"
-            if not zip_path.exists():
-                continue
-            try:
-                with zipfile.ZipFile(zip_path) as src_zf:
-                    if f"{table}.xlsx" not in src_zf.namelist():
-                        continue
-                    xls = pd.ExcelFile(_io.BytesIO(src_zf.read(f"{table}.xlsx")))
-            except Exception:
-                continue
-
-            # one Excel sheet per issue: completeness → "Missing *" sheets;
-            # dimension issues → sheet whose name starts with the rule_id.
-            comp_present = any(i["rule_id"] in comp_rule_ids for i in issues)
-            dim_issues   = [i for i in issues if i["rule_id"] not in comp_rule_ids]
-            sheet_issue: dict[str, dict] = {}
-            for sheet in xls.sheet_names:
-                name = str(sheet)
-                if comp_present and name.startswith("Missing "):
-                    sheet_issue[sheet] = next(
-                        (i for i in issues if i["rule_id"] in comp_rule_ids), {})
-                else:
-                    iss = next((i for i in dim_issues if name.startswith(i["rule_id"])), None)
-                    if iss is not None:
-                        sheet_issue[sheet] = iss
-            if not sheet_issue:
-                continue
-
-            frames = []
-            for sheet, iss in sheet_issue.items():
-                try:
-                    sdf = xls.parse(sheet)
-                except Exception:
-                    continue
-                if sdf.empty:
-                    continue
-                sdf["issue_type"]   = sheet
-                sdf["resolved_at"]  = iss.get("resolved_at", "")
-                sdf["sla_deadline"] = iss.get("sla_deadline", "")
-                frames.append(sdf)
-            if not frames:
-                continue
-
-            filtered = pd.concat(frames, ignore_index=True)
-            filtered["on_time"] = filtered.apply(
-                lambda r: ("On Time" if r["resolved_at"] and r["sla_deadline"]
-                           and r["resolved_at"] <= r["sla_deadline"]
-                           else "Late" if r["resolved_at"] and r["sla_deadline"] else ""),
-                axis=1)
-            out_zf.writestr(f"{table}_{le_book}_{month}_resolved.csv",
-                            filtered.to_csv(index=False, encoding="utf-8-sig"))
-            found_any = True
-
-    return out_buf.getvalue() if found_any else None
-
-
-def _stage_resolved_download(zip_bytes: bytes, lb_label: str) -> str:
-    """Write resolved-zip bytes to a temp file and return the streaming route URL."""
-    import re as _re, uuid as _uuid, time as _time
-    tmp_dir = _DIR / "issue_reports" / ".tmp"
-    tmp_dir.mkdir(parents=True, exist_ok=True)
-    for _f in tmp_dir.glob("*.zip"):          # sweep orphaned temp downloads (>10 min)
-        try:
-            if _time.time() - _f.stat().st_mtime > 600:
-                _f.unlink()
-        except OSError:
-            pass
-    if not _re.fullmatch(r"[A-Za-z0-9_-]{1,20}", str(lb_label or "")):
-        lb_label = "issues"
-    token = _uuid.uuid4().hex
-    (tmp_dir / f"{token}.zip").write_bytes(zip_bytes)
-    return f"/download/resolved/{lb_label}/{token}"
-
 
 @app.callback(
-    Output("dl-nav", "href", allow_duplicate=True),
+    Output("dl-nav",            "href",     allow_duplicate=True),
+    Output("dl-no-report-toast", "children"),
+    Output("dl-no-report-toast", "style"),
     Input("resolved-dl-lb", "data"),
     prevent_initial_call=True,
 )
 def _resolved_dl_generate(le_book):
     if not le_book:
         raise dash.exceptions.PreventUpdate
-    zb = _build_resolved_zip([le_book])
-    if not zb:
-        raise dash.exceptions.PreventUpdate
-    return _stage_resolved_download(zb, str(le_book))
+    issue_reports_dir = _DIR / "issue_reports"
+    prebuilt = sorted(issue_reports_dir.glob(f"{le_book}_*_resolved.zip"),
+                      reverse=True) if issue_reports_dir.exists() else []
+    if prebuilt:
+        return f"/download/resolved/{le_book}", [], {"display": "none"}
+    # No pre-built file — pipeline hasn't run yet for this institution
+    from dashboard.theme import CARD, DIVIDER, FONT, MUTED, TEXT
+    toast_children = [
+        html.Div("No resolved report yet", style={
+            "fontWeight": "700", "fontSize": "13px", "color": TEXT,
+            "marginBottom": "4px",
+        }),
+        html.Div("The resolved-issues file is built automatically after the next "
+                 "resolution scan. Check back after the pipeline runs.",
+                 style={"fontSize": "12px", "color": MUTED, "lineHeight": "1.5"}),
+    ]
+    toast_style = {
+        "position": "fixed", "bottom": "24px", "right": "24px",
+        "zIndex": "999", "background": CARD,
+        "border": f"1px solid {DIVIDER}", "borderRadius": "8px",
+        "padding": "14px 18px", "boxShadow": "0 4px 20px rgba(28,28,39,0.18)",
+        "fontFamily": FONT, "maxWidth": "320px",
+        "display": "block",
+    }
+    return dash.no_update, toast_children, toast_style
 
 
 @app.callback(
     Output("dl-nav", "href", allow_duplicate=True),
-    Input({"type": "cr-tbl-dl-btn", "index": dash.ALL}, "n_clicks"),
+    Input({"type": "inst-tbl-resolved-dl-btn", "index": dash.ALL}, "n_clicks"),
     prevent_initial_call=True,
 )
-def _cr_table_dl(clicks):
+def _inst_resolved_table_dl(clicks):
     if not any(c for c in (clicks or []) if c):
         raise dash.exceptions.PreventUpdate
     tid = ctx.triggered_id
-    if not isinstance(tid, dict) or tid.get("type") != "cr-tbl-dl-btn":
+    if not isinstance(tid, dict) or tid.get("type") != "inst-tbl-resolved-dl-btn":
         raise dash.exceptions.PreventUpdate
     if not ctx.triggered[0]["value"]:
         raise dash.exceptions.PreventUpdate
-
     raw = tid["index"]
-    if "|" not in raw:
+    parts = raw.split("|")
+    if len(parts) < 2:
         raise dash.exceptions.PreventUpdate
-    le_book, table_name = raw.split("|", 1)
-
+    le_book, table_name = parts[0], parts[1]
+    month = parts[2] if len(parts) > 2 else ""
     issue_reports_dir = _DIR / "issue_reports"
-    zips = (sorted([z for z in issue_reports_dir.glob(f"{le_book}_*.zip")
-                    if not z.name.endswith("_resolved.zip")], reverse=True)
-            if issue_reports_dir.exists() else [])
-    if not zips:
+    has_resolved = any(True for _ in issue_reports_dir.glob(f"{le_book}_*_resolved.zip")) \
+        if issue_reports_dir.exists() else False
+    if not has_resolved:
         raise dash.exceptions.PreventUpdate
+    month_param = f"&month={month}" if month else ""
+    return f"/download/resolved/{le_book}/{table_name}?t={ctx.triggered[0]['value']}{month_param}"
 
-    # stream the single {table}.xlsx via the Flask route (no base64 inlining)
-    return f"/download/issue-report/{le_book}/{table_name}?t={ctx.triggered[0]['value']}"
 
 
 @app.callback(

@@ -1,11 +1,6 @@
 # Re-evaluates every active issue against fresh engine results and
 # resolves/parks/reopens each one accordingly.
-#
-# This is the one place outside dq/ that's allowed to import dq.engines
-# directly — jobs/resolution_scan.py (the cron entry point) only calls
-# run_resolution_scan() below; it never touches dq.engines itself. Keeping
-# that boundary means the orchestration layer (jobs/) stays thin and the
-# "how do I re-check an issue" logic lives in exactly one place.
+
 from __future__ import annotations
 
 import logging
@@ -24,29 +19,25 @@ log = logging.getLogger("issues.resolution")
 
 
 def fetch_active_issues() -> list[dict]:
-    """All open/penalized/pending_resolution issues, no duplicates.
-
-    (The previous version of this loop called get_issues() once per status in
-    OPEN_STATUSES, but get_issues(status="open") already expands to the full
-    open+penalized+pending_resolution bucket — so penalized/pending_resolution
-    issues were being fetched twice and double-counted in run_resolution_scan's
-    stats. get_open_issues() returns that same bucket in one call.)
-    """
+    """Return all issues that are currently open"""
     return repo.get_open_issues()
 
 
-def _record(issue: dict, invalid: int, run_id: str, stats: dict) -> None:
+def _record(issue: dict, invalid: int, run_id: str, stats: dict) -> bool:
+    """Returns True if this issue was just resolved (for ZIP pre-build collection)."""
     tid = issue["issue_id"]
     if invalid == 0:
         if issue.get("status") == "pending_resolution":   # two clean scans in a row
             repo.resolve_issue(tid, run_id)
             stats["resolved"] += 1
+            return True
         else:                                              # first clean scan → park it
             repo.mark_pending_resolution(tid)
             stats["pending"] += 1
     else:
         repo.update_issue_count(tid, invalid)              # still failing — un-parks if pending
         stats["unchanged"] += 1
+    return False
 
 
 def _collect_counts(reports: dict) -> dict[tuple, int]:
@@ -65,7 +56,7 @@ def _collect_counts(reports: dict) -> dict[tuple, int]:
             continue
         for lb, b in tdata.get("le_book_breakdown", {}).items():
             counts[(str(lb), rid)] = int(b.get("null_cells") or 0)
-    for key in ("acc", "val", "uni"):
+    for key in ("acc", "val", "uni", "tim"):
         for table, tdata in (reports.get(key) or {}).get("tables", {}).items():
             if tdata.get("status") != "evaluated":
                 continue
@@ -75,14 +66,27 @@ def _collect_counts(reports: dict) -> dict[tuple, int]:
     return counts
 
 
+def _known_rule_ids() -> frozenset[str]:
+    """All rule IDs currently registered across every dimension."""
+    from dq.rules.accuracy import ACC_RULE_META
+    from dq.rules.completeness import COMP_RULE_META
+    from dq.rules.timeliness import TIM_RULE_META
+    from dq.rules.uniqueness import UNI_RULE_META
+    from dq.rules.validity import VAL_RULE_META
+    return (frozenset(ACC_RULE_META) | frozenset(COMP_RULE_META) | frozenset(TIM_RULE_META)
+            | frozenset(UNI_RULE_META) | frozenset(VAL_RULE_META))
+
+
 def run_resolution_scan(engine, schema: str, run_id: str) -> dict:
     """Re-evaluate every active issue and update status/count accordingly."""
     import dq.engines.accuracy as acc_eng
     import dq.engines.completeness as comp_eng
+    import dq.engines.timeliness as tim_eng
     import dq.engines.uniqueness as uni_eng
     import dq.engines.validity as val_eng
 
-    stats = {"resolved": 0, "pending": 0, "unchanged": 0, "reopened": 0, "skipped": 0, "errors": 0}
+    stats = {"resolved": 0, "pending": 0, "unchanged": 0, "reopened": 0,
+             "skipped": 0, "errors": 0, "rule_removed": 0}
 
     log.info("Resolution scan run_id=%s", run_id)
 
@@ -91,6 +95,22 @@ def run_resolution_scan(engine, schema: str, run_id: str) -> dict:
         log.info("No active issues.")
         return stats
     log.info("Active issues: %d", len(issues))
+
+    known = _known_rule_ids()
+    phantom = [i for i in issues if i["rule_id"] not in known]
+    if phantom:
+        log.warning("%d issue(s) reference rule IDs not in the current registry — "
+                    "marking as rule_removed: %s",
+                    len(phantom),
+                    sorted({i["rule_id"] for i in phantom}))
+        for iss in phantom:
+            try:
+                repo.mark_rule_removed(iss["issue_id"], run_id)
+                stats["rule_removed"] += 1
+            except Exception as exc:
+                log.warning("  mark_rule_removed failed for %s: %s", iss.get("issue_id"), exc)
+                stats["errors"] += 1
+        issues = [i for i in issues if i["rule_id"] in known]
 
     # Group by reporting month (inferred from detected_at) so each group is
     # re-evaluated against the SAME date_last_modified slice detection used.
@@ -115,6 +135,8 @@ def run_resolution_scan(engine, schema: str, run_id: str) -> dict:
             except OSError:
                 pass
 
+    newly_resolved: list[dict] = []
+
     for month, m_issues in sorted(by_month.items()):
         tables   = sorted({i["table_name"] for i in m_issues})
         le_books = frozenset(str(i["le_book"]) for i in m_issues)
@@ -129,17 +151,26 @@ def run_resolution_scan(engine, schema: str, run_id: str) -> dict:
         reports = {"comp": _run(comp_eng, le_books, tables, extra_where),
                    "acc":  _run(acc_eng,  le_books, tables, extra_where),
                    "val":  _run(val_eng,  le_books, tables, extra_where),
-                   "uni":  _run(uni_eng,  le_books, tables, extra_where)}
+                   "uni":  _run(uni_eng,  le_books, tables, extra_where),
+                   "tim":  _run(tim_eng,  le_books, tables, extra_where)}
         counts = _collect_counts(reports)
 
         # re-record this month's issues (default 0 = no current failure → resolve)
         for iss in m_issues:
             try:
                 cnt = counts.get((str(iss["le_book"]), iss["rule_id"]), 0)
-                _record(iss, cnt, run_id, stats)
+                if _record(iss, cnt, run_id, stats):
+                    newly_resolved.append(iss)
             except Exception as exc:
                 log.warning("  record failed for %s: %s", iss.get("issue_id"), exc)
                 stats["errors"] += 1
+
+    if newly_resolved:
+        try:
+            from jobs.exports import write_resolved_zips
+            write_resolved_zips(newly_resolved)
+        except Exception as exc:
+            log.warning("write_resolved_zips failed: %s", exc)
 
     log.info("DONE %s", stats)
     return stats

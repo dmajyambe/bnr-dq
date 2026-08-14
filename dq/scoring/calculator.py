@@ -9,10 +9,11 @@ _SCORE_KEYS = {
     "acc":  ("accuracy",     "overall_accuracy_score",     "accuracy_score"),
     "tim":  ("timeliness",   "overall_timeliness_score",   "timeliness_score"),
     "val":  ("validity",     "overall_validity_score",     "validity_score"),
+    "uni":  ("uniqueness",   "overall_uniqueness_score",   "uniqueness_score"),
     "rel":  ("_rel",         "overall_ri_score",           "ri_score"),
 }
 
-DIMS = ["completeness", "accuracy", "timeliness", "validity"]
+DIMS = ["completeness", "accuracy", "timeliness", "validity", "uniqueness"]
 
 
 def merge_rel(scores: dict) -> dict:

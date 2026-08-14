@@ -12,11 +12,29 @@ from __future__ import annotations
 import dash
 from dash import ALL, Input, Output, State, ctx, html
 
+import json as _json
+
 from auth.users import is_admin
 from dashboard.app import app
 from dashboard.components import _fmt_int
+from dashboard.data import CATEGORIES_FILE
 from dashboard.pages.remediation import _build_cr_list
 from dashboard.theme import BRAND, CARD, MUTED, TABLE_NAMES_PRETTY, C_GREEN, C_RED
+
+
+def _allowed_lebooks(cat: str) -> set[str]:
+    """Return the set of le_books belonging to the given category code."""
+    try:
+        cats = _json.loads(CATEGORIES_FILE.read_text())
+    except Exception:
+        return set()
+    _sacco = {"SACCO", "OSACCO"}
+    return {
+        str(lb) for lb, info in cats.items()
+        if (info.get("category_type") or "").upper() in (
+            _sacco if cat == "SACCO" else {cat.upper()}
+        )
+    }
 
 
 @app.callback(
@@ -35,21 +53,27 @@ def _toggle_cr_form(n_clicks, current_style):
     Output("cr-issue-checklist", "options"),
     Output("cr-issue-checklist", "value"),
     Output("cr-issue-hint",      "children"),
-    Output("cr-table-dl-area",   "children"),
     Input("cr-inst-filter", "value"),
     prevent_initial_call=True,
 )
 def _update_issue_checklist(le_book):
     """Populate the table selector when the specialist picks an institution."""
-    _empty = ([], [], "Select an institution above to see its tables with open issues.", html.Div())
+    _empty = ([], [], "Select an institution above to see its tables with open issues.")
     if not le_book:
         return _empty
+    from datetime import datetime
+    from dashboard.data import latest_run_month
     from issues.repositories import get_open_issues
     issues = get_open_issues(le_book)
     if not issues:
-        return [], [], "No open issues found for this institution.", html.Div()
+        return [], [], "No open issues found for this institution."
 
-    _BO = {"new": 0, "attention": 1, "urgent": 2, "critical": 3, "overdue": 4}
+    this_month  = latest_run_month()
+    month_label = datetime.strptime(this_month, "%Y-%m").strftime("%B %Y")
+    issues = [iss for iss in issues if (iss.get("detected_at") or "").startswith(this_month)]
+    if not issues:
+        return [], [], f"No new issues detected in {month_label} for this institution."
+
     by_table: dict[str, list] = {}
     for iss in issues:
         by_table.setdefault(iss["table_name"], []).append(iss)
@@ -59,27 +83,11 @@ def _update_issue_checklist(le_book):
         tbl_issues = by_table[tbl]
         tbl_label  = TABLE_NAMES_PRETTY.get(tbl, tbl.replace("_", " ").title())
         n_issues   = len(tbl_issues)
-        worst_band = max(
-            (iss.get("urgency_band") or "new" for iss in tbl_issues),
-            key=lambda b: _BO.get(b, 0),
-        )
-        options.append({"label": f"{tbl_label}  —  {n_issues} issue(s)  —  {worst_band.upper()}", "value": tbl})
+        options.append({"label": f"{tbl_label}  —  {n_issues} issue(s)  —  {month_label}", "value": tbl})
 
-    hint = f"{len(by_table)} table(s) with open issues — select those to include in this Change Request."
+    hint = f"{len(by_table)} table(s) with new issues in {month_label} — select those to include in this Data Correction Request."
 
-    dl_buttons = html.Div([
-        html.Div(
-            "⬇ " + TABLE_NAMES_PRETTY.get(tbl, tbl),
-            id={"type": "cr-tbl-dl-btn", "index": f"{le_book}|{tbl}"},
-            n_clicks=0,
-            style={"display": "inline-block", "background": BRAND, "color": CARD,
-                   "fontSize": "10px", "fontWeight": "700", "padding": "3px 10px",
-                   "borderRadius": "4px", "cursor": "pointer", "userSelect": "none"},
-        )
-        for tbl in sorted(by_table.keys())
-    ], style={"display": "flex", "gap": "6px", "flexWrap": "wrap"})
-
-    return options, [], hint, dl_buttons
+    return options, [], hint
 
 
 @app.callback(
@@ -155,7 +163,7 @@ def _create_cr(n_clicks, tables, title, description,
     if not le_book:
         return _err("Select an institution first.")
     if not tables:
-        return _err("Select at least one table to include in this change request.")
+        return _err("Select at least one table to include in this Data Correction Request.")
     if not (title or "").strip():
         return _err("A title is required.")
 
@@ -192,7 +200,7 @@ def _create_cr(n_clicks, tables, title, description,
             failing_rows     = total_fail,
         )
     except Exception as exc:
-        return _err(f"Could not save change request: {exc}")
+        return _err(f"Could not save Data Correction Request: {exc}")
 
     return (
         html.Span([
@@ -256,11 +264,15 @@ def _cr_action(clicks, review_notes, auth_data, version):
     Input("cr-status-filter", "value"),
     Input("notif-poll",       "n_intervals"),
     State("auth-store",       "data"),
+    State("cr-cat-filter",    "data"),
 )
-def _refresh_cr_list(version, status_filter, _poll, auth_data):
+def _refresh_cr_list(version, status_filter, _poll, auth_data, cat_filter):
     import remediation.change_requests as cr_mod
     role = (auth_data or {}).get("role", "viewer")
     crs  = cr_mod.get_crs(status=status_filter if status_filter != "all" else None)
+    if cat_filter:
+        allowed = _allowed_lebooks(cat_filter)
+        crs = [c for c in crs if c["le_book"] in allowed]
     return _build_cr_list(crs, role=role)
 
 
@@ -268,11 +280,20 @@ def _refresh_cr_list(version, status_filter, _poll, auth_data):
     Output("cr-summary-bar", "children"),
     Input("cr-version",  "data"),
     Input("notif-poll",  "n_intervals"),
+    State("cr-cat-filter", "data"),
     prevent_initial_call=False,
 )
-def _refresh_cr_stats(version, _poll):
+def _refresh_cr_stats(version, _poll, cat_filter):
     import remediation.change_requests as cr_mod
-    stats = cr_mod.get_stats()
+    if cat_filter:
+        allowed = _allowed_lebooks(cat_filter)
+        all_crs = cr_mod.get_crs()
+        stats: dict = {}
+        for c in all_crs:
+            if c["le_book"] in allowed:
+                stats[c["status"]] = stats.get(c["status"], 0) + 1
+    else:
+        stats = cr_mod.get_stats()
     chips = []
     for key in ("open", "in_progress", "submitted"):   # minimalist: active pipeline only
         lbl = cr_mod.STATUS_LABELS.get(key, key.title())

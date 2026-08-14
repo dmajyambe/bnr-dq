@@ -224,16 +224,21 @@ def _val_rule_sql(rule_id: str, existing: set) -> tuple[str, str] | None:
             'AND "application_date"::DATE <= "business_date"::DATE THEN 1 ELSE 0 END)',
         )
 
+    if rule_id == "VAL-048":            # national ID: exactly 16 digits, last digit 7=F / 8=M
+        if not has("national_id_number", "customer_gender"):
+            return None
+        return (
+            'SUM(CASE WHEN "national_id_number" IS NOT NULL AND TRIM("national_id_number"::TEXT) != \'\' '
+            'AND "customer_gender" IN (\'M\', \'F\') THEN 1 ELSE 0 END)',
+            'SUM(CASE WHEN "national_id_number" IS NOT NULL AND TRIM("national_id_number"::TEXT) != \'\' '
+            'AND "customer_gender" IN (\'M\', \'F\') '
+            "AND TRIM(\"national_id_number\"::TEXT) ~ '^[0-9]{16}$' "
+            'AND (("customer_gender" = \'F\' AND SUBSTRING(TRIM("national_id_number"::TEXT) FROM 6 FOR 1) = \'7\') '
+            ' OR  ("customer_gender" = \'M\' AND SUBSTRING(TRIM("national_id_number"::TEXT) FROM 6 FOR 1) = \'8\')) THEN 1 ELSE 0 END)',
+        )
+
     return None
-
-
-# ============================================================================
-# SQL ENGINE — pipeline contract (memory-safe, no DataFrames)
-# Emits the rule-dimension report shape consumed downstream:
-#   tables[t].le_book_breakdown[lb] = {row_count, validity_score, rules:{rid:{invalid,...}}}
-#   executive_summary.overall_validity_score
-# (see issues/tracker.py:_process_rule_dimension and jobs/monthly_detection.py)
-# ============================================================================
+#evaluate_from_sql() is the main entry point for the validity engine. It runs all rules in VAL_TABLE_RULES via run_rule_dimension_sql(), which calls _val_rule_sql() to get the SQL for each rule.
 def evaluate_from_sql(engine, schema: str, valid_le_books: frozenset,
                       window_days: int, watermarks: dict, output_path: str,
                       row_limit: int = 0,

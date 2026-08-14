@@ -8,19 +8,56 @@ from datetime import date
 
 from issues import repositories as repo
 from issues.state_machine import OPEN_SQL, urgency_band
-from storage.sqlite.connection import get_connection
+from storage.postgres.app_db import get_connection
+
+
+def get_table_dimension_impact(
+    allowed_le_books: set[str] | None = None,
+) -> dict[str, dict[str, dict]]:
+    """Return {table: {dimension: {failing_rows, inst_count}}} for open issues.
+
+    allowed_le_books — when supplied, only count issues for those institutions.
+    """
+    from issues.state_machine import OPEN_SQL
+    repo.ensure_tables()
+    con = get_connection()
+    try:
+        rows = con.execute(
+            f"SELECT table_name, dimension, le_book, "
+            f"SUM(failing_rows) AS total_rows "
+            f"FROM dq_open_issues WHERE status IN {OPEN_SQL} "
+            f"GROUP BY table_name, dimension, le_book"
+        ).fetchall()
+    finally:
+        con.close()
+
+    result: dict[str, dict[str, dict]] = {}
+    for row in rows:
+        lb = row["le_book"]
+        if allowed_le_books is not None and str(lb) not in allowed_le_books:
+            continue
+        tbl = row["table_name"]
+        dim = row["dimension"]
+        cell = result.setdefault(tbl, {}).setdefault(dim, {"failing_rows": 0, "inst_count": 0})
+        cell["failing_rows"] += int(row["total_rows"] or 0)
+        cell["inst_count"]   += 1
+
+    return result
 
 
 def get_institution_issue_summary() -> dict[str, dict]:
     """
     Return {le_book: {worst_urgency, total, new, attention, urgent, critical, overdue}}
-    for all institutions with open issues.
+    for all institutions with open issues that are evidenced in their latest report.
     """
+    from issues.evidence import get_all_evidence
+    evidence = get_all_evidence()  # {le_book: frozenset of rule_ids with report evidence}
+
     repo.ensure_tables()
     con = get_connection()
     try:
         rows = con.execute(
-            f"SELECT le_book, detected_at, sla_deadline FROM dq_open_issues WHERE status IN {OPEN_SQL}"
+            f"SELECT le_book, rule_id, detected_at, sla_deadline FROM dq_open_issues WHERE status IN {OPEN_SQL}"
         ).fetchall()
     finally:
         con.close()
@@ -29,7 +66,14 @@ def get_institution_issue_summary() -> dict[str, dict]:
     _order = ["new", "attention", "urgent", "critical", "overdue"]
 
     for row in rows:
-        lb   = row["le_book"]
+        lb  = row["le_book"]
+        rid = row["rule_id"]
+
+        # Only count issues that appear in the institution's latest report
+        lb_evidence = evidence.get(lb)
+        if lb_evidence is None or rid not in lb_evidence:
+            continue
+
         band = urgency_band(row["detected_at"], row["sla_deadline"])
 
         if lb not in summary:
@@ -87,12 +131,21 @@ def get_issues_by_table(
     except Exception:
         _all_meta = {}
 
+    from issues.evidence import get_evidenced_rule_ids, get_all_evidence
+    if le_book:
+        _evidence: dict[str, frozenset[str]] = {le_book: get_evidenced_rule_ids(le_book)}
+    else:
+        _evidence = get_all_evidence()
+
     _band_order = ["new", "attention", "urgent", "critical", "overdue"]
 
     table_rule: dict[str, dict[str, list]] = {}
     for row in rows:
         tbl  = row["table_name"]
         rid  = row["rule_id"]
+        lb_ev = _evidence.get(row["le_book"])
+        if lb_ev is None or rid not in lb_ev:
+            continue
         band = urgency_band(row["detected_at"], row["sla_deadline"])
         try:
             days_left = (date.fromisoformat(row["sla_deadline"]) - today).days
@@ -104,17 +157,19 @@ def get_issues_by_table(
                  else _all_meta.get(rid, {}).get("name", rid))
 
         inst_rec = {
-            "le_book":          row["le_book"],
-            "institution_name": (row["institution_name"] or row["le_book"]).title(),
-            "failing_rows":     row["failing_rows"],
-            "urgency_band":     band,
-            "detected_at":      row["detected_at"],
-            "sla_deadline":     row["sla_deadline"],
-            "days_left":        days_left,
-            "issue_id":         row["issue_id"],
-            "recurrence_count": int(row["recurrence_count"] or 0),
-            "rule_name":        rname,
-            "pending":          row["status"] == "pending_resolution",
+            "le_book":                row["le_book"],
+            "institution_name":       (row["institution_name"] or row["le_book"]).title(),
+            "failing_rows":           row["failing_rows"],
+            "last_failing_rows":      row["last_failing_rows"],
+            "original_failing_rows":  row.get("original_failing_rows"),
+            "urgency_band":           band,
+            "detected_at":            row["detected_at"],
+            "sla_deadline":           row["sla_deadline"],
+            "days_left":              days_left,
+            "issue_id":               row["issue_id"],
+            "recurrence_count":       int(row["recurrence_count"] or 0),
+            "rule_name":              rname,
+            "pending":                row["status"] == "pending_resolution",
         }
         table_rule.setdefault(tbl, {}).setdefault(rid, []).append(inst_rec)
 

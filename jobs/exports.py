@@ -24,11 +24,51 @@ def write_monthly_zips(engine, schema: str, tables: list[str],
         log.info("ZIP export date filter (derived from month=%s): %s", month, extra_where)
 
     ISSUE_REPORTS_DIR.mkdir(exist_ok=True)
-    for old in ISSUE_REPORTS_DIR.glob(f"*_{month}.zip"):
-        old.unlink()
-        log.info("Removed stale ZIP: %s", old.name)
 
-    log.info("Streaming per-institution failing-row ZIPs …")
-    for table in tables:
-        write_institution_zips(engine, schema, table, valid_le_books, categories,
-                               month, limit, extra_where=extra_where)
+    # Only back up ZIPs for institutions we are about to rebuild — scoping by
+    # valid_le_books prevents a filtered call (e.g. two institutions) from
+    # backing up and then deleting all other institutions' ZIPs.
+    stale = [
+        ISSUE_REPORTS_DIR / f"{lb}_{month}.zip"
+        for lb in sorted(valid_le_books)
+        if (ISSUE_REPORTS_DIR / f"{lb}_{month}.zip").exists()
+    ]
+    for old in stale:
+        old.rename(old.with_suffix(".zip.bak"))
+        log.info("Backed up stale ZIP: %s -> %s", old.name, old.with_suffix(".zip.bak").name)
+
+    backed_up = {old.with_suffix(".zip.bak") for old in stale}
+
+    try:
+        log.info("Streaming per-institution failing-row ZIPs …")
+        for table in tables:
+            write_institution_zips(engine, schema, table, valid_le_books, categories,
+                                   month, limit, extra_where=extra_where)
+    except Exception:
+        # Restore only the backups we created
+        for bak in backed_up:
+            if bak.exists():
+                bak.rename(bak.with_suffix("").with_suffix(".zip"))
+                log.warning("Restored backup ZIP: %s", bak.name)
+        raise
+
+    # New ZIPs written successfully — remove only our backups
+    for bak in backed_up:
+        if bak.exists():
+            bak.unlink()
+            log.info("Removed backup ZIP: %s", bak.name)
+
+
+def write_resolved_zips(resolved_issues: list[dict]) -> None:
+    """Group newly-resolved issues by (le_book, month) and write pre-built resolved ZIPs."""
+    from collections import defaultdict
+    from dq.exports.failing_rows import write_resolved_institution_zip
+
+    groups: dict[tuple, list[dict]] = defaultdict(list)
+    for iss in resolved_issues:
+        month = (iss.get("detected_at") or "")[:7]
+        if month:
+            groups[(str(iss["le_book"]), month)].append(iss)
+
+    for (le_book, month), issues in sorted(groups.items()):
+        write_resolved_institution_zip(le_book, month, issues)

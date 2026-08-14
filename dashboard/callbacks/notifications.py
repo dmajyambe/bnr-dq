@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import dash
-from dash import Input, Output, State, ctx, html
+from dash import ALL, Input, Output, State, ctx, html
 
 from dashboard.app import app
 
@@ -66,3 +66,35 @@ def _mark_all_read(n, auth_data):
     if user_id:
         mark_all_read(user_id)
     return True  # keep panel open, re-render with cleared notifications
+
+
+@app.callback(
+    Output("active-page",     "data", allow_duplicate=True),
+    Output("inst-notif-show", "data", allow_duplicate=True),
+    Input({"type": "notif-row", "index": ALL}, "n_clicks"),
+    State("auth-store", "data"),
+    prevent_initial_call=True,
+)
+def _notif_row_click(clicks, auth_data):
+    if not any(c for c in (clicks or []) if c):
+        raise dash.exceptions.PreventUpdate
+    tid = ctx.triggered_id
+    if not isinstance(tid, dict) or tid.get("type") != "notif-row":
+        raise dash.exceptions.PreventUpdate
+    if not ctx.triggered[0]["value"]:
+        raise dash.exceptions.PreventUpdate
+
+    raw      = tid["index"]          # "{notif_id}|{cr_id}"
+    parts    = raw.split("|", 1)
+    notif_id = parts[0]
+
+    # Mark this notification read
+    user_id = (auth_data or {}).get("user_id", "")
+    if user_id and notif_id:
+        try:
+            from remediation.notifications import mark_read
+            mark_read(notif_id)
+        except Exception:
+            pass
+
+    return "inst_remediation", False

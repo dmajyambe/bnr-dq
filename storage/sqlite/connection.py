@@ -8,7 +8,7 @@ from pathlib import Path
 DB_PATH = Path(__file__).resolve().parents[2] / "dq_rules.db"
 
 def get_connection(db_path: Path = DB_PATH) -> sqlite3.Connection:
-    con = sqlite3.connect(db_path)
+    con = sqlite3.connect(db_path, timeout=30)
     con.row_factory = sqlite3.Row
     con.execute("PRAGMA journal_mode=WAL")
     return con

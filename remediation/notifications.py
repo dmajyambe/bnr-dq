@@ -17,7 +17,7 @@ import logging
 import secrets
 from datetime import datetime
 
-from storage.sqlite.connection import get_connection
+from storage.postgres.app_db import get_connection
 
 log = logging.getLogger("remediation.notifications")
 
@@ -31,23 +31,8 @@ NOTIF_ICONS = {
 
 
 def ensure_table() -> None:
-    con = get_connection()
-    try:
-        con.execute("""
-            CREATE TABLE IF NOT EXISTS dq_notifications (
-                notif_id   TEXT PRIMARY KEY,
-                user_id    TEXT NOT NULL,
-                type       TEXT NOT NULL,
-                message    TEXT NOT NULL,
-                cr_id      TEXT,
-                le_book    TEXT,
-                is_read    INTEGER NOT NULL DEFAULT 0,
-                created_at TEXT NOT NULL
-            )
-        """)
-        con.commit()
-    finally:
-        con.close()
+    from storage.postgres.init_tables import init_all
+    init_all()
 
 
 # ── core CRUD ──────────────────────────────────────────────────────────────────
@@ -91,9 +76,9 @@ def get_unread_count(user_id: str) -> int:
     con = get_connection()
     try:
         return con.execute(
-            "SELECT COUNT(*) FROM dq_notifications WHERE user_id=? AND is_read=0",
+            "SELECT COUNT(*) AS n FROM dq_notifications WHERE user_id=? AND is_read=0",
             (user_id,)
-        ).fetchone()[0]
+        ).fetchone()["n"]
     finally:
         con.close()
 
@@ -162,7 +147,7 @@ def send_sla_warnings() -> int:
     con = get_connection()
     try:
         warned_today = {
-            r[0] for r in con.execute("""
+            r["le_book"] for r in con.execute("""
                 SELECT DISTINCT le_book FROM dq_notifications
                 WHERE type='sla_warning' AND DATE(created_at)=?
             """, (today.isoformat(),)).fetchall()
@@ -180,7 +165,7 @@ def send_sla_warnings() -> int:
         if low <= iss.get("sla_deadline", "") <= high:
             inst = (iss.get("institution_name") or lb).title()
             msg  = (f"{inst}: you have open DQ issues with SLA deadlines in 7 days. "
-                    f"Log in to the portal to review and submit your Change Requests.")
+                    f"Log in to the portal to review and submit your Data Correction Requests.")
             total += notify_le_book(lb, "sla_warning", msg)
             seen.add(lb)
 

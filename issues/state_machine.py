@@ -20,7 +20,7 @@ URGENCY_COLORS = {
 NOTIFY_INTERVAL = {"new": None, "attention": 7, "urgent": 3, "critical": 1, "overdue": 1}
 
 # Statuses that count as an unresolved ("open") issue in every tally and UI view.
-OPEN_STATUSES = ("open", "penalized", "pending_resolution")
+OPEN_STATUSES = ("open", "pending_resolution")
 OPEN_SQL      = "('" + "','".join(OPEN_STATUSES) + "')"
 
 

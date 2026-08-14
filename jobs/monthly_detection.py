@@ -45,8 +45,9 @@ def run_monthly_detection(engine, schema: str, run_date: str,
     import dq.engines.completeness as comp_eng
     import dq.engines.uniqueness as uni_eng
     import dq.engines.validity as val_eng
+    import dq.engines.timeliness as time_eng
     from dq.reports.history import build_history_entry
-    from issues.tracker import detect_and_update_issues #, COMP_TABLE_RULE  # noqa: F401 (re-export parity)
+    from issues.tracker import detect_and_update_issues
     from issues import repositories as issue_repo
     from jobs.exports import write_monthly_zips
     from storage.files.history_store import append_history_entry
@@ -86,9 +87,13 @@ def run_monthly_detection(engine, schema: str, run_date: str,
     uni_report  = uni_eng.evaluate_from_sql(engine, schema, valid_le_books, FULL_SCAN, wm,
                                             str(SCRIPT_DIR / "dq_uniqueness_report.json"),
                                             row_limit=limit, tables=tables, extra_where=extra_where)
-    #will add other dimensions here in the future
+    log.info("Running timeliness …")
+    time_report = time_eng.evaluate_from_sql(engine, schema, valid_le_books, FULL_SCAN, wm,
+                                             str(SCRIPT_DIR / "dq_timeliness_report.json"),
+                                             row_limit=limit, tables=tables, extra_where=extra_where)
 
-    R = {"comp": comp_report, "acc": acc_report, "val": val_report, "uni": uni_report}
+    R = {"comp": comp_report, "acc": acc_report, "val": val_report,
+         "uni": uni_report, "tim": time_report}
 
     log.info("Writing issues to tracker …")
     detect_and_update_issues(R, categories, run_date)
@@ -134,7 +139,7 @@ if __name__ == "__main__":
                         help="PostgreSQL schema (default: dqp)") 
     parser.add_argument("--date", default=datetime.now().strftime("%Y-%m-%d"),
                         metavar="YYYY-MM-DD",
-                        help="Run date used as detected_at (default: today)")
+                        help="Run date for the detection pipeline (default: today)")
     parser.add_argument("--tables", nargs="+", default=None,
                         metavar="TABLE",
                         help="Restrict to these tables only (testing)") 
@@ -144,11 +149,11 @@ if __name__ == "__main__":
                         help="Restrict to these institution codes only (testing)")
     parser.add_argument("--month", default=None, metavar="YYYY-MM",
                         help="Scope detection to one reporting month by "
-                             "date_last_modified (e.g. 2026-05). Sets detected_at "
+                             "date_creation (e.g. 2026-05). Sets the run date "
                              "to the month-end date.")
     args = parser.parse_args() 
 
-    # --month: restrict data to that calendar month (by date_last_modified) and
+    # --month: restrict data to that calendar month (by date_creation) and
     # date the run at month-end so issues are tagged to the reporting period.
     extra_where = ""
     if args.month:

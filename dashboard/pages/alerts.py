@@ -9,7 +9,7 @@ from dashboard.components import _dim_pill, _score_color
 from dashboard.data import CATEGORIES_FILE, WATERMARK_FILE, _inst_scores, _today_entry
 from dashboard.theme import (
     BG, BRAND, CARD, CAT_LABELS, C_GREEN, C_RED, DIMS, DIVIDER, MUTED,
-    TABLE_NAMES_PRETTY, TEXT, _URGENCY_COLORS,
+    RESOLVED_GREEN, RESOLVED_GREEN_BG, TABLE_NAMES_PRETTY, TEXT, _URGENCY_COLORS,
 )
 
 
@@ -24,18 +24,23 @@ def _issues_to_xlsx(issues: list) -> bytes:
     ws = wb.active
     ws.title = "Resolved Issues"
 
-    hdr_fill  = PatternFill("solid", fgColor="753918")
-    hdr_font  = Font(color="FFFFFF", bold=True, size=10)
-    hdr_align = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    hdr_fill       = PatternFill("solid", fgColor="753918")
+    hdr_fill_green = PatternFill("solid", fgColor="16A34A")
+    hdr_font       = Font(color="FFFFFF", bold=True, size=10)
+    hdr_align      = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    res_font       = Font(color="15803D", bold=True, size=10)
+    res_fill       = PatternFill("solid", fgColor="DCFCE7")
+    res_fill_alt   = PatternFill("solid", fgColor="BBF7D0")
 
     headers    = ["Institution", "Table", "Rule ID", "Dimension",
-                  "Failing Rows", "Detected", "Resolved", "Days to Fix"]
-    col_widths = [30, 28, 12, 14, 12, 12, 12, 12]
+                  "Failing Rows", "Detected", "SLA Deadline", "Resolved", "Days to Fix", "On Time"]
+    col_widths = [30, 28, 12, 14, 12, 12, 14, 12, 12, 10]
+    resolved_ci = headers.index("Resolved") + 1
 
     for ci, (h, w) in enumerate(zip(headers, col_widths), start=1):
         cell = ws.cell(row=1, column=ci, value=h)
         cell.font      = hdr_font
-        cell.fill      = hdr_fill
+        cell.fill      = hdr_fill_green if ci == resolved_ci else hdr_fill
         cell.alignment = hdr_align
         ws.column_dimensions[cell.column_letter].width = w
     ws.row_dimensions[1].height = 22
@@ -48,20 +53,30 @@ def _issues_to_xlsx(issues: list) -> bytes:
         except Exception:
             days_str = ""
 
+        resolved_at  = iss.get("resolved_at", "")
+        sla_deadline = iss.get("sla_deadline", "")
+        on_time = ("On Time" if resolved_at and sla_deadline and resolved_at <= sla_deadline
+                   else "Late" if resolved_at and sla_deadline else "")
         ws.append([
             (iss.get("institution_name") or iss["le_book"]).title(),
             iss.get("table_name", ""),
             iss.get("rule_id", ""),
             iss.get("dimension", "").title(),
-            iss.get("failing_rows", ""),
+            iss.get("last_failing_rows") or iss.get("failing_rows", ""),
             iss.get("detected_at", ""),
-            iss.get("resolved_at", ""),
+            sla_deadline,
+            resolved_at,
             days_str,
+            on_time,
         ])
-        if ri % 2 == 0:
-            fill = PatternFill("solid", fgColor="F2EDE9")
-            for ci in range(1, len(headers) + 1):
-                ws.cell(row=ri, column=ci).fill = fill
+        row_fill = PatternFill("solid", fgColor="F2EDE9") if ri % 2 == 0 else None
+        for ci in range(1, len(headers) + 1):
+            cell = ws.cell(row=ri, column=ci)
+            if ci == resolved_ci:
+                cell.fill = res_fill_alt if ri % 2 == 0 else res_fill
+                cell.font = res_font
+            elif row_fill:
+                cell.fill = row_fill
 
     buf = io.BytesIO()
     wb.save(buf)
@@ -150,6 +165,26 @@ def _freshness_section() -> html.Div:
     ])
 
 
+def _row_delta(current: int, previous: int | None, pending: bool = False,
+               style: dict | None = None) -> html.Div:
+    """Render failing-row count with a struck-through previous value when progress exists."""
+    col = MUTED if pending else C_RED
+    if previous and previous != current:
+        return html.Div([
+            html.Span(f"{previous:,}", style={"textDecoration": "line-through",
+                                              "color": MUTED, "fontSize": "10px",
+                                              "marginRight": "3px"}),
+            html.Span(f"{current:,}", style={"fontWeight": "700", "color": col,
+                                             "fontSize": "12px"}),
+        ], style={"display": "flex", "alignItems": "center",
+                  "justifyContent": "flex-end", **(style or {})})
+    return html.Div(
+        html.Span(f"{current:,}", style={"fontWeight": "700", "color": col,
+                                         "fontSize": "12px"}),
+        style={"textAlign": "right", **(style or {})},
+    )
+
+
 def _urgency_dot(band: str) -> html.Span:
     col = _URGENCY_COLORS.get(band, MUTED)
     label = {"new": "New", "attention": "Attention", "urgent": "Urgent",
@@ -221,15 +256,16 @@ def _build_table_issue_sections(issues_by_table: dict, status: str,
                         "any_pending":   False,
                     }
                 inst_map[lb]["rules"].append({
-                    "rule_id":        rule["rule_id"],
-                    "rule_name":      rule["rule_name"],
-                    "dimension":      rule["dimension"],
-                    "failing_rows":   inst["failing_rows"],
-                    "urgency_band":   inst["urgency_band"],
-                    "days_left":      inst["days_left"],
-                    "issue_id":       inst.get("issue_id", ""),
+                    "rule_id":          rule["rule_id"],
+                    "rule_name":        rule["rule_name"],
+                    "dimension":        rule["dimension"],
+                    "failing_rows":     inst["failing_rows"],
+                    "last_failing_rows": inst.get("last_failing_rows"),
+                    "urgency_band":     inst["urgency_band"],
+                    "days_left":        inst["days_left"],
+                    "issue_id":         inst.get("issue_id", ""),
                     "recurrence_count": inst.get("recurrence_count", 0),
-                    "pending":        inst.get("pending", False),
+                    "pending":          inst.get("pending", False),
                 })
                 inst_map[lb]["total_rows"]   += inst["failing_rows"]
                 inst_map[lb]["worst_urgency"] = _worst(
@@ -435,11 +471,10 @@ def _build_table_issue_sections(issues_by_table: dict, status: str,
                               "display": "flex", "alignItems": "center"}),
                     html.Div(_dim_pill(r["dimension"]),
                              style={"width": "105px", "padding": "4px 12px"}),
-                    html.Span(f"{r['failing_rows']:,}", style={
-                        "width": "70px", "fontSize": "12px", "fontWeight": "700",
-                        "color": MUTED if r.get("pending") else C_RED,
-                        "textAlign": "right", "padding": "6px 12px",
-                    }),
+                    _row_delta(r["failing_rows"], r.get("last_failing_rows"),
+                               pending=r.get("pending", False),
+                               style={"width": "70px", "textAlign": "right",
+                                      "padding": "6px 12px"}),
                     html.Span(dls, style={
                         "width": "90px", "fontSize": "11px", "fontWeight": "700",
                         "color": dlc, "textAlign": "right", "padding": "6px 12px",
@@ -698,7 +733,7 @@ def _build_resolved_by_institution(issues: list, cat_filter: str = "") -> html.D
                 html.Span(iss["dimension"].title(),
                           style={"width": "110px", "fontSize": "11px",
                                  "color": MUTED, "padding": "6px 10px"}),
-                html.Span(f"{iss.get('failing_rows', 0):,}",
+                html.Span(f"{(iss.get('last_failing_rows') or iss.get('failing_rows', 0)):,}",
                           style={"width": "100px", "fontSize": "11px", "color": MUTED,
                                  "textAlign": "right", "padding": "6px 10px"}),
                 html.Span(iss.get("detected_at", "—"),
@@ -792,11 +827,17 @@ def _build_issue_rows(issues: list, status: str) -> html.Div:
     rows = []
     for i, iss in enumerate(issues):
         band  = iss.get("urgency_band", "new")
-        clr   = _URGENCY_COLORS.get(band, MUTED)
         lb    = iss["le_book"]
         name  = (iss.get("institution_name") or lb).title()
-        bg    = "#C9956C" if i % 2 == 0 else BG
 
+        if status == "resolved":
+            row_clr = RESOLVED_GREEN
+            bg      = "rgba(22,163,74,0.15)" if i % 2 == 0 else RESOLVED_GREEN_BG
+        else:
+            row_clr = _URGENCY_COLORS.get(band, MUTED)
+            bg      = "#C9956C" if i % 2 == 0 else BG
+
+        clr = row_clr
         inst_cell = html.Div([
             html.Span("●", style={"color": clr, "fontSize": "9px", "marginRight": "5px"}),
             html.Span(name, style={"fontSize": "12px", "color": TEXT}),

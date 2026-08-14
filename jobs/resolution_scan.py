@@ -1,6 +1,4 @@
-# Resolution job — orchestration only. Calls into issues.resolution for the
-# actual re-evaluation logic; does not import dq.engines itself (see
-# issues/resolution.py's module docstring for why that boundary matters).
+#resolution job
 from __future__ import annotations
 
 import argparse

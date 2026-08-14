@@ -1,4 +1,4 @@
-# Remediation tab (Change Request workflow) — moved from dq_dashboard_dash.py.
+# Remediation tab (Data Correction Request workflow) — moved from dq_dashboard_dash.py.
 from __future__ import annotations
 
 import json
@@ -19,8 +19,8 @@ def _build_cr_list(crs: list[dict], role: str = "bnr_admin") -> html.Div:
 
     if not crs:
         return _empty_state(
-            "No change requests",
-            "Nothing matches this filter. Change Requests assigned to you will appear here.",
+            "No Data Correction Requests",
+            "Nothing matches this filter. Data Correction Requests assigned to you will appear here.",
             icon="🗂")
 
     H = {"fontSize": "11px", "fontWeight": "900", "color": MUTED,
@@ -179,17 +179,19 @@ def _build_cr_list(crs: list[dict], role: str = "bnr_admin") -> html.Div:
                        "wordBreak": "break-word"},
             )
 
+        _C = {"paddingTop": "10px", "paddingBottom": "10px", "flexShrink": "0"}
         rows.append(html.Div([
             html.Span(
                 cr["cr_id"],
-                style={"width": "148px", "fontSize": "11px", "fontWeight": "700",
-                       "color": BRAND, "padding": "7px 10px", "flexShrink": "0"},
+                style={**_C, "width": "148px", "fontSize": "11px", "fontWeight": "700",
+                       "color": BRAND, "paddingLeft": "10px", "paddingRight": "10px"},
             ),
             html.Span(
                 (cr.get("institution_name") or cr["le_book"]).title(),
-                style={"flex": "1", "fontSize": "12px", "color": TEXT,
-                       "padding": "7px 10px", "overflow": "hidden",
-                       "textOverflow": "ellipsis", "whiteSpace": "nowrap"},
+                style={**_C, "flex": "1", "fontSize": "12px", "color": TEXT,
+                       "paddingLeft": "10px", "paddingRight": "10px",
+                       "overflow": "hidden", "textOverflow": "ellipsis",
+                       "whiteSpace": "nowrap", "flexShrink": "1", "minWidth": "0"},
             ),
             html.Div([
                 html.Span(cr["title"],
@@ -199,81 +201,103 @@ def _build_cr_list(crs: list[dict], role: str = "bnr_admin") -> html.Div:
                           style={"fontSize": "10px", "color": MUTED,
                                  "display": "block", "lineHeight": "1.3",
                                  "overflow": "hidden", "textOverflow": "ellipsis",
-                                 "whiteSpace": "nowrap",
-                                 "maxWidth": "260px"})
+                                 "whiteSpace": "nowrap", "maxWidth": "260px"})
                 if cr.get("description") else html.Span(),
-            ], style={"flex": "2", "padding": "5px 10px", "overflow": "hidden",
-                      "minWidth": "0"}),
+            ], style={**_C, "flex": "2", "paddingLeft": "10px", "paddingRight": "10px",
+                      "overflow": "hidden", "minWidth": "0", "flexShrink": "1"}),
             html.Div(status_chip,
-                     style={"width": "108px", "padding": "7px 10px",
-                            "flexShrink": "0"}),
+                     style={**_C, "width": "108px",
+                            "paddingLeft": "10px", "paddingRight": "10px"}),
             html.Span(
                 str(n_issues),
-                style={"width": "56px", "textAlign": "center", "fontSize": "12px",
-                       "color": TEXT, "padding": "7px 10px", "flexShrink": "0"},
+                style={**_C, "width": "56px", "textAlign": "center", "fontSize": "12px",
+                       "color": TEXT, "paddingLeft": "10px", "paddingRight": "10px"},
             ),
             html.Span(
                 f"{cr.get('failing_rows', 0):,}",
-                style={"width": "74px", "textAlign": "right", "fontSize": "12px",
+                style={**_C, "width": "74px", "textAlign": "right", "fontSize": "12px",
                        "fontWeight": "700", "color": TEXT,
-                       "padding": "7px 10px", "flexShrink": "0"},
+                       "paddingLeft": "10px", "paddingRight": "10px"},
             ),
             html.Span(
                 cr.get("target_date") or "—",
-                style={"width": "86px", "fontSize": "11px", "color": MUTED,
-                       "padding": "7px 10px", "flexShrink": "0"},
+                style={**_C, "width": "86px", "fontSize": "11px", "color": MUTED,
+                       "paddingLeft": "10px", "paddingRight": "10px"},
             ),
             html.Span(
                 cr.get("assigned_to") or "—",
-                style={"width": "154px", "fontSize": "11px", "color": MUTED,
-                       "padding": "7px 10px", "flexShrink": "0",
+                style={**_C, "width": "154px", "fontSize": "11px", "color": MUTED,
+                       "paddingLeft": "10px", "paddingRight": "10px",
                        "overflow": "hidden", "textOverflow": "ellipsis",
                        "whiteSpace": "nowrap"},
             ),
             html.Div(
                 action_btns + ([reviewer_note] if reviewer_note.children else []),  # type: ignore[attr-defined]
-                style={"width": "228px", "padding": "5px 10px",
-                       "display": "flex", "alignItems": "flex-start",
-                       "flexWrap": "wrap", "flexShrink": "0"},
+                style={**_C, "width": "228px", "paddingLeft": "10px", "paddingRight": "10px",
+                       "display": "flex", "alignItems": "flex-start", "flexWrap": "wrap"},
             ),
         ], style={
             "display":      "flex",
-            "alignItems":   "center",
+            "alignItems":   "flex-start",
             "background":   bg,
             "borderBottom": f"1px solid {DIVIDER}",
-            "minWidth":     "0",
         }))
 
     return html.Div(
-        [hdr] + rows,
+        html.Div(
+            [hdr] + rows,
+            style={"minWidth": "1060px"},
+        ),
         style={"border": f"1px solid {DIVIDER}", "borderRadius": "8px",
                "overflow": "hidden", "overflowX": "auto"},
     )
 
 
-def _remediation_page(role: str = "bnr_admin") -> html.Div:
+def _remediation_page(role: str = "bnr_admin", cat: str = "") -> html.Div:
     """
     Full Data Quality Remediation page.
 
     Implements the SAP MDG DQR workflow:
       1. Specialist selects open issues (filtered by institution / urgency).
-      2. Creates a Change Request (CR) linking the selected issues.
+      2. Creates a Data Correction Request (CR) linking the selected issues.
       3. Assigned data officer marks CR In Progress then Submitted.
       4. BNR specialist Approves or Rejects with review notes.
       5. Approved CRs are Closed once the next pipeline run confirms resolution.
     """
+    import json as _json
     import remediation.change_requests as cr_mod
     from auth.users import is_admin
     from issues.repositories import ensure_tables as _ensure_issues, get_open_issues
+    from dashboard.data import CATEGORIES_FILE
+    from dashboard.theme import CAT_LABELS
 
     _ensure_issues()
     cr_mod.ensure_table()
 
-    # Institution options for the create-CR form
+    # Build allowed le_book set for the selected category
+    try:
+        _cats = _json.loads(CATEGORIES_FILE.read_text())
+    except Exception:
+        _cats = {}
+
+    _sacco = {"SACCO", "OSACCO"}
+    if cat:
+        allowed_lebooks = {
+            str(lb) for lb, info in _cats.items()
+            if (info.get("category_type") or "").upper() in (
+                _sacco if cat == "SACCO" else {cat.upper()}
+            )
+        }
+    else:
+        allowed_lebooks = None  # no filter — show all
+
+    # Institution options for the create-CR form (scoped to selected category)
     open_issues = get_open_issues()
     inst_seen: dict[str, str] = {}
     for iss in open_issues:
         lb = iss["le_book"]
+        if allowed_lebooks is not None and lb not in allowed_lebooks:
+            continue
         if lb not in inst_seen:
             inst_seen[lb] = (iss.get("institution_name") or lb).title()
 
@@ -325,7 +349,7 @@ def _remediation_page(role: str = "bnr_admin") -> html.Div:
 
     # ── Create-CR form (hidden by default, toggled) ────────────────────────────
     form_panel = html.Div([
-        html.Div("NEW CHANGE REQUEST", style={
+        html.Div("NEW DATA CORRECTION REQUEST", style={
             "fontSize": "11px", "fontWeight": "900", "color": MUTED,
             "letterSpacing": "0.06em", "textTransform": "uppercase",
             "marginBottom": "16px",
@@ -402,12 +426,11 @@ def _remediation_page(role: str = "bnr_admin") -> html.Div:
                 id="cr-issue-hint",
                 style={"fontSize": "10px", "color": MUTED, "marginTop": "4px"},
             ),
-            html.Div(id="cr-table-dl-area", style={"marginTop": "6px"}),
         ], style={"marginBottom": "16px"}),
 
         # Row 3: title
         html.Div([
-            html.Label("Change Request Title *", style={
+            html.Label("Data Correction Request Title *", style={
                 "fontSize": "11px", "fontWeight": "900", "color": MUTED,
                 "display": "block", "marginBottom": "5px",
             }),
@@ -468,7 +491,7 @@ def _remediation_page(role: str = "bnr_admin") -> html.Div:
 
         # Submit row
         html.Div([
-            html.Div("Create Change Request", id="cr-create-btn", n_clicks=0,
+            html.Div("Create Data Correction Request", id="cr-create-btn", n_clicks=0,
                      style={
                          "display":      "inline-block",
                          "background":   BRAND,
@@ -532,7 +555,7 @@ def _remediation_page(role: str = "bnr_admin") -> html.Div:
 
     cr_list_section = html.Div([
         html.Div([
-            html.Div("CHANGE REQUESTS", style={
+            html.Div("DATA CORRECTION REQUESTS", style={
                 "fontSize": "11px", "fontWeight": "900", "color": MUTED,
                 "letterSpacing": "0.06em", "textTransform": "uppercase",
             }),
@@ -556,22 +579,34 @@ def _remediation_page(role: str = "bnr_admin") -> html.Div:
         "padding":      "20px",
     })
 
+    cat_label = CAT_LABELS.get(cat, "") if cat else ""
+
     return html.Div([
+
+        # Hidden store — passes selected category to CR-list/stats callbacks
+        dcc.Store(id="cr-cat-filter", data=cat or ""),
 
         # Page header
         html.Div([
-            html.H2("Data Quality Remediation", style={
-                "fontSize": "18px", "fontWeight": "900", "color": TEXT,
-                "margin": "0", "lineHeight": "1.2",
-            }),
+            html.Div([
+                html.H2("Data Quality Remediation", style={
+                    "fontSize": "18px", "fontWeight": "900", "color": TEXT,
+                    "margin": "0", "lineHeight": "1.2",
+                }),
+                *([] if not cat_label else [html.Span(
+                    f"· {cat_label}",
+                    style={"fontSize": "13px", "fontWeight": "700",
+                           "color": BRAND, "marginLeft": "10px"},
+                )]),
+            ], style={"display": "flex", "alignItems": "center"}),
         ], style={"marginBottom": "24px"}),
 
         # Status summary bar
         summary_bar,
 
-        # + New Change Request toggle — BNR admin only
+        # + New Data Correction Request toggle — BNR admin only
         *([] if not is_admin(role) else [html.Div(
-            html.Div("+ New Change Request", id="cr-form-toggle-btn", n_clicks=0,
+            html.Div("+ New Data Correction Request", id="cr-form-toggle-btn", n_clicks=0,
                      style={
                          "display":      "inline-block",
                          "background":   BRAND,

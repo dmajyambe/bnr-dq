@@ -16,7 +16,6 @@ from pathlib import Path
 
 import dash
 from dash import dcc, html, Input, Output, State, ctx, ALL
-import plotly.graph_objects as go
 
 log = logging.getLogger("dashboard.portal")
 
@@ -26,9 +25,9 @@ CARD    = "#FFFFFF"
 TEXT    = "#1c1c27"
 MUTED   = "#68686f"
 DIVIDER = "#e7e1dc"
-C_GREEN = "#16A34A"
-C_RED   = "#DC2626"
-C_AMBER = "#D97706"
+C_GREEN = "#B8860B"   # dark goldenrod — good score (BNR brand)
+C_AMBER = "#A0784A"   # mid warm tan   — medium score
+C_RED   = "#7C3D1E"   # burnt rust     — poor score
 BRAND   = "#753918"
 FONT    = "'Inter','Franklin Gothic Medium',Arial,sans-serif"
 
@@ -98,9 +97,9 @@ def inst_nav_bar(active_page: str, user_name: str, le_book: str,
                  unread_count: int = 0) -> html.Div:
     pages = [
         ("inst_dashboard",   "Dashboard"),
-        ("inst_issues",      "Issues"),
-        ("inst_remediation", "Remediation"),
-        ("inst_validations", "Validations"),
+        ("inst_issues",      "My Issues"),
+        ("inst_remediation", "Data Correction"),
+        ("inst_validations", "Documentation"),
     ]
     tabs = []
     for page_id, label in pages:
@@ -200,14 +199,26 @@ def inst_notification_panel(user_id: str) -> html.Div:
     from remediation.notifications import get_notifications, NOTIF_ICONS
     notifs = get_notifications(user_id, limit=20)
 
+    CR_TYPES = {"new_cr", "cr_approved", "cr_rejected", "cr_submitted"}
+
     if not notifs:
         rows = [html.Div("No notifications yet.",
                          style={"padding": "16px", "color": MUTED, "fontSize": "12px"})]
     else:
         rows = []
         for n in notifs:
-            icon   = NOTIF_ICONS.get(n["type"], "•")
-            unread = not n["is_read"]
+            icon      = NOTIF_ICONS.get(n["type"], "•")
+            unread    = not n["is_read"]
+            is_cr     = n["type"] in CR_TYPES
+            cr_id     = n.get("cr_id") or ""
+            index_key = f"{n['notif_id']}|{cr_id}"
+
+            link_hint = html.Div(
+                "→ Go to Data Correction",
+                style={"fontSize": "10px", "color": BRAND, "fontWeight": "700",
+                       "marginTop": "4px", "marginLeft": "22px"},
+            ) if is_cr else html.Span()
+
             rows.append(html.Div([
                 html.Div([
                     html.Span(icon, style={"marginRight": "8px", "fontSize": "14px"}),
@@ -217,15 +228,22 @@ def inst_notification_panel(user_id: str) -> html.Div:
                         "lineHeight": "1.4", "flex": "1",
                     }),
                 ], style={"display": "flex", "alignItems": "flex-start"}),
-                html.Div(n["created_at"][:10], style={
-                    "fontSize": "10px", "color": MUTED, "marginTop": "4px",
-                    "marginLeft": "22px",
-                }),
-            ], style={
+                html.Div([
+                    html.Span(n["created_at"][:10], style={
+                        "fontSize": "10px", "color": MUTED,
+                    }),
+                ], style={"marginTop": "4px", "marginLeft": "22px",
+                          "display": "flex", "gap": "12px", "alignItems": "center"}),
+                link_hint,
+            ],
+            id={"type": "notif-row", "index": index_key},
+            n_clicks=0,
+            style={
                 "padding": "10px 16px",
                 "background": "rgba(117,57,24,0.05)" if unread else CARD,
                 "borderBottom": f"1px solid {DIVIDER}",
-                "cursor": "pointer",
+                "cursor": "pointer" if is_cr else "default",
+                "transition": "background 0.15s",
             }))
 
     return html.Div([
@@ -258,11 +276,11 @@ def inst_notification_panel(user_id: str) -> html.Div:
 # ── pages ─────────────────────────────────────────────────────────────────────
 
 def inst_dashboard_page(le_books: list[str], categories: dict) -> html.Div:
-    """Scores + 7-day trend table + line chart + report download for each institution."""
+    """Scores + last 7 runs table + line chart + report download for each institution."""
     history = _load_history()
     today   = history[-1] if history else {}
     trend   = history[-7:] if history else []
-    dims    = ["completeness", "accuracy", "timeliness", "validity"]
+    dims    = ["completeness", "accuracy", "validity", "uniqueness", "timeliness"]
 
     sections = []
     for lb in sorted(le_books):
@@ -307,7 +325,7 @@ def inst_dashboard_page(le_books: list[str], categories: dict) -> html.Div:
         else:
             dl_btn = html.Span()
 
-        # ── 7-day trend table ──────────────────────────────────────────────────
+        # ── last 7 runs table ──────────────────────────────────────────────────
         if len(trend) > 1:
             trend_rows = []
             for entry in reversed(trend):
@@ -344,37 +362,10 @@ def inst_dashboard_page(le_books: list[str], categories: dict) -> html.Div:
                       "background": CARD, "borderRadius": "8px",
                       "border": f"1px solid {DIVIDER}", "marginBottom": "20px"})
 
-            # ── 7-day line chart ───────────────────────────────────────────────
-            dates = [e.get("date", "") for e in trend]
-            fig   = go.Figure()
-            for d in dims:
-                scores = [float(_inst_score(e, lb, d) or 0) for e in trend]
-                fig.add_trace(go.Scatter(
-                    x=dates, y=scores,
-                    name=d.title(),
-                    mode="lines+markers",
-                    line=dict(color=DIM_COLORS[d], width=2),
-                    marker=dict(size=5, color=DIM_COLORS[d]),
-                    hovertemplate=f"<b>{d.title()}</b><br>%{{x}}<br>%{{y:.1f}}%<extra></extra>",
-                ))
-            fig.update_layout(
-                height=260,
-                paper_bgcolor=CARD, plot_bgcolor=CARD,
-                margin=dict(l=8, r=8, t=36, b=8),
-                font=dict(family=FONT, size=11, color=TEXT),
-                legend=dict(orientation="h", yanchor="bottom", y=1.02,
-                            xanchor="left", x=0, font=dict(size=11)),
-                yaxis=dict(range=[0, 100], gridcolor=DIVIDER,
-                           ticksuffix="%", tickfont=dict(size=10), zeroline=False),
-                xaxis=dict(gridcolor=DIVIDER, tickfont=dict(size=10), showgrid=False),
-                hovermode="x unified",
-            )
-            trend_chart = dcc.Graph(figure=fig, config={"displayModeBar": False})
         else:
             trend_table = html.Div("Not enough history for trend.",
                                    style={"color": MUTED, "fontSize": "12px",
                                           "marginBottom": "20px"})
-            trend_chart = html.Div()
 
         sections.append(html.Div([
             # Header row: name + LE book + download button
@@ -392,13 +383,12 @@ def inst_dashboard_page(le_books: list[str], categories: dict) -> html.Div:
 
             kpis,
 
-            html.Div("7-DAY TREND", style={
+            html.Div("LAST 7 RUNS", style={
                 "fontSize": "11px", "fontWeight": "900", "color": MUTED,
                 "letterSpacing": "0.06em", "textTransform": "uppercase",
                 "marginBottom": "10px",
             }),
             trend_table,
-            trend_chart,
         ], style={
             "background": CARD, "borderRadius": "10px",
             "padding": "20px 24px", "marginBottom": "20px",
@@ -432,27 +422,32 @@ def inst_issues_page(le_books: list[str]) -> html.Div:
 
     lb_set = set(str(lb) for lb in le_books)
 
-    # ── urgency summary chips ─────────────────────────────────────────────────
-    open_issues = [i for i in get_issues(status="open") if i["le_book"] in lb_set]
-    band_counts = {"new": 0, "attention": 0, "urgent": 0, "critical": 0, "overdue": 0}
-    for iss in open_issues:
-        b = iss.get("urgency_band", "new")
-        if b in band_counts:
-            band_counts[b] += 1
+    # ── urgency summary chips — only issues evidenced in the latest report ────
+    from issues.evidence import get_evidenced_rule_ids
+    _ev: frozenset[str] = frozenset()
+    if le_books:
+        _ev = get_evidenced_rule_ids(str(le_books[0]))
 
-    chips = []
-    for band, label in [("overdue", "⚠ Overdue"), ("critical", "Critical"),
-                         ("urgent", "Urgent"), ("attention", "Attention"), ("new", "New")]:
-        n   = band_counts.get(band, 0)
-        clr = _URGENCY_COLORS.get(band, MUTED)
-        chips.append(html.Div([
-            html.Span(str(n), style={"fontWeight": "900", "fontSize": "22px", "color": clr}),
-            html.Span(label,  style={"fontSize": "11px", "color": MUTED, "marginTop": "2px"}),
-        ], style={
-            "display": "flex", "flexDirection": "column", "alignItems": "center",
-            "background": CARD, "borderRadius": "8px", "padding": "12px 20px",
-            "border": f"2px solid {clr}", "minWidth": "100px",
-        }))
+    from datetime import datetime as _datetime
+    from dashboard.data import latest_run_month
+    this_month  = latest_run_month()
+    month_label = _datetime.strptime(this_month, "%Y-%m").strftime("%B %Y")
+
+    open_issues = [i for i in get_issues(status="open")
+                   if i["le_book"] in lb_set and i.get("rule_id") in _ev
+                   and (i.get("detected_at") or "").startswith(this_month)]
+
+    n_new = len(open_issues)
+    clr   = _URGENCY_COLORS.get("new", MUTED)
+    chips = [html.Div([
+        html.Span(str(n_new), style={"fontWeight": "900", "fontSize": "22px", "color": clr}),
+        html.Span(f"New Issues — {month_label}",
+                  style={"fontSize": "11px", "color": MUTED, "marginTop": "2px"}),
+    ], style={
+        "display": "flex", "flexDirection": "column", "alignItems": "center",
+        "background": CARD, "borderRadius": "8px", "padding": "12px 20px",
+        "border": f"2px solid {clr}", "minWidth": "100px",
+    })]
 
     # available table options (only tables that have any issues for this institution)
     active_tables = sorted({i["table_name"] for i in open_issues})
@@ -472,7 +467,6 @@ def inst_issues_page(le_books: list[str]) -> html.Div:
                 id="inst-issue-filter",
                 options=[
                     {"label": "Open",     "value": "open"},
-                    {"label": "Delayed",  "value": "penalized"},
                     {"label": "Resolved", "value": "resolved"},
                 ],
                 value="open",
@@ -509,15 +503,8 @@ def inst_issues_page(le_books: list[str]) -> html.Div:
     })
 
     return html.Div([
-        html.Div([
-            html.H2("My Issues", style={"fontSize": "18px", "fontWeight": "900",
-                                         "color": TEXT, "margin": "0 0 4px"}),
-            html.P(
-                "Filter by table. Each row in the table below is a data category "
-                "with open issues — download the full report from the Report column.",
-                style={"fontSize": "12px", "color": MUTED, "margin": "0"},
-            ),
-        ], style={"marginBottom": "20px"}),
+        html.H2("My Issues", style={"fontSize": "18px", "fontWeight": "900",
+                                     "color": TEXT, "margin": "0 0 20px"}),
 
         html.Div(chips, style={"display": "flex", "gap": "10px",
                                 "flexWrap": "wrap", "marginBottom": "20px"}),
@@ -563,15 +550,10 @@ def inst_remediation_page(le_books: list[str], role: str = "inst_user") -> html.
                    for k, lbl in cr_mod.STATUS_LABELS.items()] + [{"label": "All", "value": "all"}]
 
     return html.Div([
-        html.H2("My Change Requests", style={
+        html.H2("My Data Correction Requests", style={
             "fontSize": "18px", "fontWeight": "900", "color": TEXT,
             "marginTop": "0", "marginBottom": "6px",
         }),
-        html.P(
-            "Change Requests are created by BNR and assigned to your institution. "
-            "Start work, make the corrections in your source system, then Submit for review.",
-            style={"fontSize": "12px", "color": MUTED, "marginBottom": "20px"},
-        ),
         html.Div(chips, style={
             "display": "flex", "gap": "10px", "flexWrap": "wrap", "marginBottom": "20px",
         }),

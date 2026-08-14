@@ -8,7 +8,7 @@ import dash
 from dash import ALL, MATCH, Input, Output, State, ctx, dcc, html
 
 from dashboard.app import app
-from dashboard.data import CATEGORIES_FILE
+from dashboard.data import CATEGORIES_FILE, _pipeline_le_books
 from dashboard.pages.alerts import _build_resolved_by_institution, _issues_to_xlsx
 from dashboard.theme import CARD, DIVIDER, MUTED, TEXT, C_AMBER, C_GREEN, C_RED, _URGENCY_COLORS
 
@@ -27,19 +27,34 @@ def _refresh_issue_list(cat_filter, _poll):
 
     cat_filter = cat_filter or ""
 
-    # Build le_book → category_type map for filtering
+    # Build explicit le_book allowlist for the selected category.
+    # Le_books missing from the categories file are excluded when a filter is active.
     try:
         _cats = json.loads(CATEGORIES_FILE.read_text())
     except Exception:
         _cats = {}
 
+    _sacco = {"SACCO", "OSACCO"}
+    if cat_filter:
+        allowed_lebooks = {
+            str(lb)
+            for lb, info in _cats.items()
+            if (info.get("category_type") or "").upper() in (
+                _sacco if cat_filter == "SACCO" else {cat_filter.upper()}
+            )
+        }
+    else:
+        allowed_lebooks = None
+
+    pipeline_lbs = _pipeline_le_books()
+
     def _matches(lb: str) -> bool:
-        if not cat_filter:
-            return True
-        ct = (_cats.get(str(lb), {}).get("category_type") or "")
-        if cat_filter == "SACCO":
-            return ct in ("SACCO", "OSACCO")
-        return ct == cat_filter
+        s = str(lb)
+        if pipeline_lbs and s not in pipeline_lbs:
+            return False
+        if allowed_lebooks is not None and s not in allowed_lebooks:
+            return False
+        return True
 
     all_resolved_raw = get_issues(status="resolved")
     all_open_raw     = get_issues(status="open")
@@ -48,15 +63,15 @@ def _refresh_issue_list(cat_filter, _poll):
     all_open     = [i for i in all_open_raw     if _matches(i["le_book"])]
 
     # ── summary chips ─────────────────────────────────────────────────────────
-    today         = _date.today()
-    this_month    = today.strftime("%Y-%m")
-    month_res     = sum(1 for i in all_resolved
-                        if (i.get("resolved_at") or "").startswith(this_month))
-    overdue_count = sum(1 for i in all_open if i.get("urgency_band") == "overdue")
-    on_time       = sum(1 for i in all_resolved
-                        if i.get("sla_deadline") and i.get("resolved_at")
-                        and i["resolved_at"] <= i["sla_deadline"])
-    late          = len(all_resolved) - on_time
+    from datetime import datetime as _datetime
+    from dashboard.data import latest_run_month
+    this_month  = latest_run_month()
+    month_label = _datetime.strptime(this_month, "%Y-%m").strftime("%B %Y")
+    month_res      = sum(1 for i in all_resolved
+                         if (i.get("resolved_at") or "").startswith(this_month))
+    new_this_month = sum(1 for i in all_open
+                         if (i.get("detected_at") or "").startswith(this_month))
+    total_resolved = len(all_resolved)
 
     fix_days = []
     for i in all_resolved:
@@ -81,18 +96,17 @@ def _refresh_issue_list(cat_filter, _poll):
             "background": CARD, "borderRadius": "8px", "padding": "12px 24px",
             "border": f"1px solid {bc}", "minWidth": "110px",
         })
-
-    # Minimalist: the three that matter for triage — current load, what's breached, momentum.
+    # summary bar with chips for new issues this month, resolved total + this month
     summary_bar = html.Div([
-        _chip(len(all_open), "Open Issues",         C_AMBER),
-        _chip(overdue_count, "Overdue",             _URGENCY_COLORS["overdue"],
-              border_color=_URGENCY_COLORS["overdue"]),
-        _chip(month_res,     "Resolved This Month", C_GREEN),
+        _chip(new_this_month, f"New Issues — {month_label}", _URGENCY_COLORS["new"],
+              border_color=_URGENCY_COLORS["new"]),
+        _chip(total_resolved, "Resolved Issues",             C_GREEN),
+        _chip(month_res,      "Resolved This Month",         C_GREEN),
     ], style={"display": "flex", "gap": "10px", "flexWrap": "wrap"})
 
     # ── issue list ─────────────────────────────────────────────────────────────
-    all_resolved_raw.sort(key=lambda x: x.get("resolved_at") or "", reverse=True)
-    issue_list = _build_resolved_by_institution(all_resolved_raw, cat_filter)
+    all_resolved.sort(key=lambda x: x.get("resolved_at") or "", reverse=True)
+    issue_list = _build_resolved_by_institution(all_resolved)
 
     return issue_list, summary_bar
 
@@ -219,6 +233,34 @@ def _on_issues_download(n_clicks, cat_filter):
     if not n_clicks:
         raise dash.exceptions.PreventUpdate
     from issues.repositories import get_issues
-    issues = get_issues(status="resolved")
+    cat_filter = cat_filter or ""
+    try:
+        _cats = json.loads(CATEGORIES_FILE.read_text())
+    except Exception:
+        _cats = {}
+
+    _sacco = {"SACCO", "OSACCO"}
+    if cat_filter:
+        allowed = {
+            str(lb)
+            for lb, info in _cats.items()
+            if (info.get("category_type") or "").upper() in (
+                _sacco if cat_filter == "SACCO" else {cat_filter.upper()}
+            )
+        }
+    else:
+        allowed = None
+
+    pipeline_lbs = _pipeline_le_books()
+
+    def _keep(lb: str) -> bool:
+        s = str(lb)
+        if pipeline_lbs and s not in pipeline_lbs:
+            return False
+        if allowed is not None and s not in allowed:
+            return False
+        return True
+
+    issues = [i for i in get_issues(status="resolved") if _keep(i["le_book"])]
     issues.sort(key=lambda x: x.get("resolved_at") or "", reverse=True)
     return dcc.send_bytes(_issues_to_xlsx(issues), "dq_resolved_issues.xlsx")

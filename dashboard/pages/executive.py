@@ -94,7 +94,12 @@ def _exec_hero_kpis(role: str, le_books: list[str]) -> html.Div:
         kpi2_label = "TABLES WITH OPEN ISSUES"
         kpi2_value = len({i["table_name"] for i in all_open})
 
-    overdue_count = sum(1 for i in all_open if i.get("urgency_band") == "overdue")
+    from datetime import datetime as _datetime
+    from dashboard.data import latest_run_month
+    this_month  = latest_run_month()
+    month_label = _datetime.strptime(this_month, "%Y-%m").strftime("%B %Y")
+    new_this_month = sum(1 for i in all_open
+                         if (i.get("detected_at") or "").startswith(this_month))
 
     all_resolved = get_issues(status="resolved")
     if not is_bnr:
@@ -120,9 +125,9 @@ def _exec_hero_kpis(role: str, le_books: list[str]) -> html.Div:
             accent=C_RED if kpi2_value else C_GREEN,
         ),
         _exec_kpi_card(
-            "OVERDUE ISSUES", _fmt_int(overdue_count),
-            color=C_RED if overdue_count else TEXT,
-            accent=C_RED if overdue_count else C_GREEN,
+            f"NEW ISSUES — {month_label}", _fmt_int(new_this_month),
+            color=C_RED if new_this_month else TEXT,
+            accent=C_RED if new_this_month else C_GREEN,
         ),
         _exec_kpi_card(
             "REMEDIATION RATE",

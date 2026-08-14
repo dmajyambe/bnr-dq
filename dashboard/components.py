@@ -78,11 +78,10 @@ def _sparkline(values: list, color: str) -> dcc.Graph:
                      style={"height": "36px", "marginTop": "8px"})
 
 
-def _kpi_card(dim: str, score: float, delta: float, spark: list) -> html.Div:
-    col     = _score_color(score)
-    d_col   = C_GREEN if delta > 0 else C_RED if delta < 0 else MUTED
-    d_icon  = "▲" if delta > 0 else "▼" if delta < 0 else "─"
-    d_label = f"{d_icon} {abs(delta):.1f}%"
+def _kpi_card(dim: str, score: float | None, spark: list) -> html.Div:
+    # score=None means the dimension was not evaluated (e.g. timeliness before
+    # source columns exist) — render "—" instead of a misleading red 0.0%.
+    col = _score_color(score) if score is not None else MUTED
 
     return html.Div([
         html.Div(DIM_LABELS[dim], style={
@@ -90,19 +89,11 @@ def _kpi_card(dim: str, score: float, delta: float, spark: list) -> html.Div:
             "color": MUTED, "letterSpacing": "0.06em",
             "textTransform": "uppercase", "lineHeight": "1.15",
         }),
-        html.Div(f"{score:.1f}%", style={
+        html.Div(f"{score:.1f}%" if score is not None else "—", style={
             "fontSize": "30px", "fontWeight": "700",
             "color": col, "lineHeight": "1.1", "marginTop": "6px",
             "fontVariantNumeric": "tabular-nums",
         }),
-        html.Div([
-            html.Span(d_label, style={
-                "color": d_col, "fontWeight": "700", "fontSize": "12px",
-            }),
-            html.Span(" vs yesterday", style={
-                "color": MUTED, "fontSize": "11px",
-            }),
-        ], style={"marginTop": "4px", "lineHeight": "1.15"}),
         _sparkline(spark, col),
     ], style={
         "background":   CARD,
@@ -739,7 +730,7 @@ def _dim_pill(dim: str) -> html.Span:
 
 
 def _nav_tabs(active: str) -> html.Div:
-    items = [("dashboard", "Dashboard"), ("alerts", "Alerts"), ("remediation", "Remediation"), ("validations", "Validations")]
+    items = [("dashboard", "Dashboard"), ("remediation", "Request Data Correction"), ("alerts", "Check Resolved Issues"), ("validations", "Documentation")]
     tabs = []
     for key, label in items:
         is_active = key == active

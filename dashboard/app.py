@@ -103,6 +103,7 @@ app.layout = html.Div([
     dcc.Store(id="active-page",      data="dashboard"),
     dcc.Store(id="rules-version",    data=0),
     dcc.Store(id="cr-version",       data=0),
+    dcc.Store(id="cr-cat-filter",    data=""),
     dcc.Store(id="notify-status",    data={}),
     dcc.Store(id="auth-store",       data={}),
     dcc.Store(id="inst-active-page", data="inst_dashboard"),
@@ -197,6 +198,13 @@ app.layout = html.Div([
                 "fontFamily": FONT,
             }),
         ],
+    ),
+
+    # ── resolved-download "not ready" toast ──────────────────────────────────
+    html.Div(
+        id="dl-no-report-toast",
+        children=[],
+        style={"display": "none"},
     ),
 
 ], style={"background": BG, "minHeight": "100vh", "fontFamily": FONT})

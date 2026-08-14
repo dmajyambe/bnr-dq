@@ -4,24 +4,21 @@ from __future__ import annotations
 from dash import dcc, html
 
 from dashboard.components import (
-    _cat_dup_count, _dup_card, _fmt_int, _inst_dup_count, _issue_counts_trend,
-    _issue_trend_figure, _kpi_card, _stale_banner, _unscored_section,
+    _kpi_card, _stale_banner,
 )
 from dashboard.data import (
     _DIR, _cat_scores, _filter_institutions, _inst_scores,
-    _load_activity, _load_all_categories, _today_entry, _trend_entries,
-    _yesterday_entry,
+    _today_entry, _trend_entries,
 )
 from dashboard.theme import (
-    BG, BRAND, CARD, CAT_LABELS, C_AMBER, C_GREEN, DIMS, DIVIDER, FONT,
-    MUTED, TEXT, _URGENCY_COLORS,
+    BG, BRAND, CARD, CAT_LABELS, DIMS, DIVIDER, FONT,
+    MUTED, RESOLVED_GREEN, TEXT,
 )
 
 
 def _dashboard_content(cat: str, inst: str | None) -> html.Div:
     """Renders the dashboard for a specific category, optionally filtered to one institution."""
     today        = _today_entry()
-    yesterday    = _yesterday_entry()
     trend        = _trend_entries(7)
     banner       = _stale_banner()
 
@@ -40,57 +37,27 @@ def _dashboard_content(cat: str, inst: str | None) -> html.Div:
     if inst and inst in institutions:
         cards = []
         for dim in DIMS:
-            now   = float(_inst_scores(today,     inst).get(dim, 0))
-            prev  = float(_inst_scores(yesterday, inst).get(dim, 0))
-            delta = round(now - prev, 1)
+            now   = float(_inst_scores(today, inst).get(dim, 0))
             spark = [float(_inst_scores(e, inst).get(dim, 0)) for e in trend]
-            cards.append(_kpi_card(dim, now, delta, spark))
-        dup_now   = _inst_dup_count(today, inst)
-        dup_prev  = _inst_dup_count(yesterday, inst)
-        dup_spark = [_inst_dup_count(e, inst) for e in trend]
-        cards.append(_dup_card(dup_now, dup_now - dup_prev, dup_spark))
-        issue_trend_data = _issue_counts_trend(30, le_books={str(inst)})
+            cards.append(_kpi_card(dim, now, spark))
+        tim_now   = float(_inst_scores(today, inst).get("timeliness", 0))
+        tim_spark = [float(_inst_scores(e, inst).get("timeliness", 0)) for e in trend]
+        cards.append(_kpi_card("timeliness", tim_now if tim_now > 0 else None, tim_spark))
         display_insts    = {inst: institutions[inst]}
         inst_name        = (institutions[inst].get("name") or inst).title()
         table_title      = f"ISSUE REPORT — {inst_name.upper()}"
     else:
         cards = []
         for dim in DIMS:
-            now   = float(_cat_scores(today,     cat).get(dim) or 0)
-            prev  = float(_cat_scores(yesterday, cat).get(dim) or 0)
-            delta = round(now - prev, 1)
+            now   = float(_cat_scores(today, cat).get(dim) or 0)
             spark = [float(_cat_scores(e, cat).get(dim) or 0) for e in trend]
-            cards.append(_kpi_card(dim, now, delta, spark))
-        dup_now   = _cat_dup_count(today, cat)
-        dup_prev  = _cat_dup_count(yesterday, cat)
-        dup_spark = [_cat_dup_count(e, cat) for e in trend]
-        cards.append(_dup_card(dup_now, dup_now - dup_prev, dup_spark))
-        cat_lbs          = {lb for lb, d in institutions.items()}
-        issue_trend_data = _issue_counts_trend(30, le_books=cat_lbs if cat_lbs else None)
+            cards.append(_kpi_card(dim, now, spark))
+        tim_now   = float(_cat_scores(today, cat).get("timeliness") or 0)
+        tim_spark = [float(_cat_scores(e, cat).get("timeliness") or 0) for e in trend]
+        cards.append(_kpi_card("timeliness", tim_now if tim_now > 0 else None, tim_spark))
         display_insts    = institutions
         n                = len(institutions)
         table_title      = f"ISSUE REPORTS — {cat_label.upper()}  ({n} institutions)"
-
-    # issue count summary chips (latest day of trend)
-    last = issue_trend_data[-1] if issue_trend_data else {}
-    def _issue_chip(value, label, color):
-        return html.Div([
-            html.Span(_fmt_int(value, str(value)), style={"fontWeight": "900", "fontSize": "20px",
-                                         "color": color}),
-            html.Span(label, style={"fontSize": "10px", "color": MUTED,
-                                    "marginTop": "2px"}),
-        ], style={
-            "display": "flex", "flexDirection": "column", "alignItems": "center",
-            "background": CARD, "borderRadius": "6px", "padding": "8px 18px",
-            "border": f"1px solid {DIVIDER}", "minWidth": "80px",
-        })
-    issue_chips = html.Div([
-        _issue_chip(last.get("open",     0), "Open",            C_AMBER),
-        _issue_chip(last.get("overdue",  0), "Overdue",         _URGENCY_COLORS["overdue"]),
-        _issue_chip(last.get("resolved", 0), "Resolved Today",  C_GREEN),
-    ], style={"display": "flex", "gap": "8px", "marginBottom": "10px"})
-
-    issue_fig = _issue_trend_figure(issue_trend_data)
 
     return html.Div([
         banner if banner else html.Div(),
@@ -165,41 +132,22 @@ def _dashboard_content(cat: str, inst: str | None) -> html.Div:
             "boxShadow":      "0 1px 4px rgba(117,57,24,0.06)",
         }),
 
-        # KPI cards + trend chart
-        html.Div([
+        # KPI cards
+        html.Div(
             html.Div(id="kpi-row", children=cards, style={
-                "display":      "flex",
-                "gap":          "12px",
-                "flexWrap":     "wrap",
-                "marginBottom": "16px",
+                "display":  "flex",
+                "gap":      "12px",
+                "flexWrap": "wrap",
             }),
-            html.Div([
-                html.Div([
-                    html.Span("30-DAY ISSUE TREND", style={
-                        "fontSize":      "11px",
-                        "fontWeight":    "900",
-                        "color":         MUTED,
-                        "letterSpacing": "0.06em",
-                        "textTransform": "uppercase",
-                        "lineHeight":    "1.15",
-                    }),
-                    html.Span(
-                        " — open / overdue / resolved per day",
-                        style={"fontSize": "10px", "color": MUTED},
-                    ),
-                ], style={"marginBottom": "8px"}),
-                issue_chips,
-                dcc.Graph(id="trend-graph", figure=issue_fig,
-                          config={"displayModeBar": False}),
-            ]),
-        ], style={
-            "background":   CARD,
-            "padding":      "20px",
-            "borderRadius": "8px",
-            "boxShadow":    "0 2px 8px rgba(117,57,24,0.07)",
-            "border":       f"1px solid {DIVIDER}",
-            "marginBottom": "20px",
-        }),
+            style={
+                "background":   CARD,
+                "padding":      "20px",
+                "borderRadius": "8px",
+                "boxShadow":    "0 2px 8px rgba(117,57,24,0.07)",
+                "border":       f"1px solid {DIVIDER}",
+                "marginBottom": "20px",
+            },
+        ),
 
         # Issue reports table
         html.Div([
@@ -213,14 +161,6 @@ def _dashboard_content(cat: str, inst: str | None) -> html.Div:
             }),
             _institution_reports_table(display_insts),
         ]),
-
-        # Unscored institutions section
-        _unscored_section(
-            cat,
-            _load_all_categories(),
-            set(institutions.keys()),
-            _load_activity(),
-        ),
 
     ])
 
@@ -259,13 +199,17 @@ def _institution_reports_table(display_insts: dict) -> html.Div:
 
     for lb, data in display_insts.items():
         name = (data.get("name") or lb).title()
-        zips = sorted(issue_dir.glob(f"{lb}_*.zip"), reverse=True) if issue_dir.exists() else []
+        zips = sorted(
+            (p for p in issue_dir.glob(f"{lb}_*.zip") if not p.stem.endswith("_resolved")),
+            reverse=True,
+        ) if issue_dir.exists() else []
         if zips:
             zp = zips[0]
             try:
                 size_kb    = zp.stat().st_size // 1024
                 namelist   = _zf.ZipFile(zp).namelist()
-                table_names = [n.rsplit(".", 1)[0] for n in namelist]
+                table_names = [n.rsplit(".", 1)[0] for n in namelist
+                               if not n.startswith("README_")]
             except Exception:
                 size_kb, table_names = 0, []
             with_zip.append((lb, name, size_kb, table_names, zp))
@@ -331,7 +275,7 @@ def _institution_reports_table(display_insts: dict) -> html.Div:
                 "flex": "1", "overflow": "hidden",
                 "textOverflow": "ellipsis", "whiteSpace": "nowrap"}),
             html.Span("No issues found", style={"fontSize": "11px",
-                "color": C_GREEN, "fontWeight": "700",
+                "color": RESOLVED_GREEN, "fontWeight": "700",
                 "width": "220px", "flexShrink": "0"}),
             html.Span("—", style={"fontSize": "11px", "color": MUTED,
                 "width": "74px", "textAlign": "right", "flexShrink": "0"}),

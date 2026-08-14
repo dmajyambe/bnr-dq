@@ -104,11 +104,16 @@ VAL_RULE_META: dict[str, dict] = {
         "category": "Cross-field Validity",
         "fields":   ["application_date", "business_date"],
     },
+    "VAL-048": {
+        "name":     "National ID must be exactly 16 digits; 6th digit must be 7 (F) or 8 (M)",
+        "category": "Cross-field Validity",
+        "fields":   ["national_id_number", "customer_gender"],
+    },
 }
 
 
 VAL_TABLE_RULES: dict[str, list[str]] = {
-    "customers_expanded":  ["VAL-001", "VAL-002", "VAL-004", "VAL-022"],
+    "customers_expanded":  ["VAL-001", "VAL-002", "VAL-004", "VAL-022", "VAL-048"],
     "accounts":            ["VAL-003", "VAL-010", "VAL-011"],
     "contracts_disburse":  ["VAL-003", "VAL-012", "VAL-030", "VAL-031"],
     "contract_loans":      ["VAL-010", "VAL-013", "VAL-014", "VAL-016", "VAL-020", "VAL-032"],

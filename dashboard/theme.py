@@ -21,20 +21,26 @@ C_RED    = "#7C3D1E"   # burnt rust      — poor score
 BRAND    = "#753918"   # --thm-base     (website primary brand brown)
 FONT     = "'Inter','Franklin Gothic Medium',Arial,sans-serif"
 
+# Actual green for resolved-issue labels (distinct from brand-gold C_GREEN).
+RESOLVED_GREEN    = "#16A34A"
+RESOLVED_GREEN_BG = "rgba(22,163,74,0.10)"
+
 # one color per dimension
 DIM_COLORS = {
     "completeness": "#753918",   # brand primary
     "accuracy":     "#B8860B",   # dark goldenrod
     "timeliness":   "#7C3D1E",   # burnt rust
     "validity":     "#C9956C",   # peach terra cotta
+    "uniqueness":   "#A0784A",   # mid warm tan
 }
 
-DIMS = ["completeness", "accuracy", "timeliness", "validity"]
+DIMS = ["completeness", "accuracy", "validity", "uniqueness"]
 DIM_LABELS = {
     "completeness": "Completeness",
     "accuracy":     "Accuracy",
     "timeliness":   "Timeliness",
     "validity":     "Validity",
+    "uniqueness":   "Uniqueness",
 }
 
 # Internal category codes (kept for data access helpers)

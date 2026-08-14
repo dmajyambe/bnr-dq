@@ -1,6 +1,6 @@
-# Change Request (CR) lifecycle — moved from dq_change_request.py.
+# Data Correction Request (CR) lifecycle — moved from dq_change_request.py.
 #
-# A Change Request is created by a data specialist to track the correction of
+# A Data Correction Request is created by a data specialist to track the correction of
 # one or more open DQ issues (from issues/tracker.py). Lifecycle:
 #
 #   open -> in_progress -> submitted -> approved / rejected
@@ -21,7 +21,7 @@ from datetime import date, datetime
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
-from storage.sqlite.connection import get_connection
+from storage.postgres.app_db import get_connection
 
 log = logging.getLogger("remediation.change_requests")
 
@@ -60,43 +60,8 @@ VALID_TRANSITIONS: dict[str, list[str]] = {
 
 def ensure_table() -> None:
     """Create dq_change_requests if it doesn't already exist."""
-    con = get_connection()
-    try:
-        con.executescript("""
-            CREATE TABLE IF NOT EXISTS dq_change_requests (
-                cr_id            TEXT PRIMARY KEY,
-                title            TEXT NOT NULL,
-                description      TEXT,
-                issue_ids        TEXT NOT NULL DEFAULT '[]',
-                le_book          TEXT NOT NULL,
-                institution_name TEXT,
-                dimension        TEXT,
-                assigned_to      TEXT,
-                created_by       TEXT,
-                created_at       TEXT NOT NULL,
-                updated_at       TEXT NOT NULL,
-                target_date      TEXT,
-                status           TEXT NOT NULL DEFAULT 'open',
-                reviewed_by      TEXT,
-                reviewed_at      TEXT,
-                review_notes     TEXT,
-                failing_rows     INTEGER NOT NULL DEFAULT 0
-            );
-        """)
-        con.commit()
-        # Schema migration: add tables and table_approvals columns if missing
-        existing = {row[1] for row in
-                    con.execute("PRAGMA table_info(dq_change_requests)").fetchall()}
-        additions = {
-            "tables":          "TEXT DEFAULT '[]'",
-            "table_approvals": "TEXT DEFAULT '{}'",
-        }
-        for col, defn in additions.items():
-            if col not in existing:
-                con.execute(f"ALTER TABLE dq_change_requests ADD COLUMN {col} {defn}")
-        con.commit()
-    finally:
-        con.close()
+    from storage.postgres.init_tables import init_all
+    init_all()
 
 
 # ── ID generation ──────────────────────────────────────────────────────────────
@@ -106,10 +71,10 @@ def _next_cr_id() -> str:
     con   = get_connection()
     try:
         row = con.execute(
-            "SELECT COUNT(*) FROM dq_change_requests WHERE cr_id LIKE ?",
+            "SELECT COUNT(*) AS n FROM dq_change_requests WHERE cr_id LIKE ?",
             (f"CR-{today}-%",),
         ).fetchone()
-        seq = (row[0] if row else 0) + 1
+        seq = (row["n"] if row else 0) + 1
     finally:
         con.close()
     return f"CR-{today}-{seq:04d}"
@@ -130,7 +95,7 @@ def create_cr(
     failing_rows:     int = 0,
 ) -> str:
     """
-    Persist a new Change Request.  Returns the generated cr_id.
+    Persist a new Data Correction Request.  Returns the generated cr_id.
     The CR starts in 'open' status.
     """
     ensure_table()
@@ -150,10 +115,11 @@ def create_cr(
             con_q = get_connection()
             placeholders = ",".join("?" * len(tables))
             rows = con_q.execute(
-                f"SELECT issue_id FROM dq_open_issues WHERE le_book=? AND table_name IN ({placeholders})",
+                f"SELECT issue_id FROM dq_open_issues WHERE le_book=? AND table_name IN ({placeholders})"
+                f" AND status IN ('open','pending_resolution')",
                 [le_book] + list(tables),
             ).fetchall()
-            issue_ids = [r[0] for r in rows]
+            issue_ids = [r["issue_id"] for r in rows]
             con_q.close()
         except Exception as exc:
             log.warning("Could not derive issue_ids for CR %s: %s", cr_id, exc)
@@ -194,7 +160,7 @@ def create_cr(
         inst = institution_name or le_book
         notify_le_book(
             le_book, "new_cr",
-            f"A new Change Request ({cr_id}) has been created for {inst}: {title}",
+            f"A new Data Correction Request ({cr_id}) has been created for {inst}: {title}",
             cr_id=cr_id,
         )
     except Exception as exc:
@@ -307,15 +273,15 @@ def update_status(
 
             if new_status == "approved":
                 notify_le_book(lb, "cr_approved",
-                    f"Change Request {cr_id} for {inst} has been approved: {title}",
+                    f"Data Correction Request {cr_id} for {inst} has been approved: {title}",
                     cr_id=cr_id)
             elif new_status == "rejected":
                 notify_le_book(lb, "cr_rejected",
-                    f"Change Request {cr_id} for {inst} has been rejected: {title}",
+                    f"Data Correction Request {cr_id} for {inst} has been rejected: {title}",
                     cr_id=cr_id)
             elif new_status == "submitted":
                 notify_bnr_admins("cr_submitted",
-                    f"{inst} submitted Change Request {cr_id} for review: {title}",
+                    f"{inst} submitted Data Correction Request {cr_id} for review: {title}",
                     cr_id=cr_id)
         except Exception as exc:
             log.warning("Portal notification failed for CR %s status change: %s", cr_id, exc)
@@ -489,11 +455,11 @@ def _build_assignment_email(cr: dict, issues: list[dict]) -> tuple[str, str, str
     cr_id  = cr["cr_id"]
     today  = date.today().isoformat()
 
-    subject = f"[BNR DQ] Change Request Assigned — {cr_id} — {inst}"
+    subject = f"[BNR DQ] Data Correction Request Assigned — {cr_id} — {inst}"
 
     # ── plain text ────────────────────────────────────────────────────────────
     lines = [
-        f"Change Request : {cr_id}",
+        f"Data Correction Request : {cr_id}",
         f"Institution    : {inst}  (LE Book: {cr['le_book']})",
         f"Assigned To    : {cr.get('assigned_to', '—')}",
         f"Created By     : {cr.get('created_by',  '—')}",
@@ -525,7 +491,7 @@ def _build_assignment_email(cr: dict, issues: list[dict]) -> tuple[str, str, str
         "ACTION REQUIRED:",
         "Review the linked issues above, correct the data in your source system,",
         "then return to the BNR Data Quality Dashboard → Remediation tab and mark",
-        "this Change Request as 'In Progress' and then 'Submitted for Review'.",
+        "this Data Correction Request as 'In Progress' and then 'Submitted for Review'.",
         "",
         "This is an automated notification from the BNR Data Quality",
         "Monitoring System. Do not reply to this message.",
@@ -571,7 +537,7 @@ def _build_assignment_email(cr: dict, issues: list[dict]) -> tuple[str, str, str
     html = f"""
     <html><body style="font-family:Arial,sans-serif;color:#1a1a2e;max-width:720px">
       <div style="background:#753918;padding:20px 32px">
-        <h2 style="color:#fff;margin:0">BNR Data Quality — Change Request Assigned</h2>
+        <h2 style="color:#fff;margin:0">BNR Data Quality — Data Correction Request Assigned</h2>
         <p style="color:rgba(255,255,255,.7);margin:4px 0 0">{cr_id}  ·  {inst}</p>
       </div>
       <div style="padding:24px 32px">
@@ -608,7 +574,7 @@ def _build_assignment_email(cr: dict, issues: list[dict]) -> tuple[str, str, str
           <strong>Action Required:</strong> Correct the data in your source system for
           the rules and tables listed above, then open the
           <strong>BNR Data Quality Dashboard → Remediation tab</strong>
-          and move this Change Request to <em>In Progress</em>, then
+          and move this Data Correction Request to <em>In Progress</em>, then
           <em>Submit for Review</em> when corrections are complete.
         </div>
       </div>

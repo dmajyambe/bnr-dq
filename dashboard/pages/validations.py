@@ -4,9 +4,28 @@ from __future__ import annotations
 from dash import dcc, html
 import plotly.graph_objects as go
 
+import sqlite3
+from pathlib import Path
+
 from dashboard.components import _dim_pill
 from dashboard.theme import BG, BRAND, CARD, DIVIDER, FONT, MUTED, TEXT
-from dq.rules.registry import get_all_rules
+
+_DB_PATH = Path(__file__).resolve().parents[2] / "dq_rules.db"
+
+
+def _get_rules_from_db() -> list[dict]:
+    try:
+        con = sqlite3.connect(_DB_PATH)
+        con.row_factory = sqlite3.Row
+        rows = con.execute(
+            "SELECT rule_id, dimension, category, rule_name, tables, fields "
+            "FROM dq_rules ORDER BY dimension, rule_id"
+        ).fetchall()
+        con.close()
+        return [dict(r) for r in rows]
+    except Exception:
+        from dq.rules.registry import get_all_rules
+        return get_all_rules()
 
 
 def _rules_charts(builtin_rules: list[dict], user_rules: list[dict]) -> html.Div:
@@ -159,7 +178,7 @@ def _rules_table(rules: list[dict]) -> html.Div:
                       "borderBottom": f"1px solid {DIVIDER}"}))
 
     return html.Div([
-        html.Div("ALL RULES CURRENTLY CHECKED", style={
+        html.Div("", style={
             "fontSize": "11px", "fontWeight": "900", "color": MUTED,
             "textTransform": "uppercase", "letterSpacing": "0.06em", "marginBottom": "8px"}),
         html.Div(rows, style={
@@ -168,18 +187,305 @@ def _rules_table(rules: list[dict]) -> html.Div:
     ], style={"marginBottom": "20px"})
 
 
+def _doc_accordion(title: str, children: list, open_: bool = False) -> html.Details:
+    """A styled native-HTML accordion section — no callback needed."""
+    S = lambda extra={}: {
+        "fontFamily": "inherit",
+        **extra,
+    }
+    summary_style = {
+        "cursor":        "pointer",
+        "listStyle":     "none",
+        "display":       "flex",
+        "alignItems":    "center",
+        "justifyContent":"space-between",
+        "padding":       "13px 18px",
+        "fontSize":      "12px",
+        "fontWeight":    "900",
+        "color":         TEXT,
+        "letterSpacing": "0.03em",
+        "userSelect":    "none",
+    }
+    return html.Details(
+        [
+            html.Summary(
+                [html.Span(title), html.Span("▸", style={"fontSize": "11px", "color": MUTED})],
+                style=summary_style,
+            ),
+            html.Div(children, style={"padding": "4px 20px 18px"}),
+        ],
+        open=open_,
+        style={
+            "background":    CARD,
+            "border":        f"1px solid {DIVIDER}",
+            "borderRadius":  "8px",
+            "marginBottom":  "8px",
+        },
+    )
+
+
+def _doc_p(text: str) -> html.P:
+    return html.P(text, style={"fontSize": "13px", "color": TEXT,
+                                "lineHeight": "1.7", "margin": "8px 0"})
+
+
+def _doc_h(text: str) -> html.Div:
+    return html.Div(text, style={"fontSize": "12px", "fontWeight": "900",
+                                  "color": BRAND, "margin": "14px 0 4px",
+                                  "textTransform": "uppercase", "letterSpacing": "0.04em"})
+
+
+def _doc_kv_table(rows: list[tuple[str, str]]) -> html.Table:
+    def _td(val, bold=False):
+        return html.Td(val, style={
+            "padding": "7px 12px", "fontSize": "12px",
+            "color": TEXT, "borderBottom": f"1px solid {DIVIDER}",
+            "fontWeight": "700" if bold else "400",
+            "verticalAlign": "top",
+        })
+    return html.Table(
+        [html.Tr([_td(k, bold=True), _td(v)]) for k, v in rows],
+        style={"width": "100%", "borderCollapse": "collapse",
+               "background": BG, "borderRadius": "6px",
+               "border": f"1px solid {DIVIDER}", "margin": "8px 0"},
+    )
+
+
+def _doc_status_table(rows: list[tuple[str, str]]) -> html.Table:
+    hdr_style = {"padding": "7px 12px", "fontSize": "10px", "fontWeight": "900",
+                 "color": MUTED, "textTransform": "uppercase",
+                 "letterSpacing": "0.05em", "background": BG,
+                 "borderBottom": f"2px solid {DIVIDER}"}
+
+    def _td(val):
+        return html.Td(val, style={"padding": "7px 12px", "fontSize": "12px",
+                                    "color": TEXT, "borderBottom": f"1px solid {DIVIDER}",
+                                    "verticalAlign": "top"})
+
+    return html.Table(
+        [html.Thead(html.Tr([
+            html.Th("Status",  style=hdr_style),
+            html.Th("Meaning", style=hdr_style),
+        ]))] +
+        [html.Tr([_td(s), _td(m)]) for s, m in rows],
+        style={"width": "100%", "borderCollapse": "collapse",
+               "background": CARD, "borderRadius": "6px",
+               "border": f"1px solid {DIVIDER}", "margin": "8px 0"},
+    )
+
+
+def _documentation_section() -> html.Div:
+    """Official BNR DQ programme documentation"""
+
+    lifecycle_text = (
+        "Detection Run (monthly)  →  Failing rows found for a rule at Institution X  →  "
+        "Issue Created (Status: New, SLA: 30 days)  →  Urgency escalates: "
+        "NEW (0–7 d) → ATTENTION (8–14 d) → URGENT (15–21 d) → CRITICAL (22–29 d) → OVERDUE (30+ d)  →  "
+        "Inspector creates a Data Correction Request and assigns it to the institution  →  "
+        "Institution corrects data and resubmits  →  "
+        "Next run finds zero failing rows  →  PENDING RESOLUTION  →  "
+        "Resolution scan re-checks  →  RESOLVED or stays OPEN"
+    )
+
+    return html.Div([
+        html.Div(" ", style={
+            "fontSize": "13px", "fontWeight": "900", "color": TEXT,
+            "letterSpacing": "0.04em", "marginBottom": "14px",
+        }),
+
+        # 1. What is this system?
+        _doc_accordion("1.  What Is This System?", [
+            _doc_p(
+                "The BNR Data Quality (DQ) Dashboard is a data quality tool used by the National Bank of Rwanda (BNR) "
+                "and stakeholders to ensure the quality of data is maintained. Every month, data submitted to the EDWH "
+                "(Electronic Data Warehouse) is automatically checked against stakeholder-verified data quality rules. "
+                "Institutions that fail a rule are assigned an issue. The system tracks those issues, assigns "
+                "remediation/data correction tasks, and confirms when the institution has corrected the data."
+            ),
+        ], open_=True),
+
+        # 2. Key Terms
+        _doc_accordion("2.  Key Terms and Definitions", [
+            _doc_kv_table([
+                ("Institution",       "A financial entity (bank, MFI, or SACCO) that submits data to the EDWH."),
+                ("Reporting Period",  "The month for which an institution submitted its data (e.g., July 2026)."),
+                ("Data Table",        "One of the datasets in the submission (e.g., Customers, Accounts, Contracts)."),
+                ("Rule",              "A specific data quality check applied to one or more fields in a data table. Each rule has a unique ID (e.g., COMP-001, ACC-016)."),
+                ("Dimension",         "A category that groups related rules by the type of quality problem they detect. There are five dimensions: Completeness, Accuracy, Validity, Uniqueness, and Timeliness."),
+                ("Score",             "A percentage (0–100%) representing how well an institution's data passed the rules within a dimension. 100% means all records passed every rule."),
+                ("Failing Row",       "A single record in a data table that violated a rule. For example, one customer record with a missing mandatory field."),
+                ("Issue",             "A logged problem created when one or more failing rows are found for a specific rule at a specific institution. Issues have a 30-day SLA."),
+                ("SLA",               "Service Level Agreement — the deadline for resolving an issue. All issues must be corrected within 30 days of detection (subject to change upon agreement with stakeholders)."),
+                ("Urgency",           "How close an issue is to its SLA deadline. Escalates automatically: New → Attention → Urgent → Critical → Overdue."),
+            ]),
+        ]),
+
+        # 3. Five dimensions
+        _doc_accordion("3.  The Five Data Quality Dimensions", [
+            _doc_h("Completeness"),
+            _doc_p("All mandatory fields in a submitted record must contain a value. A field is 'incomplete' if it is blank or null when data is required."),
+            _doc_h("Accuracy"),
+            _doc_p(
+                "Data values must be correct, consistent, and internally coherent. This also includes referential integrity "
+                "rules — checks between more than one table. For example: every account in the Accounts table must have a "
+                "corresponding customer in the Customers table. Referential integrity scores are averaged with the other "
+                "accuracy scores to produce a single Accuracy dimension score."
+            ),
+            _doc_h("Validity"),
+            _doc_p("Data values must be in the correct format and within acceptable ranges, and must make logical sense when considered against other fields or business rules."),
+            _doc_h("Uniqueness"),
+            _doc_p(
+                "Records that should be unique must not appear more than once. This covers both duplicate rows within a "
+                "single submission and records that are repeated unchanged across two consecutive reporting periods when "
+                "changes would be expected."
+            ),
+            _doc_h("Timeliness"),
+            _doc_p(
+                "Data must reflect up-to-date account activity. An account marked as active must have had at least one "
+                "transaction within the past 180 days. Accounts with no transaction activity for 180 days or more are flagged."
+            ),
+        ]),
+
+        # 4. Scores
+        _doc_accordion("4.  Quality Scores Explained", [
+            _doc_p("Each institution receives a score from 0% to 100% for each of the five dimensions, calculated every month when the detection pipeline runs."),
+            _doc_h("How Scores Are Calculated"),
+            _doc_kv_table([
+                ("Per-rule score",    "(Passing rows ÷ total rows) × 100 — calculated for every rule run against a table."),
+                ("Per-dimension score","Scores for all rules within a dimension are averaged across all relevant tables for that institution."),
+                ("Accuracy score",    "Referential integrity rules (REL-001 to REL-008) are averaged together with other Accuracy rule scores to produce one Accuracy dimension score."),
+                ("Green (≥ 95%)",     "Acceptable"),
+                ("Amber (80–94%)",    "Needs attention"),
+                ("Red (< 80%)",       "Critical issue"),
+            ]),
+        ]),
+
+        # 5. Issue lifecycle
+        _doc_accordion("5.  The Issue Lifecycle", [
+            _doc_p(lifecycle_text),
+            html.Div([
+                html.Span("Two-pass resolution:", style={"fontWeight": "700", "color": TEXT}),
+                html.Span(
+                    " An issue is only closed after two independent clean checks to prevent false closures "
+                    "caused by mid-upload data snapshots.",
+                    style={"color": TEXT},
+                ),
+            ], style={"fontSize": "13px", "lineHeight": "1.7", "margin": "10px 0",
+                      "background": BG, "padding": "10px 14px", "borderRadius": "6px",
+                      "border": f"1px solid {DIVIDER}"}),
+            _doc_p(
+                "Recurrence: If the same issue reappears within 30 days of being resolved, it is reopened with a "
+                "recurrence counter (shown as ↺ 2, ↺ 3, etc.), signalling a pattern of persistent non-compliance."
+            ),
+        ]),
+
+        # 6. Dashboard guide
+        _doc_accordion("6.  Dashboard User Guide — BNR Inspector", [
+            _doc_h("Home — Category View"),
+            _doc_p("The home page shows all institutions grouped by category: B (Commercial Banks), MF (Microfinance Institutions), OSACCO / SACCO (Savings and Credit Cooperatives). Click a category card to see its institutions and scores."),
+            _doc_h("Category / Institution View"),
+            _doc_p("After selecting a category or institution: five KPI tiles show the current score per dimension. The Institution Reports Table lists available issue evidence packages — each row shows the institution name, tables with issues, and a Download ZIP button. The ZIP contains Excel files of the actual failing rows, broken down by table and rule."),
+            _doc_h("Data Correction Tab"),
+            _doc_p("Used to create and manage Data Correction Requests. See Section 8 for the full workflow."),
+            _doc_h("Issues Tab"),
+            _doc_p("Contains resolved issues and is the primary reference before approving a data correction submission by institutions."),
+            _doc_h("Documentation Tab"),
+            _doc_p("This tab — visible to all logged-in users — contains the full list of rules being checked and this programme documentation."),
+        ]),
+
+        # 7. Portal guide
+        _doc_accordion("7.  Portal User Guide — Institution Staff", [
+            _doc_h("Dashboard Page"),
+            _doc_p("Shows the five dimension scores scoped to the institution and the last seven (7) runs per dimension."),
+            _doc_h("Issues Page (My Issues)"),
+            _doc_p(
+                "Lists all open issues for the institution. For each issue: which table and rule triggered it, "
+                "how many records are failing, and the SLA deadline and urgency level. Each issue row has a button "
+                "to download the CSV of failing records for that rule, so the institution's data team knows exactly "
+                "which records need to be corrected. The page also shows resolved issues after data correction "
+                "has been confirmed."
+            ),
+            _doc_h("Data Correction Page"),
+            _doc_p(
+                "Shows Data Correction Requests assigned to the institution. Institution users can: Start Work on a "
+                "request (moves it from Open to In Progress), and Submit a corrected data request for review once "
+                "corrections have been made. Institution users cannot create or approve Data Correction Requests — "
+                "those actions belong to the BNR Inspector."
+            ),
+        ]),
+
+        # 8. Remediation workflow
+        _doc_accordion("8.  The Data Correction Workflow", [
+            _doc_h("Step 1 — Inspector Creates a Data Correction Request"),
+            _doc_p(
+                "An inspector goes to the Data Correction tab, selects the institution, chooses the relevant issues "
+                "from the issue list, and fills in: Title, Description, Assigned Officer, and Target Date. "
+                "The request is saved and the institution officer is notified."
+            ),
+            _doc_h("Step 2 — Institution Starts Work"),
+            _doc_p("The institution's user finds the Data Correction Request in their portal, clicks Start Work (status → In Progress), downloads the failing-row reports, corrects the data in their source systems, and prepares a resubmission."),
+            _doc_h("Step 3 — Institution Submits for Review"),
+            _doc_p("Once corrections are made and data is resubmitted, the institution clicks Submit. Status changes to Submitted and BNR is notified."),
+            _doc_h("Step 4 — Inspector Reviews and Approves"),
+            _doc_p("An inspector reviews the resubmission in the Data Correction tab. The inspector can Approve individual tables (if some are corrected and others are not) or Reject the entire request with written notes. When all tables are approved the request moves to Approved then Closed."),
+            _doc_h("Status Reference"),
+            _doc_status_table([
+                ("Open",        "Request created by BNR; institution has not started work yet."),
+                ("In Progress", "Institution has accepted the request and is correcting data."),
+                ("Submitted",   "Institution has resubmitted corrected data and is awaiting BNR review."),
+                ("Approved",    "BNR Inspector has confirmed the corrections are satisfactory."),
+                ("Rejected",    "BNR Inspector has reviewed and found issues still outstanding; institution must re-correct."),
+                ("Closed",      "All tables approved; data correction complete."),
+            ]),
+        ]),
+
+        # 9. FAQ
+        _doc_accordion("9.  Frequently Asked Questions", [
+            _doc_h("How often does the system check data quality?"),
+            _doc_p("The full detection pipeline runs monthly (subject to change depending on specific data needs). Score histories are updated to reflect any data corrections made between monthly runs."),
+            _doc_h("What is the difference between a failing row and an issue?"),
+            _doc_p("A failing row is a single data record that violated a rule. An issue is the aggregated problem logged for a specific rule at a specific institution — it groups all failing rows for that rule into one trackable item with an SLA and urgency level. One issue can represent hundreds or thousands of failing rows."),
+            _doc_h("What does 'Pending Resolution' mean?"),
+            _doc_p("After a clean detection run (no failing rows found), the issue is set to Pending Resolution rather than closed immediately. The system runs a second independent check to confirm the data is genuinely clean before fully closing the issue. This prevents false closures caused by partial or mid-upload data snapshots."),
+            _doc_h("Can an institution user see other institutions' data?"),
+            _doc_p("No. The institution portal enforces strict data isolation — each institution user can only see data for their own institution. BNR Inspectors in the main dashboard can see all institutions."),
+        ]),
+
+    ], style={"marginBottom": "32px"})
+
+
 def _validations_page() -> html.Div:
-    builtin_rules = get_all_rules()
+    builtin_rules = _get_rules_from_db()
     n_tables  = len({t.strip() for r in builtin_rules
                      for t in (r.get("tables") or "").replace("→", ",").split(",")
                      if t.strip()})
     subtitle  = f"{len(builtin_rules)} rules across {n_tables} tables"
 
-    return html.Div([
-        # ── header: title + download ──────────────────────────────────────────
+    _tab_style = {
+        "padding":       "9px 28px",
+        "fontSize":      "12px",
+        "fontWeight":    "700",
+        "color":         MUTED,
+        "background":    CARD,
+        "border":        f"1px solid {DIVIDER}",
+        "borderRadius":  "6px",
+        "cursor":        "pointer",
+        "letterSpacing": "0.04em",
+        "marginRight":   "8px",
+        "userSelect":    "none",
+    }
+    _tab_selected = {
+        **_tab_style,
+        "color":         CARD,
+        "background":    BRAND,
+        "border":        f"1px solid {BRAND}",
+        "borderBottom":  f"1px solid {BRAND}",
+    }
+
+    rules_content = html.Div([
         html.Div([
             html.Div([
-                html.Div("VALIDATION RULES", style={
+                html.Div("", style={
                     "fontSize": "13px", "fontWeight": "900",
                     "color": TEXT, "letterSpacing": "0.04em", "lineHeight": "1.15",
                 }),
@@ -195,9 +501,33 @@ def _validations_page() -> html.Div:
             "display": "flex", "alignItems": "center",
             "justifyContent": "space-between", "marginBottom": "16px",
         }),
-
-        # ── chart + full rule list + download ─────────────────────────────────
-        _rules_charts(builtin_rules, []),
         _rules_table(builtin_rules),
+    ])
+
+    return html.Div([
+        dcc.Tabs(
+            value="docs",
+            children=[
+                dcc.Tab(
+                    label="Documentation",
+                    value="docs",
+                    children=html.Div(_documentation_section(),
+                                      style={"paddingTop": "24px"}),
+                    style=_tab_style,
+                    selected_style=_tab_selected,
+                ),
+                dcc.Tab(
+                    label="Rule Reference",
+                    value="rules",
+                    children=html.Div(rules_content,
+                                      style={"paddingTop": "24px"}),
+                    style=_tab_style,
+                    selected_style=_tab_selected,
+                ),
+            ],
+            colors={"border": "transparent", "primary": BRAND, "background": "transparent"},
+            style={"borderBottom": "none"},
+            content_style={"borderTop": f"1px solid {DIVIDER}", "paddingTop": "0"},
+        ),
         dcc.Download(id="rules-download"),
     ])

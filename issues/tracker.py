@@ -4,14 +4,10 @@ import logging
 from datetime import date
 from issues import repositories as repo
 from issues.state_machine import OPEN_SQL, urgency_band
-from storage.sqlite.connection import get_connection
+from storage.postgres.app_db import get_connection
 
 log = logging.getLogger("issues.tracker")
 
-# table -> completeness rule_id, derived from the registry (was previously a
-# hand-maintained dict here, independently duplicating the inverse mapping
-# dq.rules.completeness._COMP_TABLE_NAMES already defines — removed the
-# duplicate rather than keeping two registries in sync by hand).
 from dq.rules.completeness import _COMP_TABLE_NAMES
 COMP_TABLE_RULE: dict[str, str] = {table: rid for rid, table in _COMP_TABLE_NAMES.items()}
 
@@ -52,16 +48,15 @@ def detect_and_update_issues(R: dict, categories: dict, run_date: str) -> None:
     Parse engine results (R) and write/update dq_open_issues.
 
     Any rule with invalid > 0 for a given le_book immediately becomes an open issue.
-    Issues where invalid == 0 are marked resolved.
-    No score threshold — one failing row is enough.
     """
     repo.ensure_tables()
     con = get_connection()
     try:
         _process_completeness(con, R.get("comp") or {}, categories, run_date)
-        _process_rule_dimension(con, R.get("acc") or {}, "accuracy",   "accuracy_score",   categories, run_date)
-        _process_rule_dimension(con, R.get("val") or {}, "validity",   "validity_score",   categories, run_date)
-        _process_rule_dimension(con, R.get("uni") or {}, "uniqueness", "uniqueness_score", categories, run_date)
+        _process_rule_dimension(con, R.get("acc") or {}, "accuracy",    "accuracy_score",    categories, run_date)
+        _process_rule_dimension(con, R.get("val") or {}, "validity",    "validity_score",    categories, run_date)
+        _process_rule_dimension(con, R.get("uni") or {}, "uniqueness",  "uniqueness_score",  categories, run_date)
+        _process_rule_dimension(con, R.get("tim") or {}, "timeliness",  "timeliness_score",  categories, run_date)
         _process_relationship(con, R.get("rel") or {}, categories, run_date)
         _refresh_urgency_bands(con)
         con.commit()
@@ -73,34 +68,34 @@ def detect_and_update_issues(R: dict, categories: dict, run_date: str) -> None:
     sync_cr_failing_rows()
 
 
-def ingest_issues(issues: list[dict], run_date: str) -> None:
-    """
-    Accept a flat list of pre-detected issues from an external pipeline.
+# def ingest_issues(issues: list[dict], run_date: str) -> None:
+#     """
+#     Accept a flat list of pre-detected issues from an external pipeline.
 
-    Each dict must have: le_book, table, rule_id, dimension, failing_rows, score.
-    Optional: institution_name.
-    """
-    repo.ensure_tables()
-    con = get_connection()
-    try:
-        for item in issues:
-            lb      = item["le_book"]
-            table   = item["table"]
-            rule_id = item["rule_id"]
-            failing = int(item.get("failing_rows", 0))
-            inst    = item.get("institution_name") or lb.title()
+#     Each dict must have: le_book, table, rule_id, dimension, failing_rows, score.
+#     Optional: institution_name.
+#     """
+#     repo.ensure_tables()
+#     con = get_connection()
+#     try:
+#         for item in issues:
+#             lb      = item["le_book"]
+#             table   = item["table"]
+#             rule_id = item["rule_id"]
+#             failing = int(item.get("failing_rows", 0))
+#             inst    = item.get("institution_name") or lb.title()
 
-            if failing > 0:
-                repo.upsert_issue(con, lb, inst, table, rule_id,
-                                  item["dimension"], failing, run_date, _lookup_rule_name(rule_id))
-            else:
-                repo.maybe_resolve(con, lb, table, rule_id)
-        _refresh_urgency_bands(con)
-        con.commit()
-    finally:
-        con.close()
+#             if failing > 0:
+#                 repo.upsert_issue(con, lb, inst, table, rule_id,
+#                                   item["dimension"], failing, run_date, _lookup_rule_name(rule_id))
+#             else:
+#                 repo.maybe_resolve(con, lb, table, rule_id)
+#         _refresh_urgency_bands(con)
+#         con.commit()
+#     finally:
+#         con.close()
 
-    log.info("ingest_issues: processed %d item(s) for %s", len(issues), run_date)
+#     log.info("ingest_issues: processed %d item(s) for %s", len(issues), run_date)
 
 
 def _process_completeness(con, report: dict, categories: dict, run_date: str) -> None:
@@ -180,12 +175,12 @@ def sync_cr_failing_rows() -> None:
                 iids = _json.loads(cr.get("issue_ids") or "[]")
                 if not iids:
                     continue
-                placeholders = ",".join("?" * len(iids))
+                placeholders = ",".join(["%s"] * len(iids))
                 row = con.execute(
-                    f"SELECT COALESCE(SUM(failing_rows),0) FROM dq_open_issues"
+                    f"SELECT COALESCE(SUM(failing_rows),0) AS total FROM dq_open_issues"
                     f" WHERE issue_id IN ({placeholders})", iids
                 ).fetchone()
-                total = int(row[0])
+                total = int(row["total"])
                 con.execute(
                     "UPDATE dq_change_requests SET failing_rows=?, updated_at=?"
                     " WHERE cr_id=?",

@@ -16,15 +16,11 @@ from dashboard.app import app
     Output("login-type",  "data"),
     Input("login-tab-bnr",  "n_clicks"),
     Input("login-tab-inst", "n_clicks"),
-    Input("login-tab-exec", "n_clicks"),
     prevent_initial_call=True,
 )
-def _switch_login_tab(n_bnr, n_inst, n_exec):
+def _switch_login_tab(n_bnr, n_inst):
     tid = ctx.triggered_id
-    lt  = ("inst" if tid == "login-tab-inst"
-           else "exec" if tid == "login-tab-exec"
-           else "bnr")
-    # Return a "tab-switch" marker so _render_page re-draws the login page
+    lt  = "inst" if tid == "login-tab-inst" else "bnr"
     return {"tab_switch": lt}, lt
 
 
@@ -49,22 +45,19 @@ def _do_login(n_clicks, n_submit, email, password, login_type):
 
     # Enforce @bnr.rw for the BNR tab before even hitting the DB
     if login_type == "bnr" and not auth_mod.is_valid_bnr_email(email):
-        return {"error": "BNR Staff login requires a @bnr.rw email address.", "tab": login_type}
+        return {"error": "Inspector login requires a @bnr.rw email address.", "tab": login_type}
 
     user = auth_mod.verify_credentials(email, password)
     if not user:
         return {"error": "Incorrect email or password.", "tab": login_type}
 
     role = user["role"]
-    if login_type == "exec":
-        if not auth_mod.is_executive(role):
-            return {"error": "This isn't an Executive account — use the BNR Staff or Institution login.", "tab": login_type}
-    elif login_type == "bnr":
-        if auth_mod.is_executive(role) or role in auth_mod.INST_ROLES:
-            return {"error": "Use the Executive or Institution login for this account.", "tab": login_type}
+    if login_type == "bnr":
+        if role in auth_mod.INST_ROLES:
+            return {"error": "Use the Institution login for this account.", "tab": login_type}
     elif login_type == "inst":
-        if role != "inst_user":
-            return {"error": "Use the Executive or BNR Staff login for this account.", "tab": login_type}
+        if role not in auth_mod.INST_ROLES:
+            return {"error": "Use the Inspector login for this account.", "tab": login_type}
 
     flask_session["user_email"] = user["email"]
     flask_session["user_name"]  = user["name"]

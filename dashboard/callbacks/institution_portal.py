@@ -8,11 +8,10 @@ from dash import ALL, Input, Output, State, ctx, html
 from dashboard.app import app
 from dashboard.components import _empty_state
 from dashboard.data import REPORTS_DIR, _DIR
-from dashboard.pages.alerts import _build_resolved_rows
 from dashboard.pages.remediation import _build_cr_list
 from dashboard.theme import (
-    BG, BRAND, CARD, DIVIDER, MUTED, TABLE_NAMES_PRETTY, TEXT, C_GREEN, C_RED,
-    _URGENCY_COLORS,
+    BG, BRAND, CARD, DIVIDER, MUTED, RESOLVED_GREEN_BG,
+    TABLE_NAMES_PRETTY, TEXT, C_GREEN, C_RED, _URGENCY_COLORS,
 )
 
 
@@ -46,62 +45,186 @@ def _inst_issue_list(status, table_filter, _poll, auth_data):
     le_book  = next(iter(le_books), None)
     status   = status or "open"
 
-    if status != "open":
-        issues = [i for i in get_issues(status=status) if i["le_book"] in le_books]
-        label  = {"penalized": "Delayed", "resolved": "Resolved"}.get(status, status.title())
+    if status == "resolved":
+        from collections import defaultdict, Counter
+        from datetime import datetime as _datetime
+        issues = [i for i in get_issues(status="resolved") if i["le_book"] in le_books]
         if not issues:
-            _sub = {"resolved": "Resolved issues will appear here once fixes are confirmed.",
-                    "penalized": "No issues have breached their deadline."}.get(status, "")
-            return _empty_state(f"No {label.lower()} issues", _sub, icon="✓")
-        return _build_resolved_rows(issues)
+            return _empty_state(
+                "No resolved issues",
+                "Resolved issues will appear here once fixes are confirmed.",
+                icon="✓")
+
+        # group by table
+        by_table: dict[str, list] = defaultdict(list)
+        for iss in issues:
+            by_table[iss["table_name"]].append(iss)
+
+        # scan resolved ZIPs to find which tables have a downloadable XLSX
+        import zipfile as _zf
+        _issue_dir = _DIR / "issue_reports"
+        resolved_tables: set[str] = set()
+        for zp in (_issue_dir.glob(f"{le_book}_*_resolved.zip") if _issue_dir.exists() else []):
+            try:
+                with _zf.ZipFile(zp) as _z:
+                    for m in _z.namelist():
+                        if m.endswith(".xlsx"):
+                            resolved_tables.add(m[:-5])
+            except Exception:
+                pass
+
+        _H = {"fontSize": "10px", "fontWeight": "900", "color": MUTED,
+              "textTransform": "uppercase", "letterSpacing": "0.05em",
+              "padding": "7px 14px", "whiteSpace": "nowrap"}
+        hdr = html.Div([
+            html.Span("Table",        style={**_H, "flex": "1"}),
+            html.Span("Resolved",     style={**_H, "width": "80px",  "textAlign": "center"}),
+            html.Span("Rows Fixed",   style={**_H, "width": "110px", "textAlign": "right"}),
+            html.Span("Report Month", style={**_H, "width": "120px"}),
+            html.Span("Resolved On",  style={**_H, "width": "100px"}),
+            html.Span("Download",     style={**_H, "width": "90px",  "textAlign": "center"}),
+        ], style={"display": "flex", "background": BG,
+                  "borderRadius": "8px 8px 0 0",
+                  "borderBottom": f"2px solid {DIVIDER}"})
+
+        rows = [hdr]
+        for i, (table, t_issues) in enumerate(
+            sorted(by_table.items(),
+                   key=lambda kv: max((x.get("resolved_at") or "") for x in kv[1]),
+                   reverse=True)
+        ):
+            # rows fixed: sum last_failing_rows (pre-resolution count), fall back to failing_rows
+            rows_fixed = sum(
+                (iss.get("last_failing_rows") or iss.get("failing_rows") or 0)
+                for iss in t_issues
+            )
+
+            # report month: most common detection month across this table's issues
+            top_month  = ""
+            det_months = [(iss.get("detected_at") or "")[:7]
+                          for iss in t_issues if (iss.get("detected_at") or "")[:7]]
+            if det_months:
+                top_month = Counter(det_months).most_common(1)[0][0]
+                try:
+                    report_month = _datetime.strptime(top_month, "%Y-%m").strftime("%B %Y")
+                except Exception:
+                    report_month = top_month
+            else:
+                report_month = "—"
+
+            resolved_on = max((x.get("resolved_at") or "") for x in t_issues)
+            tbl_label   = TABLE_NAMES_PRETTY.get(table, table.replace("_", " ").title())
+            bg          = "rgba(22,163,74,0.15)" if i % 2 == 0 else RESOLVED_GREEN_BG
+
+            if le_book and table in resolved_tables:
+                dl_btn = html.Div(
+                    "⬇ xlsx",
+                    id={"type": "inst-tbl-resolved-dl-btn",
+                        "index": f"{le_book}|{table}|{top_month}"},
+                    n_clicks=0,
+                    title=f"Download resolved report for {tbl_label} ({report_month})",
+                    style={
+                        "cursor": "pointer", "background": BRAND, "color": CARD,
+                        "fontSize": "10px", "fontWeight": "700",
+                        "padding": "4px 10px", "borderRadius": "4px",
+                        "userSelect": "none", "whiteSpace": "nowrap",
+                    },
+                )
+            else:
+                dl_btn = html.Span("—", style={"color": MUTED, "fontSize": "12px",
+                                               "textAlign": "center", "display": "block"},
+                                   title="Report not yet available for this table")
+
+            rows.append(html.Div([
+                html.Div([
+                    html.Span("✓ ", style={"color": C_GREEN, "fontSize": "11px",
+                                           "marginRight": "6px"}),
+                    html.Span(tbl_label, style={"fontSize": "13px", "fontWeight": "700",
+                                                "color": TEXT}),
+                ], style={"flex": "1", "display": "flex", "alignItems": "center",
+                          "padding": "10px 14px",
+                          "borderLeft": f"3px solid {C_GREEN}"}),
+                html.Span(str(len(t_issues)),
+                          style={"width": "80px", "textAlign": "center",
+                                 "fontSize": "13px", "fontWeight": "700",
+                                 "color": C_GREEN, "padding": "10px 0"}),
+                html.Span(f"{rows_fixed:,}" if rows_fixed else "—",
+                          style={"width": "110px", "textAlign": "right",
+                                 "fontSize": "13px", "fontWeight": "700",
+                                 "color": C_GREEN, "padding": "10px 14px"}),
+                html.Span(report_month,
+                          style={"width": "120px", "fontSize": "12px", "fontWeight": "700",
+                                 "color": TEXT, "padding": "10px 14px"}),
+                html.Span(resolved_on,
+                          style={"width": "100px", "fontSize": "11px",
+                                 "color": MUTED, "padding": "10px 14px"}),
+                html.Div(dl_btn,
+                         style={"width": "90px", "display": "flex",
+                                "justifyContent": "center", "alignItems": "center",
+                                "padding": "10px 0"}),
+            ], style={
+                "display": "flex", "alignItems": "center",
+                "background": bg, "borderBottom": f"1px solid {DIVIDER}",
+            }))
+
+        return html.Div(
+            rows,
+            style={"background": CARD, "borderRadius": "8px",
+                   "border": f"1px solid {DIVIDER}"},
+        )
 
     # ── open: one row per affected table ──────────────────────────────────────
+    from datetime import datetime as _datetime
+    from dashboard.data import latest_run_month
+    this_month  = latest_run_month()
+    month_label = _datetime.strptime(this_month, "%Y-%m").strftime("%B %Y")
+
     all_by_table = get_issues_by_table(status="open")
 
     # apply table filter
     selected_tables = set(table_filter) if table_filter else set()
 
-    # aggregate per table for this institution
-    _BO = ["new", "attention", "urgent", "critical", "overdue"]
+    # aggregate per table for this institution — current month issues only
     table_summary: list[dict] = []
     for table, rules in all_by_table.items():
         if selected_tables and table not in selected_tables:
             continue
-        total_rows  = 0
-        n_rules     = 0
-        worst       = "new"
-        earliest_dl = None
+        total_rows      = 0
+        last_total_rows = 0
+        n_rules         = 0
+        earliest_dl     = None
         for rule in rules:
-            my_insts = [i for i in rule["institutions"] if i["le_book"] in le_books]
+            my_insts = [i for i in rule["institutions"]
+                        if i["le_book"] in le_books
+                        and (i.get("detected_at") or "").startswith(this_month)]
             if not my_insts:
                 continue
-            total_rows += sum(i["failing_rows"] for i in my_insts)
-            n_rules    += 1
-            urg = rule["worst_urgency"]
-            if _BO.index(urg) > _BO.index(worst):
-                worst = urg
+            total_rows      += sum(i["failing_rows"] for i in my_insts)
+            last_total_rows += sum(i.get("last_failing_rows") or i["failing_rows"]
+                                   for i in my_insts)
+            n_rules += 1
             for inst in my_insts:
                 dl = inst.get("sla_deadline")
                 if dl and (earliest_dl is None or dl < earliest_dl):
                     earliest_dl = dl
         if n_rules:
             table_summary.append({
-                "table":       table,
-                "label":       TABLE_NAMES_PRETTY.get(table, table.replace("_", " ").title()),
-                "n_rules":     n_rules,
-                "total_rows":  total_rows,
-                "worst":       worst,
-                "deadline":    earliest_dl or "—",
+                "table":           table,
+                "label":           TABLE_NAMES_PRETTY.get(table, table.replace("_", " ").title()),
+                "n_rules":         n_rules,
+                "total_rows":      total_rows,
+                "last_total_rows": last_total_rows,
+                "deadline":        earliest_dl or "—",
             })
 
     if not table_summary:
         return _empty_state(
-            "No open issues",
-            "Nothing needs attention right now — your data is passing all checks.",
+            f"No new issues in {month_label}",
+            "No new data quality issues were detected this month for your institution.",
             icon="✓")
 
-    # sort worst-urgency first, then most failing rows
-    table_summary.sort(key=lambda r: (_BO.index(r["worst"]), -r["total_rows"]), reverse=True)
+    # sort by most failing rows
+    table_summary.sort(key=lambda r: -r["total_rows"])
 
     # ── find the latest institution report file (mirrors _on_inst_download_confirm order) ──
     rpt_file  = None
@@ -109,7 +232,8 @@ def _inst_issue_list(status, table_filter, _poll, auth_data):
     if le_book:
         _issue_dir = _DIR / "issue_reports"
         if _issue_dir.exists():
-            _zips = sorted(_issue_dir.glob(f"{le_book}_*.zip"), reverse=True)
+            _zips = sorted([z for z in _issue_dir.glob(f"{le_book}_*.zip")
+                            if not z.name.endswith("_resolved.zip")], reverse=True)
             if _zips:
                 rpt_file = _zips[0]
                 rpt_date = rpt_file.stem.split("_", 1)[-1]  # YYYY-MM
@@ -126,6 +250,23 @@ def _inst_issue_list(status, table_filter, _poll, auth_data):
                     stem     = rpt_file.stem.rsplit("_", 1)
                     rpt_date = stem[-1] if len(stem) == 2 and len(stem[-1]) == 10 else "—"
 
+    def _failing_rows_cell(current: int, previous: int) -> html.Div:
+        _base = {"width": "110px", "textAlign": "right", "padding": "10px 14px",
+                 "display": "flex", "alignItems": "center", "justifyContent": "flex-end"}
+        if previous and previous != current:
+            return html.Div([
+                html.Span(f"{previous:,}", style={"textDecoration": "line-through",
+                                                   "color": MUTED, "fontSize": "10px",
+                                                   "marginRight": "4px"}),
+                html.Span(f"{current:,}", style={"fontWeight": "700", "color": C_RED,
+                                                  "fontSize": "13px"}),
+            ], style=_base)
+        return html.Div(
+            html.Span(f"{current:,}", style={"fontWeight": "700", "color": C_RED,
+                                              "fontSize": "13px"}),
+            style=_base,
+        )
+
     # ── table header ──────────────────────────────────────────────────────────
     _H = {"fontSize": "10px", "fontWeight": "900", "color": MUTED,
           "textTransform": "uppercase", "letterSpacing": "0.05em",
@@ -134,27 +275,24 @@ def _inst_issue_list(status, table_filter, _poll, auth_data):
         html.Span("Table",        style={**_H, "flex": "1"}),
         html.Span("Issues",       style={**_H, "width": "68px", "textAlign": "center"}),
         html.Span("Failing Rows", style={**_H, "width": "110px", "textAlign": "right"}),
-        html.Span("Urgency",      style={**_H, "width": "90px", "textAlign": "center"}),
+        html.Span("Detected",     style={**_H, "width": "90px", "textAlign": "center"}),
         html.Span("Deadline", style={**_H, "width": "100px"}),
         html.Span("Report",       style={**_H, "width": "80px", "textAlign": "center"}),
     ], style={"display": "flex", "background": BG,
               "borderRadius": "8px 8px 0 0",
               "borderBottom": f"2px solid {DIVIDER}"})
 
-    _UC = _URGENCY_COLORS
+    _new_col = _URGENCY_COLORS.get("new", MUTED)
     rows = []
     for i, row in enumerate(table_summary):
-        urg     = row["worst"]
-        urg_col = _UC.get(urg, MUTED)
-        ov      = urg == "overdue"
-        bg      = "rgba(244,246,249,0.7)" if i % 2 == 0 else CARD
+        bg = "rgba(244,246,249,0.7)" if i % 2 == 0 else CARD
 
-        # urgency chip
+        # month chip
         urg_chip = html.Span(
-            ("⚠ " if ov else "") + urg.title(),
-            style={"fontSize": "10px", "fontWeight": "700", "color": urg_col,
-                   "background": f"rgba({','.join(str(int(urg_col.lstrip('#')[j:j+2],16)) for j in (0,2,4))},.10)",
-                   "border": f"1px solid {urg_col}",
+            month_label,
+            style={"fontSize": "10px", "fontWeight": "700", "color": _new_col,
+                   "background": f"rgba({','.join(str(int(_new_col.lstrip('#')[j:j+2],16)) for j in (0,2,4))},.10)",
+                   "border": f"1px solid {_new_col}",
                    "borderRadius": "4px", "padding": "2px 7px",
                    "whiteSpace": "nowrap"},
         )
@@ -176,31 +314,26 @@ def _inst_issue_list(status, table_filter, _poll, auth_data):
 
         rows.append(html.Div([
             html.Div([
-                html.Span("●", style={"color": urg_col, "fontSize": "9px",
+                html.Span("●", style={"color": _new_col, "fontSize": "9px",
                                        "marginRight": "8px"}),
                 html.Span(row["label"], style={"fontSize": "13px", "fontWeight": "700",
                                                 "color": TEXT}),
             ], style={"flex": "1", "display": "flex", "alignItems": "center",
                       "padding": "10px 14px",
-                      "borderLeft": f"3px solid {urg_col}"}),
+                      "borderLeft": f"3px solid {_new_col}"}),
             html.Span(
                 str(row["n_rules"]),
                 style={"width": "68px", "textAlign": "center",
                        "fontSize": "13px", "color": MUTED, "padding": "10px 0"},
             ),
-            html.Span(
-                f"{row['total_rows']:,}",
-                style={"width": "110px", "textAlign": "right",
-                       "fontSize": "13px", "fontWeight": "700",
-                       "color": C_RED, "padding": "10px 14px"},
-            ),
+            _failing_rows_cell(row["total_rows"], row["last_total_rows"]),
             html.Div(urg_chip,
                      style={"width": "90px", "padding": "10px 6px",
                             "display": "flex", "justifyContent": "center"}),
             html.Span(
                 row["deadline"],
                 style={"width": "100px", "fontSize": "11px",
-                       "color": C_RED if ov else MUTED, "padding": "10px 14px"},
+                       "color": MUTED, "padding": "10px 14px"},
             ),
             html.Div(dl_icon,
                      style={"width": "80px", "display": "flex",

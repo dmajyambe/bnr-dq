@@ -117,7 +117,7 @@ def _render_page(page: str, nav_state, _rv, auth_data):
         return nav_bar, _alerts_page(cat=cat or "")
 
     if page == "remediation":
-        return nav_bar, _remediation_page(role=role)
+        return nav_bar, _remediation_page(role=role, cat=cat or "")
 
     if not cat:
         return nav_bar, _landing_page(_counts)

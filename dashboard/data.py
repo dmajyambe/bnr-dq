@@ -1,7 +1,4 @@
-# Module-level data loading, mutable cache state, and data-access helpers —
-# moved from dq_dashboard_dash.py. _HISTORY/_PIPELINE are loaded once at
-# import time and refreshed lazily (_fresh_history/_fresh_pipeline check the
-# file mtime on every call) rather than re-read on every request.
+#data loading
 from __future__ import annotations
 
 import json
@@ -21,6 +18,24 @@ PIPELINE_FILE        = _DIR / "pipeline_run.json"
 PIPELINE_STATUS_FILE = _DIR / "pipeline_status.json"
 WATERMARK_FILE       = _DIR / "watermark.json"
 REPORTS_DIR     = _DIR / "reports"
+REPORT_FILE     = _DIR / "dq_report.json"
+
+
+def latest_run_month() -> str:
+    """Return the YYYY-MM of the last completed pipeline run.
+
+    Falls back to the current calendar month if the file is missing, so callers
+    always get a valid prefix string to filter detected_at against.
+    """
+    from datetime import date
+    try:
+        info = json.loads(PIPELINE_FILE.read_text())
+        run_date = info.get("run_date") or ""
+        if len(run_date) >= 7:
+            return run_date[:7]
+    except Exception:
+        pass
+    return date.today().strftime("%Y-%m")
 
 
 # ── issue tracker (loaded fresh each render — SQLite is fast) ─────────────────
@@ -75,6 +90,15 @@ def _load_activity() -> dict:
         return json.loads(ACTIVITY_FILE.read_text(encoding="utf-8"))
     except Exception:
         return {}
+
+def _pipeline_le_books() -> set:
+    """Return the set of le_books included in the current pipeline report."""
+    try:
+        data = json.loads(REPORT_FILE.read_text(encoding="utf-8"))
+        return {str(lb) for lb in (data.get("le_books") or [])}
+    except Exception:
+        return set()
+
 
 def _load_all_categories() -> dict:
     if not CATEGORIES_FILE.exists():
@@ -145,7 +169,8 @@ def _cat_scores(entry: dict, cat: str) -> dict:
         sacco  = by_cat.get("SACCO",  {})
         osacco = by_cat.get("OSACCO", {})
         combined = {}
-        for d in DIMS:
+        all_dims = list(DIMS) + (["timeliness"] if "timeliness" not in DIMS else [])
+        for d in all_dims:
             vals = [float(src.get(d) or 0) for src in (sacco, osacco) if src]
             combined[d] = sum(vals) / len(vals) if vals else 0.0
         return combined
@@ -169,7 +194,10 @@ def _inst_scores(entry: dict, inst_code: str) -> dict:
     if not entry or not inst_code:
         return {d: 0.0 for d in DIMS}
     d = entry.get("by_institution", {}).get(inst_code, {})
-    return {dim: float(d.get(dim) or 0) for dim in DIMS}
+    scores = {dim: float(d.get(dim) or 0) for dim in DIMS}
+    if "timeliness" not in DIMS and "timeliness" in d:
+        scores["timeliness"] = float(d["timeliness"] or 0)
+    return scores
 
 
 def _category_counts(entry: dict) -> dict:

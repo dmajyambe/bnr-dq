@@ -16,7 +16,6 @@ def _login_page(error: str = "", login_type: str = "bnr") -> html.Div:
 
     is_bnr  = (login_type == "bnr")
     is_inst = (login_type == "inst")
-    is_exec = (login_type == "exec")
 
     def _tab(label, tab_id, active):
         return html.Div(
@@ -37,19 +36,15 @@ def _login_page(error: str = "", login_type: str = "bnr") -> html.Div:
         )
 
     tab_bar = html.Div([
-        _tab("🏛  BNR Staff",   "login-tab-bnr",  is_bnr),
+        _tab("🏛  Inspector",   "login-tab-bnr",  is_bnr),
         _tab("🏦  Institution", "login-tab-inst", is_inst),
-        _tab("👔  Management",   "login-tab-exec", is_exec),
     ], style={
         "display": "flex",
         "borderBottom": f"1px solid {DIVIDER}",
         "background": CARD,
     })
 
-    if is_exec:
-        placeholder = "Write your email here"
-        hint = "Management accounts only"
-    elif is_bnr:
+    if is_bnr:
         placeholder = "Write your BNR email here"
         hint = "BNR staff accounts only"
     else:
@@ -81,8 +76,7 @@ def _login_page(error: str = "", login_type: str = "bnr") -> html.Div:
             # Form body
             html.Div([
                 html.Div(
-                    "Executive Sign In" if is_exec else
-                    "BNR Staff Sign In" if is_bnr else "Institution Sign In",
+                    "Inspector Sign In" if is_bnr else "Institution Sign In",
                     style={
                         "fontSize": "15px", "fontWeight": "900", "color": TEXT,
                         "marginBottom": "22px", "textAlign": "center",
