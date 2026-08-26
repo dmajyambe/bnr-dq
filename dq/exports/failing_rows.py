@@ -524,24 +524,27 @@ def write_institution_zips(engine, schema: str, table: str,
 
     # Load per-issue detected_at and sla_deadline from Greenplum so each sheet
     # carries the correct dates rather than a single export-run timestamp.
-    _issue_dates: dict[tuple[str, str], tuple[str, str]] = {}
-    try:
-        from storage.postgres.app_db import get_connection
-        _con = get_connection()
-        lb_list = list(valid_le_books)
-        _ph = ",".join("?" * len(lb_list))
-        for _r in _con.execute(
-            f"SELECT le_book, rule_id, detected_at, sla_deadline FROM dq_open_issues "
-            f"WHERE table_name=? AND le_book IN ({_ph})"
-            f" AND status IN ('open','pending_resolution')",
-            [table] + lb_list,
-        ).fetchall():
-            _issue_dates[(_r["le_book"], _r["rule_id"])] = (
-                _r["detected_at"] or "", _r["sla_deadline"] or ""
-            )
-        _con.close()
-    except Exception as _exc:
-        log.warning("Could not load issue dates from Greenplum for %s: %s", table, _exc)
+    # Keyed by (le_book, table_name, rule_id) so the same rule_id firing on two
+    # different tables for the same institution doesn't overwrite the other's dates.
+    _issue_dates: dict[tuple[str, str, str], tuple[str, str]] = {}
+    lb_list = list(valid_le_books)
+    if lb_list:
+        try:
+            from storage.postgres.app_db import get_connection
+            _ph = ",".join("?" * len(lb_list))
+            with get_connection() as _con:
+                for _r in _con.execute(
+                    f"SELECT le_book, table_name, rule_id, detected_at, sla_deadline "
+                    f"FROM dq_open_issues "
+                    f"WHERE table_name=? AND le_book IN ({_ph})"
+                    f" AND status IN ('open','pending_resolution')",
+                    [table] + lb_list,
+                ).fetchall():
+                    _issue_dates[(_r["le_book"], _r["table_name"], _r["rule_id"])] = (
+                        _r["detected_at"] or "", _r["sla_deadline"] or ""
+                    )
+        except Exception as _exc:
+            log.warning("Could not load issue dates for %s: %s — sheets will have blank dates", table, _exc)
 
     def _dates_for(lb: str, issue_label: str) -> tuple[str, str]:
         """Return (detected_at, sla_deadline) for the given issue label and institution."""
@@ -552,7 +555,7 @@ def write_institution_zips(engine, schema: str, table: str,
             rid = _m.group(1) if _m else None
         if rid is None:
             return ("", "")
-        return _issue_dates.get((lb, rid), ("", ""))
+        return _issue_dates.get((lb, table, rid), ("", ""))
 
     # Fetch column list once; no row data needed yet.
     with engine.connect() as _cc:
@@ -644,6 +647,23 @@ def write_institution_zips(engine, schema: str, table: str,
         st.update(wb=Workbook(write_only=True), path=path, ws=None,
                   issue=None, used=set())
 
+    def _flush_issue_evidence(issue_label: str, lb: str) -> None:
+        """Flush buffered rows for one issue to the evidence store and free RAM."""
+        rows = evidence_buf.pop(issue_label, [])
+        if not rows:
+            return
+        if issue_label.startswith("Missing "):
+            rule_id = _TABLE_TO_COMP_RULE.get(table)
+        else:
+            _m = _RULE_PREFIX_RE.match(issue_label or "")
+            rule_id = _m.group(1) if _m else None
+        if rule_id:
+            try:
+                _store_evidence(lb, rule_id, table, run_date, rows)
+            except Exception as _exc:
+                log.warning("evidence store failed %s/%s/%s: %s",
+                            lb, rule_id, table, _exc)
+
     def _close(lb: str):
         if st["wb"] is None:
             return
@@ -671,20 +691,9 @@ def write_institution_zips(engine, schema: str, table: str,
         os.unlink(st["path"])
         log.info("  ZIP %-6s  %s.xlsx", lb, table)
         st.update(wb=None, path=None, ws=None)
-        # persist buffered rows to evidence store
-        for issue_label, rows in evidence_buf.items():
-            if issue_label.startswith("Missing "):
-                rule_id = _TABLE_TO_COMP_RULE.get(table)
-            else:
-                _m = _RULE_PREFIX_RE.match(issue_label or "")
-                rule_id = _m.group(1) if _m else None
-            if rule_id:
-                try:
-                    _store_evidence(lb, rule_id, table, run_date, rows)
-                except Exception as _exc:
-                    log.warning("evidence store failed %s/%s/%s: %s",
-                                lb, rule_id, table, _exc)
-        evidence_buf.clear()
+        # Flush any remaining issue (the last one — all others were flushed at transition).
+        for issue_label in list(evidence_buf.keys()):
+            _flush_issue_evidence(issue_label, lb)
 
     # Query one institution at a time so each Greenplum cursor covers only that
     # institution's rows — avoids the multi-hour single-query timeout that kills
@@ -727,6 +736,7 @@ def write_institution_zips(engine, schema: str, table: str,
                     _start_sheet(issue, lb)
                     cur_issue = issue
                 elif issue != cur_issue:
+                    _flush_issue_evidence(cur_issue, lb)
                     _start_sheet(issue, lb)
                     cur_issue = issue
                 _write_row(m, name, ctype)
@@ -873,7 +883,7 @@ def write_resolved_institution_zip(le_book: str, month: str, resolved_issues: li
                 rule_name     = iss.get("rule_name") or rule_id
                 dimension     = (iss.get("dimension") or "").title()
                 inst_name     = (iss.get("institution_name") or le_book).title()
-                rows_at_det   = iss.get("last_failing_rows") or iss.get("failing_rows", 0)
+                rows_at_det   = iss.get("original_failing_rows") or iss.get("last_failing_rows") or iss.get("failing_rows", 0)
                 rows_remaining = iss.get("failing_rows", 0)
                 rows_resolved  = max(0, (rows_at_det or 0) - (rows_remaining or 0))
                 is_partial     = rows_remaining > 0

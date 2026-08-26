@@ -23,10 +23,10 @@ def upsert_issue(con, le_book: str, inst_name: str,
                  failing_rows: int, run_date: str, rule_name: str) -> None:
     iid = issue_id(le_book, table, rule_id)
 
-    # currently open/penalized → just refresh count
+    # currently open → just refresh count
     open_row = con.execute(
         "SELECT issue_id, detected_at, original_failing_rows FROM dq_open_issues "
-        "WHERE issue_id=%s AND status IN ('open','penalized')",
+        "WHERE issue_id=%s AND status IN ('open')",
         (iid,),
     ).fetchone()
     if open_row:
@@ -87,6 +87,14 @@ def upsert_issue(con, le_book: str, inst_name: str,
                   dimension, failing_rows, failing_rows, run_date, deadline, new_recurrence))
         log.warning("  REOPENED   %s  %s / %s  (recurrence #%d, %d rows)",
                     le_book, table, rule_id, new_recurrence, failing_rows)
+        # Clear stale original evidence so the next ZIP export re-seeds it
+        # with rows from this recurrence cycle, not the first-ever detection.
+        try:
+            from storage.evidence_store import clear_original
+            clear_original(le_book, rule_id, table)
+        except Exception as _exc:
+            log.warning("Could not clear evidence on reopen %s/%s/%s: %s",
+                        le_book, rule_id, table, _exc)
         return
 
     # new issue
@@ -125,7 +133,7 @@ def maybe_resolve(con, le_book: str, table: str, rule_id: str) -> None:
     iid = issue_id(le_book, table, rule_id)
     row = con.execute(
         "SELECT issue_id FROM dq_open_issues "
-        "WHERE issue_id=%s AND status IN ('open','penalized')",
+        "WHERE issue_id=%s AND status IN ('open')",
         (iid,),
     ).fetchone()
     if row:
@@ -146,7 +154,7 @@ def resolve_issue(issue_id_: str, run_id: str) -> None:
     try:
         row = con.execute(
             "SELECT * FROM dq_open_issues "
-            "WHERE issue_id=%s AND status IN ('open','penalized','pending_resolution')",
+            "WHERE issue_id=%s AND status IN ('open','pending_resolution')",
             (issue_id_,),
         ).fetchone()
         if not row:
@@ -215,7 +223,7 @@ def mark_pending_resolution(issue_id_: str) -> None:
     try:
         con.execute(
             "UPDATE dq_open_issues SET status='pending_resolution' "
-            "WHERE issue_id=%s AND status IN ('open','penalized')",
+            "WHERE issue_id=%s AND status IN ('open')",
             (issue_id_,),
         )
         con.commit()
@@ -304,8 +312,8 @@ def get_open_issues(le_book: str | None = None,
                     include_pending: bool = True) -> list[dict]:
     """Return actionable issues: open + (optionally) pending_resolution."""
     ensure_tables()
-    statuses = "('open','penalized','pending_resolution')" if include_pending \
-               else "('open','penalized')"
+    statuses = "('open','pending_resolution')" if include_pending \
+               else "('open')"
     con = get_connection()
     try:
         if le_book:
@@ -329,7 +337,7 @@ def get_open_issues(le_book: str | None = None,
 def get_issues(status: str | None = None, le_book: str | None = None) -> list[dict]:
     """Return issues filtered by status and/or le_book.
 
-    status='open'     → active bucket (open + pending + penalized) from dq_open_issues
+    status='open'     → active bucket (open + pending_resolution) from dq_open_issues
     status='resolved' → from dq_resolved_issues
     status=None       → union of both tables
     """
@@ -362,7 +370,7 @@ def get_issues(status: str | None = None, le_book: str | None = None) -> list[di
             return [dict(r) for r in rows]
 
         if status:
-            # explicit non-open/non-resolved status (e.g. 'penalized')
+            # explicit non-open/non-resolved status
             clauses, params = ["status=%s"], [status]
             if le_book:
                 clauses.append("le_book=%s")

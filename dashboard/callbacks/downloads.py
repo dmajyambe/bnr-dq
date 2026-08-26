@@ -93,7 +93,7 @@ def _populate_dl_modal(le_book):
         "new":      "#68686f",
     }
     _STATUS_BG = {
-        "open": "rgba(117,57,24,.10)", "penalized": "rgba(124,61,30,.15)",
+        "open": "rgba(117,57,24,.10)",
         "resolved": "rgba(40,160,80,.10)",
     }
 

@@ -143,9 +143,12 @@ def get_issues_by_table(
     for row in rows:
         tbl  = row["table_name"]
         rid  = row["rule_id"]
+        # has_zip_evidence is passed to the UI so the download button can be
+        # conditionally shown; we no longer skip issues without ZIP evidence so
+        # both the BNR dashboard and institution portal draw from the same
+        # dq_open_issues source of truth.
         lb_ev = _evidence.get(row["le_book"])
-        if lb_ev is None or rid not in lb_ev:
-            continue
+        has_zip_evidence = lb_ev is not None and rid in lb_ev
         band = urgency_band(row["detected_at"], row["sla_deadline"])
         try:
             days_left = (date.fromisoformat(row["sla_deadline"]) - today).days
@@ -170,6 +173,7 @@ def get_issues_by_table(
             "recurrence_count":       int(row["recurrence_count"] or 0),
             "rule_name":              rname,
             "pending":                row["status"] == "pending_resolution",
+            "has_zip_evidence":       has_zip_evidence,
         }
         table_rule.setdefault(tbl, {}).setdefault(rid, []).append(inst_rec)
 

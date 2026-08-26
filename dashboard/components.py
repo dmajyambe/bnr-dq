@@ -241,21 +241,6 @@ def _table_card(table_name: str, fail_count: int, delta: int,
     })
 
 
-def _inst_dup_count(entry: dict, inst_code: str) -> int:
-    if not entry or not inst_code:
-        return 0
-    return int(entry.get("by_institution", {}).get(inst_code, {}).get("customer_duplicates", 0))
-
-
-def _cat_dup_count(entry: dict, cat: str) -> int:
-    if not entry:
-        return 0
-    bc = entry.get("by_category", {})
-    if cat == "SACCO":
-        return int(bc.get("SACCO",  {}).get("customer_duplicates", 0)) + \
-               int(bc.get("OSACCO", {}).get("customer_duplicates", 0))
-    return int(bc.get(cat, {}).get("customer_duplicates", 0))
-
 
 def _issue_counts_trend(n_days: int = 30,
                         le_books: set | None = None) -> list[dict]:

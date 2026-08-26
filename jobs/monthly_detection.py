@@ -4,13 +4,12 @@ import argparse
 import logging
 import os
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from dotenv import load_dotenv
 
 SCRIPT_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(SCRIPT_DIR))
-
 from dq.sql.filters import month_filter
 
 
@@ -52,10 +51,18 @@ def run_monthly_detection(engine, schema: str, run_date: str,
     from jobs.exports import write_monthly_zips
     from storage.files.history_store import append_history_entry
     from storage.postgres.institutions import (
-        customer_dup_counts, get_le_book_categories, get_valid_le_books,
-    ) 
+        get_le_book_categories, get_valid_le_books,
+    )
 
     issue_repo.ensure_tables()
+
+    # Derive a consistent date window once so scoring engines and ZIP export
+    # both operate on the exact same rows.  When --month is supplied the caller
+    # already provides extra_where; for a default (no --month) run we derive it
+    # from run_date so the window is date_creation >= first-of-month <= run_date.
+    if not extra_where:
+        extra_where, _ = month_filter(run_date[:7], cutoff_date=run_date)
+        log.info("Date filter derived from run_date=%s: %s", run_date, extra_where)
 
     log.info("Fetching institution metadata …")
     valid_le_books = le_books if le_books is not None else get_valid_le_books(engine, schema)
@@ -98,12 +105,8 @@ def run_monthly_detection(engine, schema: str, run_date: str,
     log.info("Writing issues to tracker …")
     detect_and_update_issues(R, categories, run_date)
 
-    log.info("Computing customer duplicate counts …")
-    dup_counts, cat_dup_counts = customer_dup_counts(engine, schema, valid_le_books)
-    log.info("  %d institution(s) with duplicate customers", len(dup_counts))
-
     log.info("Writing history entry …")
-    entry = build_history_entry(run_date, R, categories, dup_counts, cat_dup_counts)
+    entry = build_history_entry(run_date, R, categories)
     if entry.get("by_institution"):
         append_history_entry(entry)
     else:
@@ -111,20 +114,22 @@ def run_monthly_detection(engine, schema: str, run_date: str,
                     "for run_date=%s (would otherwise render as a 0%% cliff / blank overview)",
                     run_date)
 
-    # per-institution failing-row ZIPs
-    month = run_date[:7] 
-    write_monthly_zips(engine, schema, tables or TABLES, valid_le_books, categories,
-                       month, limit, extra_where=extra_where)
-
-    # Update pipeline_run.json so the dashboard "Data as of" banner reflects this run.
+    # Write pipeline_run.json so the dashboard "Data as of" banner
     import json as _json
     _pipeline_file = SCRIPT_DIR / "pipeline_run.json"
-    _pipeline_file.write_text(_json.dumps({
+    _pipeline_tmp  = _pipeline_file.with_suffix(".json.tmp")
+    _pipeline_tmp.write_text(_json.dumps({
         "run_date": run_date,
-        "data_processed": datetime.utcnow().isoformat() + "+00:00",
+        "data_processed": datetime.now(timezone.utc).isoformat(),
         "mode": "sql",
         "le_books": sorted(valid_le_books),
     }, indent=2), encoding="utf-8")
+    _pipeline_tmp.replace(_pipeline_file)
+
+    # per-institution failing-row ZIPs
+    month = run_date[:7]
+    write_monthly_zips(engine, schema, tables or TABLES, valid_le_books, categories,
+                       month, limit, extra_where=extra_where)
 
     log.info("Monthly detection complete — run_date=%s", run_date)
 

@@ -57,20 +57,24 @@ def write_monthly_zips(engine, schema: str, tables: list[str],
 
     backed_up = {old.with_suffix(".zip.bak") for old in stale}
 
+    # Each institution's ZIP is written atomically by write_institution_zips
+    # (temp file → append), so a mid-run failure leaves already-completed
+    # institutions intact. Do NOT restore backups on failure — that would
+    # overwrite good work. Backups stay on disk for manual recovery if needed.
+    log.info("Streaming per-institution failing-row ZIPs …")
     try:
-        log.info("Streaming per-institution failing-row ZIPs …")
         for table in tables:
             write_institution_zips(engine, schema, table, valid_le_books, categories,
                                    month, limit, extra_where=extra_where)
     except Exception:
-        # Restore only the backups we created
-        for bak in backed_up:
-            if bak.exists():
-                bak.rename(bak.with_suffix("").with_suffix(".zip"))
-                log.warning("Restored backup ZIP: %s", bak.name)
+        log.error(
+            "ZIP export failed mid-run. Completed institutions are intact. "
+            "Stale backups left at: %s",
+            ", ".join(b.name for b in sorted(backed_up) if b.exists()),
+        )
         raise
 
-    # New ZIPs written successfully — remove only our backups
+    # All tables written — remove backups now that fresh ZIPs are confirmed.
     for bak in backed_up:
         if bak.exists():
             bak.unlink()

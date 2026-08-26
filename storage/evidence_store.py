@@ -104,6 +104,28 @@ def load_rows(
         con.close()
 
 
+def clear_original(le_book: str, rule_id: str, table_name: str) -> None:
+    """Delete the 'original' snapshot so the next detection run re-seeds it.
+
+    Called on issue reopen so the resolved ZIP shows rows from the current
+    recurrence cycle, not the first-ever detection.
+    """
+    ensure_table()
+    con = get_connection()
+    try:
+        con.execute(
+            "DELETE FROM dq_issue_evidence "
+            "WHERE le_book=%s AND rule_id=%s AND table_name=%s AND snapshot_type='original'",
+            (le_book, rule_id, table_name),
+        )
+        con.commit()
+        log.debug("Cleared original evidence for %s / %s / %s", le_book, rule_id, table_name)
+    except Exception as exc:
+        log.warning("Could not clear original evidence %s/%s/%s: %s", le_book, rule_id, table_name, exc)
+    finally:
+        con.close()
+
+
 def has_evidence(le_book: str, rule_id: str, table_name: str) -> bool:
     ensure_table()
     con = get_connection()

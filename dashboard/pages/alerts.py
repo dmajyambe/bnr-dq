@@ -996,8 +996,7 @@ def _build_issue_rows(issues: list, status: str) -> html.Div:
     today = _date.today()
 
     if not issues:
-        label = {"open": "open issues", "penalized": "delayed issues",
-                 "resolved": "resolved issues"}.get(status, "issues")
+        label = {"open": "open issues", "resolved": "resolved issues"}.get(status, "issues")
         return html.Div(f"No {label}.", style={"color": MUTED, "padding": "20px"})
 
     H = {"fontSize": "11px", "fontWeight": "900", "color": MUTED,
@@ -1012,18 +1011,6 @@ def _build_issue_rows(issues: list, status: str) -> html.Div:
             html.Span("Detected",     style={**H, "width": "96px"}),
             html.Span("Resolved",     style={**H, "width": "96px"}),
             html.Span("Days to Fix",  style={**H, "width": "80px", "textAlign": "center"}),
-        ], style={"display": "flex", "background": BG,
-                  "borderRadius": "8px 8px 0 0", "borderBottom": f"2px solid {DIVIDER}"})
-    elif status == "penalized":
-        hdr = html.Div([
-            html.Span("Institution",  style={**H, "flex": "1"}),
-            html.Span("Table",        style={**H, "width": "160px"}),
-            html.Span("Rule",         style={**H, "width": "90px"}),
-            html.Span("Dimension",    style={**H, "width": "100px"}),
-            html.Span("Failing Rows", style={**H, "width": "96px", "textAlign": "right"}),
-            html.Span("Detected",     style={**H, "width": "96px"}),
-            html.Span("Deadline", style={**H, "width": "96px"}),
-            html.Span("Days Over",    style={**H, "width": "76px", "textAlign": "center"}),
         ], style={"display": "flex", "background": BG,
                   "borderRadius": "8px 8px 0 0", "borderBottom": f"2px solid {DIVIDER}"})
     else:
@@ -1077,22 +1064,6 @@ def _build_issue_rows(issues: list, status: str) -> html.Div:
                 html.Span(detected,                 style={"width": "96px",  "fontSize": "11px", "color": MUTED, "padding": "7px 10px"}),
                 html.Span(resolved,                 style={"width": "96px",  "fontSize": "11px", "color": C_GREEN, "padding": "7px 10px"}),
                 html.Span(fix_str,                  style={"width": "80px",  "fontSize": "12px", "fontWeight": "700", "color": fix_clr, "textAlign": "center", "padding": "7px 10px"}),
-            ]
-        elif status == "penalized":
-            try:
-                days_over = (today - _date.fromisoformat(iss["sla_deadline"])).days
-                over_str  = f"+{days_over}d"
-            except Exception:
-                over_str = "—"
-            row_children = [
-                inst_cell,
-                html.Span(iss["table_name"],            style={"width": "160px", "fontSize": "11px", "color": MUTED, "padding": "7px 10px"}),
-                html.Span(iss["rule_id"],               style={"width": "90px",  "fontSize": "11px", "fontWeight": "700", "color": TEXT, "padding": "7px 10px"}),
-                html.Span(iss["dimension"].title(),     style={"width": "100px", "fontSize": "11px", "color": MUTED, "padding": "7px 10px"}),
-                html.Span(f"{iss['failing_rows']:,}",   style={"width": "96px",  "fontSize": "12px", "fontWeight": "700", "color": C_RED, "textAlign": "right", "padding": "7px 10px"}),
-                html.Span(iss.get("detected_at", "—"), style={"width": "96px",  "fontSize": "11px", "color": MUTED, "padding": "7px 10px"}),
-                html.Span(iss.get("sla_deadline", "—"),style={"width": "96px",  "fontSize": "11px", "color": C_RED, "padding": "7px 10px"}),
-                html.Span(over_str,                    style={"width": "76px",  "fontSize": "12px", "fontWeight": "700", "color": C_RED, "textAlign": "center", "padding": "7px 10px"}),
             ]
         else:
             try:

@@ -18,7 +18,6 @@ PIPELINE_FILE        = _DIR / "pipeline_run.json"
 PIPELINE_STATUS_FILE = _DIR / "pipeline_status.json"
 WATERMARK_FILE       = _DIR / "watermark.json"
 REPORTS_DIR     = _DIR / "reports"
-REPORT_FILE     = _DIR / "dq_report.json"
 
 
 def latest_run_month() -> str:
