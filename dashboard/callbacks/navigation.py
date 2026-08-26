@@ -13,6 +13,7 @@ from dashboard.pages.dashboard_tab import _dashboard_content
 from dashboard.pages.executive import _executive_page
 from dashboard.pages.landing import _landing_page
 from dashboard.pages.login import _login_page
+from dashboard.pages.profiling import _profiling_page
 from dashboard.pages.remediation import _remediation_page
 from dashboard.pages.validations import _validations_page
 
@@ -32,15 +33,31 @@ def _toggle_null_cols(_n, current_style):
 
 
 @app.callback(
-    Output("active-page", "data"),
+    Output("url", "hash"),
     Input({"type": "page-nav", "index": ALL}, "n_clicks"),
     prevent_initial_call=True,
 )
 def _on_page_nav(_n_clicks):
     triggered = ctx.triggered_id
     if isinstance(triggered, dict) and "index" in triggered:
-        return triggered["index"]
+        return f"#{triggered['index']}"
     raise dash.exceptions.PreventUpdate
+
+
+_VALID_PAGES = {
+    "dashboard", "validations", "alerts", "remediation", "profiling",
+    "inst_dashboard", "inst_issues", "inst_profiling",
+    "inst_remediation", "inst_validations",
+}
+
+
+@app.callback(
+    Output("active-page", "data"),
+    Input("url", "hash"),
+)
+def _restore_page_from_url(hash_val: str):
+    page = (hash_val or "").lstrip("#").split("?")[0]
+    return page if page in _VALID_PAGES else "dashboard"
 
 
 @app.callback(
@@ -93,6 +110,8 @@ def _render_page(page: str, nav_state, _rv, auth_data):
 
         if page == "inst_issues":
             content = inst_mod.inst_issues_page(le_books)
+        elif page == "inst_profiling":
+            content = inst_mod.inst_profiling_page(le_books)
         elif page == "inst_remediation":
             content = inst_mod.inst_remediation_page(le_books, role=role)
         elif page == "inst_validations":
@@ -118,6 +137,14 @@ def _render_page(page: str, nav_state, _rv, auth_data):
 
     if page == "remediation":
         return nav_bar, _remediation_page(role=role, cat=cat or "")
+
+    if page == "profiling":
+        try:
+            import json as _json
+            categories = _json.loads(CATEGORIES_FILE.read_text())
+        except Exception:
+            categories = {}
+        return nav_bar, _profiling_page(categories)
 
     if not cat:
         return nav_bar, _landing_page(_counts)

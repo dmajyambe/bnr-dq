@@ -1,12 +1,8 @@
-# Shared, mostly-stateless UI builders used by multiple pages — moved from
-# dq_dashboard_dash.py.
+# Shared, mostly-stateless UI builders used by multiple pages
 from __future__ import annotations
-
 import json
-
 from dash import dcc, html
 import plotly.graph_objects as go
-
 from dashboard.data import (
     REPORTS_DIR, WATERMARK_FILE,
     _cat_scores, _inst_scores,
@@ -18,7 +14,7 @@ from dashboard.theme import (
 )
 
 
-# ── small UI helpers ─────────────────────────────────────────────────────────
+#small UI helpers
 def _fmt_int(n, fallback: str = "—") -> str:
     """Thousands-separated integer for display; falls back to a dash for non-numbers."""
     try:
@@ -715,6 +711,99 @@ def _stale_banner() -> html.Div | None:
     return None
 
 
+def _table_score_heatmap(table_scores: dict, show_dims: list | None = None) -> html.Div:
+    """Compact quality-by-table heatmap.
+
+    table_scores: {table: {dim: score}}
+    show_dims: ordered dim list (defaults to COMP/ACC/VAL/UNI, skips TIM when empty).
+    Rows are sorted worst-average-first so the most actionable table is at the top.
+    """
+    if not table_scores:
+        return html.Div()
+
+    all_dims = show_dims or ["completeness", "accuracy", "validity", "uniqueness", "timeliness"]
+    # Only show a dim column when at least one table has a real score for it
+    active_dims = [d for d in all_dims
+                   if any(d in scores for scores in table_scores.values())]
+    if not active_dims:
+        return html.Div()
+
+    _SHORT = {
+        "completeness": "COMP", "accuracy": "ACC",
+        "validity": "VAL", "uniqueness": "UNI", "timeliness": "TIM",
+    }
+    COL_W = "68px"
+
+    def _avg(scores: dict) -> float:
+        vals = [v for v in scores.values() if v is not None]
+        return sum(vals) / len(vals) if vals else 100.0
+
+    def _score_cell(score: float | None) -> html.Div:
+        if score is None:
+            return html.Div("—", style={
+                "width": COL_W, "flexShrink": "0", "textAlign": "center",
+                "fontSize": "11px", "color": MUTED,
+                "fontVariantNumeric": "tabular-nums",
+            })
+        col = _score_color(score)
+        bg  = _score_bg(score)
+        return html.Div(f"{score:.1f}%", style={
+            "width": COL_W, "flexShrink": "0", "textAlign": "center",
+            "fontSize": "11px", "fontWeight": "700", "color": col,
+            "background": bg, "borderRadius": "4px", "padding": "3px 0",
+            "fontVariantNumeric": "tabular-nums",
+        })
+
+    sorted_tables = sorted(table_scores.items(), key=lambda kv: _avg(kv[1]))
+
+    H = {"fontSize": "10px", "fontWeight": "900", "color": MUTED,
+         "textTransform": "uppercase", "letterSpacing": "0.06em",
+         "width": COL_W, "flexShrink": "0", "textAlign": "center"}
+
+    header = html.Div([
+        html.Span("TABLE", style={**H, "width": "auto", "flex": "1", "textAlign": "left"}),
+        *[html.Span(_SHORT.get(d, d[:4].upper()), style=H) for d in active_dims],
+    ], style={
+        "display": "flex", "alignItems": "center", "gap": "6px",
+        "padding": "7px 14px",
+        "borderBottom": "2px solid rgba(117,57,24,0.18)",
+        "background": BG, "borderRadius": "8px 8px 0 0",
+    })
+
+    data_rows = []
+    for i, (table, scores) in enumerate(sorted_tables):
+        pretty = TABLE_NAMES_PRETTY.get(table, table.replace("_", " ").title())
+        avg    = _avg(scores)
+        is_worst = i == 0 and avg < 90
+        bg = "#c9956c" if i % 2 == 0 else BG
+
+        data_rows.append(html.Div([
+            html.Span(pretty, title=table, style={
+                "fontSize": "12px", "color": TEXT, "flex": "1",
+                "overflow": "hidden", "textOverflow": "ellipsis", "whiteSpace": "nowrap",
+                "fontWeight": "700" if is_worst else "400",
+            }),
+            *[_score_cell(scores.get(d)) for d in active_dims],
+        ], style={
+            "display": "flex", "alignItems": "center", "gap": "6px",
+            "padding": "7px 14px", "background": bg,
+            "borderBottom": "1px solid rgba(117,57,24,0.10)",
+            "borderLeft": f"3px solid {_score_color(avg)}" if is_worst else "3px solid transparent",
+        }))
+
+    return html.Div([
+        html.Div("QUALITY BY TABLE", style={
+            "fontSize": "11px", "fontWeight": "900", "color": MUTED,
+            "letterSpacing": "0.06em", "textTransform": "uppercase",
+            "marginBottom": "10px",
+        }),
+        html.Div([header] + data_rows, style={
+            "border": f"1px solid {DIVIDER}",
+            "borderRadius": "8px", "overflow": "hidden",
+        }),
+    ])
+
+
 def _dim_pill(dim: str) -> html.Span:
     color = _DIM_PILL_COLOR.get(dim, MUTED)
     return html.Span(dim.capitalize(), style={
@@ -730,7 +819,7 @@ def _dim_pill(dim: str) -> html.Span:
 
 
 def _nav_tabs(active: str) -> html.Div:
-    items = [("dashboard", "Dashboard"), ("remediation", "Request Data Correction"), ("alerts", "Check Resolved Issues"), ("validations", "Documentation")]
+    items = [("profiling", "Data Profiling"), ("dashboard", "Dashboard"), ("remediation", "Request Data Correction"), ("alerts", "Check Resolved Issues"), ("validations", "Documentation")]
     tabs = []
     for key, label in items:
         is_active = key == active

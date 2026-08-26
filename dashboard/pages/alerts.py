@@ -1,16 +1,167 @@
-# Alerts page (open + resolved issue views) — moved from dq_dashboard_dash.py.
+# Alerts page
 from __future__ import annotations
-
 import json
-
 from dash import dcc, html
-
 from dashboard.components import _dim_pill, _score_color
 from dashboard.data import CATEGORIES_FILE, WATERMARK_FILE, _inst_scores, _today_entry
 from dashboard.theme import (
     BG, BRAND, CARD, CAT_LABELS, C_GREEN, C_RED, DIMS, DIVIDER, MUTED,
     RESOLVED_GREEN, RESOLVED_GREEN_BG, TABLE_NAMES_PRETTY, TEXT, _URGENCY_COLORS,
 )
+
+
+def _table_dim_matrix(
+    impact: dict[str, dict[str, dict]],
+    pipeline_lbs: set[str] | None = None,
+) -> html.Div:
+    """Compact dimension-impact matrix: rows=tables, columns=active dimensions.
+
+    impact — {table: {dimension: {failing_rows, inst_count}}}
+    Returns an empty Div if no open-issue data is present.
+    """
+    if not impact:
+        return html.Div()
+
+    # Only show dimensions that have at least one issue
+    all_dims_in_data = sorted({d for cells in impact.values() for d in cells})
+    # Use canonical display order where possible
+    _dim_order = ["completeness", "accuracy", "validity", "uniqueness", "timeliness"]
+    active_dims = [d for d in _dim_order if d in all_dims_in_data] + \
+                  [d for d in all_dims_in_data if d not in _dim_order]
+
+    if not active_dims:
+        return html.Div()
+
+    # Sort tables by total failing rows descending
+    def _table_total(cells: dict) -> int:
+        return sum(c["failing_rows"] for c in cells.values())
+
+    tables_sorted = sorted(impact.keys(), key=lambda t: _table_total(impact[t]), reverse=True)
+
+    # Per-dimension max for scaling bars
+    dim_max: dict[str, int] = {}
+    for d in active_dims:
+        dim_max[d] = max(
+            (impact[t].get(d, {}).get("failing_rows", 0) for t in tables_sorted),
+            default=1,
+        ) or 1
+
+    # Dimension color palette (matches existing theme use)
+    _DIM_COLORS = {
+        "completeness": "#753918",
+        "accuracy":     "#2563EB",
+        "validity":     "#7C3D1E",
+        "uniqueness":   "#16A34A",
+        "timeliness":   "#D97706",
+    }
+    _H = {"fontSize": "10px", "fontWeight": "900", "color": MUTED,
+          "textTransform": "uppercase", "letterSpacing": "0.04em",
+          "padding": "7px 14px", "whiteSpace": "nowrap"}
+
+    CELL_W = "140px"
+
+    # Header row
+    hdr_cells = [html.Div("Table", style={**_H, "flex": "1"})]
+    for d in active_dims:
+        clr = _DIM_COLORS.get(d, MUTED)
+        hdr_cells.append(html.Div(d[:4].title() + ".", style={
+            **_H, "width": CELL_W, "textAlign": "center",
+            "color": clr, "borderLeft": f"1px solid {DIVIDER}",
+        }))
+
+    hdr = html.Div(hdr_cells, style={
+        "display": "flex", "background": BG,
+        "borderRadius": "8px 8px 0 0",
+        "borderBottom": f"2px solid {DIVIDER}",
+    })
+
+    # Data rows
+    data_rows = []
+    for i, tbl in enumerate(tables_sorted):
+        cells_data = impact[tbl]
+        tbl_label  = TABLE_NAMES_PRETTY.get(tbl, tbl.replace("_", " ").title())
+        bg         = "rgba(244,246,249,0.7)" if i % 2 == 0 else CARD
+
+        row_cells = [html.Div(
+            html.Span(tbl_label, style={"fontSize": "12px", "fontWeight": "700",
+                                        "color": TEXT}),
+            style={"flex": "1", "padding": "10px 14px",
+                   "display": "flex", "alignItems": "center"},
+        )]
+
+        for d in active_dims:
+            clr  = _DIM_COLORS.get(d, MUTED)
+            cell = cells_data.get(d)
+            if cell and cell["failing_rows"] > 0:
+                fr   = cell["failing_rows"]
+                ni   = cell["inst_count"]
+                pct  = min(100, round(fr / dim_max[d] * 100))
+                bar  = html.Div(
+                    html.Div(style={
+                        "width":        f"{pct}%",
+                        "height":       "5px",
+                        "background":   clr,
+                        "borderRadius": "3px",
+                        "minWidth":     "4px",
+                    }),
+                    style={"height": "5px", "background": DIVIDER,
+                           "borderRadius": "3px", "marginBottom": "4px"},
+                )
+                count_line = html.Div([
+                    html.Span(f"{fr:,}", style={
+                        "fontSize": "11px", "fontWeight": "700", "color": clr,
+                    }),
+                    html.Span(
+                        f"  {ni} inst{'s' if ni != 1 else ''}",
+                        style={"fontSize": "9px", "color": MUTED, "marginLeft": "4px"},
+                    ),
+                ], style={"display": "flex", "alignItems": "baseline"})
+                cell_content = html.Div([bar, count_line], style={"width": "100%"})
+            else:
+                cell_content = html.Span("—", style={"color": DIVIDER,
+                                                     "fontSize": "13px"})
+
+            row_cells.append(html.Div(
+                cell_content,
+                style={
+                    "width": CELL_W, "padding": "8px 14px",
+                    "borderLeft": f"1px solid {DIVIDER}",
+                    "display": "flex", "alignItems": "center",
+                },
+            ))
+
+        data_rows.append(html.Div(row_cells, style={
+            "display": "flex", "alignItems": "center",
+            "background": bg, "borderBottom": f"1px solid {DIVIDER}",
+        }))
+
+    total_fr = sum(_table_total(impact[t]) for t in tables_sorted)
+    total_ni = len({
+        d for cells in impact.values() for cell in cells.values()
+        for d in [cell]           # just to iterate; inst_count already summed
+    })
+    n_tables  = len(tables_sorted)
+    n_dims    = len(active_dims)
+
+    return html.Div([
+        html.Div([
+            html.H3("Dimension Impact by Table", style={
+                "fontSize": "14px", "fontWeight": "900", "color": TEXT,
+                "margin": "0", "display": "inline",
+            }),
+            html.Span(
+                f"  {n_tables} table{'s' if n_tables != 1 else ''} · "
+                f"{n_dims} dimension{'s' if n_dims != 1 else ''} · "
+                f"{total_fr:,} failing rows (open issues)",
+                style={"fontSize": "11px", "color": MUTED, "marginLeft": "10px"},
+            ),
+        ], style={"marginBottom": "10px"}),
+        html.Div([hdr, *data_rows], style={
+            "background": CARD, "borderRadius": "8px",
+            "border": f"1px solid {DIVIDER}",
+            "overflowX": "auto",
+        }),
+    ], style={"marginBottom": "28px"})
 
 
 def _issues_to_xlsx(issues: list) -> bytes:
@@ -182,6 +333,60 @@ def _row_delta(current: int, previous: int | None, pending: bool = False,
         html.Span(f"{current:,}", style={"fontWeight": "700", "color": col,
                                          "fontSize": "12px"}),
         style={"textAlign": "right", **(style or {})},
+    )
+
+
+def _progress_bar(original: int, current: int,
+                  le_book: str, rule_id: str, table: str) -> html.Div:
+    """Mini inline progress bar for partial resolution.
+
+    Shows: ████░░░ 82% fixed (450/550) + download remaining button.
+    Only call when original > current (i.e. measurable progress).
+    """
+    fixed = max(0, original - current)
+    pct   = min(100, round(fixed / original * 100)) if original else 0
+    bar   = html.Div(
+        html.Div(style={
+            "width":        f"{pct}%",
+            "height":       "4px",
+            "background":   RESOLVED_GREEN,
+            "borderRadius": "2px",
+        }),
+        style={
+            "width":        "72px",
+            "height":       "4px",
+            "background":   DIVIDER,
+            "borderRadius": "2px",
+            "marginRight":  "6px",
+            "flexShrink":   "0",
+        },
+    )
+    label = html.Span(
+        f"{pct}%  {fixed:,}/{original:,}",
+        style={"fontSize": "9px", "color": RESOLVED_GREEN,
+               "fontWeight": "700", "whiteSpace": "nowrap"},
+    )
+    dl_btn = html.A(
+        "⬇ remaining",
+        href=f"/download/remaining/{le_book}/{rule_id}/{table}",
+        target="_blank",
+        style={
+            "fontSize":       "9px",
+            "fontWeight":     "700",
+            "color":          BRAND,
+            "textDecoration": "none",
+            "background":     "rgba(117,57,24,.08)",
+            "border":         f"1px solid rgba(117,57,24,.25)",
+            "borderRadius":   "3px",
+            "padding":        "1px 6px",
+            "marginLeft":     "8px",
+            "whiteSpace":     "nowrap",
+            "flexShrink":     "0",
+        },
+    )
+    return html.Div(
+        [bar, label, dl_btn],
+        style={"display": "flex", "alignItems": "center", "padding": "4px 12px"},
     )
 
 
@@ -423,6 +628,7 @@ def _build_table_issue_sections(issues_by_table: dict, status: str,
                 html.Span("Dimension", style={**_RH, "width": "105px"}),
                 html.Span("Rows",      style={**_RH, "width": "70px",
                                               "textAlign": "right"}),
+                html.Span("Progress",  style={**_RH, "width": "200px"}),
                 html.Span("SLA",       style={**_RH, "width": "90px",
                                               "textAlign": "right"}),
             ], style={"display": "flex", "background": BG,
@@ -454,6 +660,15 @@ def _build_table_issue_sections(issues_by_table: dict, status: str,
                                "color": rcr_clr, "marginRight": "4px"},
                     ))
 
+                # progress bar cell — only when original > current
+                orig = r.get("original_failing_rows")
+                curr = r["failing_rows"]
+                if orig and int(orig) > curr:
+                    prog_cell = _progress_bar(int(orig), curr,
+                                              lb, r["rule_id"], table)
+                else:
+                    prog_cell = html.Div(style={"width": "200px"})
+
                 rule_rows.append(html.Div([
                     html.Span(r["rule_id"], style={
                         "width": "90px", "fontSize": "11px", "fontWeight": "900",
@@ -475,6 +690,7 @@ def _build_table_issue_sections(issues_by_table: dict, status: str,
                                pending=r.get("pending", False),
                                style={"width": "70px", "textAlign": "right",
                                       "padding": "6px 12px"}),
+                    html.Div(prog_cell, style={"width": "200px"}),
                     html.Span(dls, style={
                         "width": "90px", "fontSize": "11px", "fontWeight": "700",
                         "color": dlc, "textAlign": "right", "padding": "6px 12px",
@@ -952,6 +1168,7 @@ def _alerts_page(cat: str = "") -> html.Div:
     return html.Div([
         header_row,
         html.Div(id="alerts-summary-bar", style={"marginBottom": "24px"}),
+        html.Div(id="table-dim-matrix",   style={"marginBottom": "0"}),
         # Hidden RadioItems — preserves callback wiring; value drives filtered data
         dcc.RadioItems(
             id="alerts-cat-filter",
@@ -965,5 +1182,5 @@ def _alerts_page(cat: str = "") -> html.Div:
             style={"display": "none"},
         ),
         html.Div(id="issue-list"),
-        html.Div(id="notify-feedback", style={"display": "none"}),
+        html.Div(id="notify-feedback"),
     ], style={"padding": "28px 32px", "maxWidth": "1380px", "margin": "0 auto"})

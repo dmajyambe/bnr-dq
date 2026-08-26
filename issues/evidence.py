@@ -1,10 +1,11 @@
 """Parse issue-report ZIPs to determine which rule_ids have evidence in the latest report."""
 from __future__ import annotations
 
+import io
 import logging
 import re
+import xml.etree.ElementTree as ET
 import zipfile
-from io import BytesIO
 from pathlib import Path
 from typing import Optional
 
@@ -45,6 +46,8 @@ def _parse_zip(zp: Path) -> frozenset[str]:
         return cached[1]
 
     evidenced: set[str] = set()
+    _WB_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+
     try:
         with zipfile.ZipFile(zp) as zf:
             for entry in zf.namelist():
@@ -52,10 +55,10 @@ def _parse_zip(zp: Path) -> frozenset[str]:
                     continue
                 table = entry[:-5]
                 try:
-                    from openpyxl import load_workbook
-                    wb = load_workbook(BytesIO(zf.read(entry)), read_only=True)
-                    sheets = wb.sheetnames
-                    wb.close()
+                    with zipfile.ZipFile(io.BytesIO(zf.read(entry))) as wb_zf:
+                        root = ET.fromstring(wb_zf.read("xl/workbook.xml"))
+                    sheets_el = root.find(f"{{{_WB_NS}}}sheets") or root.find("sheets")
+                    sheets = [s.get("name", "") for s in (sheets_el or [])]
                 except Exception as exc:
                     log.warning("Could not parse %s in %s: %s", entry, zp.name, exc)
                     continue

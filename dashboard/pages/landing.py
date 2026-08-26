@@ -1,8 +1,6 @@
 # Category-picker landing page — moved from dq_dashboard_dash.py.
 from __future__ import annotations
-
 from dash import html
-
 from dashboard.data import _today_entry
 from dashboard.theme import CARD, LANDING_CATS, MUTED, TEXT
 

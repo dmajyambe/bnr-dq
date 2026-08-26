@@ -1,27 +1,23 @@
-# Main "Dashboard" tab (category/institution view) — moved from dq_dashboard_dash.py.
+# Main "Dashboard" tab (category/institution view)
 from __future__ import annotations
-
 from dash import dcc, html
-
 from dashboard.components import (
-    _kpi_card, _stale_banner,
+    _kpi_card, _stale_banner, _table_score_heatmap,
 )
 from dashboard.data import (
     _DIR, _cat_scores, _filter_institutions, _inst_scores,
-    _today_entry, _trend_entries,
+    _table_dim_scores, _today_entry, _trend_entries,
 )
 from dashboard.theme import (
     BG, BRAND, CARD, CAT_LABELS, DIMS, DIVIDER, FONT,
     MUTED, RESOLVED_GREEN, TEXT,
 )
 
-
 def _dashboard_content(cat: str, inst: str | None) -> html.Div:
     """Renders the dashboard for a specific category, optionally filtered to one institution."""
     today        = _today_entry()
     trend        = _trend_entries(7)
     banner       = _stale_banner()
-
     institutions = _filter_institutions(today, cat)
     cat_label    = CAT_LABELS.get(cat, cat)
 
@@ -32,8 +28,6 @@ def _dashboard_content(cat: str, inst: str | None) -> html.Div:
         name = (data.get("name") or code).title()
         inst_options.append({"label": name, "value": code})
 
-    # KPI dimension score cards + trend figure
-    # (per-institution when one is selected, category-wide otherwise)
     if inst and inst in institutions:
         cards = []
         for dim in DIMS:
@@ -46,6 +40,7 @@ def _dashboard_content(cat: str, inst: str | None) -> html.Div:
         display_insts    = {inst: institutions[inst]}
         inst_name        = (institutions[inst].get("name") or inst).title()
         table_title      = f"ISSUE REPORT — {inst_name.upper()}"
+        table_breakdown  = _table_dim_scores(inst)
     else:
         cards = []
         for dim in DIMS:
@@ -58,6 +53,7 @@ def _dashboard_content(cat: str, inst: str | None) -> html.Div:
         display_insts    = institutions
         n                = len(institutions)
         table_title      = f"ISSUE REPORTS — {cat_label.upper()}  ({n} institutions)"
+        table_breakdown  = {}
 
     return html.Div([
         banner if banner else html.Div(),
@@ -149,6 +145,19 @@ def _dashboard_content(cat: str, inst: str | None) -> html.Div:
             },
         ),
 
+        # Per-table score breakdown — only when a single institution is selected
+        html.Div(
+            _table_score_heatmap(table_breakdown),
+            style={
+                "background":   CARD,
+                "padding":      "20px",
+                "borderRadius": "8px",
+                "boxShadow":    "0 1px 4px rgba(117,57,24,0.06)",
+                "border":       f"1px solid {DIVIDER}",
+                "marginBottom": "20px",
+            },
+        ) if table_breakdown else html.Div(),
+
         # Issue reports table
         html.Div([
             html.Div(table_title, id="table-title", style={
@@ -208,8 +217,10 @@ def _institution_reports_table(display_insts: dict) -> html.Div:
             try:
                 size_kb    = zp.stat().st_size // 1024
                 namelist   = _zf.ZipFile(zp).namelist()
-                table_names = [n.rsplit(".", 1)[0] for n in namelist
-                               if not n.startswith("README_")]
+                table_names = list(dict.fromkeys(
+                    n.rsplit(".", 1)[0] for n in namelist
+                    if not n.startswith("README_")
+                ))
             except Exception:
                 size_kb, table_names = 0, []
             with_zip.append((lb, name, size_kb, table_names, zp))

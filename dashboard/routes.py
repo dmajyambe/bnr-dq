@@ -93,6 +93,32 @@ def _serve_resolved_prebuilt(le_book):
     return _flask_send_file(str(zips[0]), as_attachment=True, download_name=zips[0].name)
 
 
+@server.route("/download/remaining/<le_book>/<rule_id>/<table>")
+def _serve_remaining_rows(le_book, rule_id, table):
+    """Stream the latest-scan evidence (remaining failing rows) as an xlsx.
+
+    Used by the partial-resolution progress 'Download remaining' button.
+    Falls back to the original snapshot when only one pipeline scan has run.
+    """
+    import re as _re, io as _io
+    from flask import abort, send_file as _flask_send_file
+    if (not _re.fullmatch(r"[A-Za-z0-9_-]{1,20}", le_book or "")
+            or not _re.fullmatch(r"[A-Za-z0-9_-]{1,20}", rule_id or "")
+            or not _re.fullmatch(r"[A-Za-z0-9_]{1,40}", table or "")):
+        abort(400)
+    if not _check_download_auth(le_book):
+        abort(403)
+    from issues.progress import build_remaining_xlsx
+    data = build_remaining_xlsx(le_book, rule_id, table)
+    if not data:
+        abort(404)
+    return _flask_send_file(
+        _io.BytesIO(data), as_attachment=True,
+        download_name=f"{table}_{rule_id}_{le_book}_remaining.xlsx",
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
+
 @server.route("/download/resolved/<le_book>/<table>")
 def _serve_resolved_table(le_book, table):
     """Serve a single {table}.xlsx from the correct month's resolved ZIP.
@@ -112,12 +138,13 @@ def _serve_resolved_table(le_book, table):
     member = f"{table}.xlsx"
     month  = request.args.get("month", "")  # e.g. "2026-07"
 
+    all_zips = sorted(d.glob(f"{le_book}_*_resolved.zip"), reverse=True) if d.exists() else []
     if month and _re.fullmatch(r"\d{4}-\d{2}", month):
-        # serve the specific month's ZIP — exact match, no guessing
+        # prefer the exact month ZIP but fall back to others if the table isn't in it
         specific = d / f"{le_book}_{month}_resolved.zip"
-        zips = [specific] if specific.exists() else []
+        zips = ([specific] if specific.exists() else []) + [z for z in all_zips if z != specific]
     else:
-        zips = sorted(d.glob(f"{le_book}_*_resolved.zip"), reverse=True) if d.exists() else []
+        zips = all_zips
 
     for zp in zips:
         try:

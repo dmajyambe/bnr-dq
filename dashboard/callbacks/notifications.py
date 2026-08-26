@@ -1,4 +1,4 @@
-# Notification bell callbacks (institution portal) — moved from dq_dashboard_dash.py.
+# Notification bell callbacks (institution portal)
 from __future__ import annotations
 
 import dash

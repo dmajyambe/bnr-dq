@@ -1,19 +1,8 @@
-# Remediation / Change-Request tab callbacks — moved from dq_dashboard_dash.py.
-#
-# BUG FIXED while porting (not present before this split, found here): the
-# original _approve_table_cb referenced a bare name `_auth.is_admin(role)`
-# with no import anywhere in scope — `import dq_auth as _auth` only ever
-# existed as a *local* import inside the unrelated _build_cr_list function,
-# which doesn't leak into this callback's namespace. Clicking "Approve Table"
-# on a submitted CR would raise NameError before ever reaching
-# cr_mod.approve_table(). Fixed by importing auth.users.is_admin properly.
+#remediation callbacks for the Data Correction Request page
 from __future__ import annotations
-
 import dash
 from dash import ALL, Input, Output, State, ctx, html
-
 import json as _json
-
 from auth.users import is_admin
 from dashboard.app import app
 from dashboard.components import _fmt_int

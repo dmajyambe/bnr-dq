@@ -44,3 +44,16 @@ def inst_scores_from_report(report: dict, lb_score_key: str) -> dict[str, float]
         for lb, scores in lb_table_scores.items()
         if scores
     }
+
+
+def inst_table_scores_from_report(report: dict, lb_score_key: str) -> dict[str, dict[str, float]]:
+    """Return {le_book: {table_name: score}} — per-table breakdown, not averaged."""
+    result: dict[str, dict[str, float]] = {}
+    for table, tbl_data in report.get("tables", {}).items():
+        if tbl_data.get("status") != "evaluated":
+            continue
+        for lb, lb_data in tbl_data.get("le_book_breakdown", {}).items():
+            s = lb_data.get(lb_score_key)
+            if s is not None:
+                result.setdefault(lb, {})[table] = round(float(s), 1)
+    return result

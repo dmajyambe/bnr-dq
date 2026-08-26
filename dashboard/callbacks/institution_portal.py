@@ -1,10 +1,7 @@
-# Institution-portal callbacks (BNR-file-owned, render inst pages' interactive
-# bits) — moved from dq_dashboard_dash.py.
+# Institution-portal callbacks
 from __future__ import annotations
-
 import dash
 from dash import ALL, Input, Output, State, ctx, html
-
 from dashboard.app import app
 from dashboard.components import _empty_state
 from dashboard.data import REPORTS_DIR, _DIR
@@ -33,11 +30,10 @@ def _inst_nav_click(clicks):
     Output("inst-issue-list", "children"),
     Input("inst-issue-filter",  "value"),
     Input("inst-table-filter",  "value"),
-    Input("notif-poll",         "n_intervals"),
     State("auth-store", "data"),
     prevent_initial_call=False,
 )
-def _inst_issue_list(status, table_filter, _poll, auth_data):
+def _inst_issue_list(status, table_filter, auth_data):
     from issues.repositories import get_issues
     from issues.queries import get_issues_by_table
 
@@ -179,52 +175,67 @@ def _inst_issue_list(status, table_filter, _poll, auth_data):
     this_month  = latest_run_month()
     month_label = _datetime.strptime(this_month, "%Y-%m").strftime("%B %Y")
 
-    all_by_table = get_issues_by_table(status="open")
+    all_by_table = get_issues_by_table(status="open", le_book=le_book)
 
     # apply table filter
     selected_tables = set(table_filter) if table_filter else set()
 
-    # aggregate per table for this institution — current month issues only
+    _band_order = ["new", "attention", "urgent", "critical", "overdue"]
+
+    # aggregate per table for this institution — all open issues regardless of month
     table_summary: list[dict] = []
     for table, rules in all_by_table.items():
         if selected_tables and table not in selected_tables:
             continue
-        total_rows      = 0
-        last_total_rows = 0
-        n_rules         = 0
-        earliest_dl     = None
+        total_rows          = 0
+        last_total_rows     = 0
+        original_total_rows = 0
+        n_rules             = 0
+        earliest_dl         = None
+        earliest_det        = None
+        worst_urgency       = "new"
         for rule in rules:
-            my_insts = [i for i in rule["institutions"]
-                        if i["le_book"] in le_books
-                        and (i.get("detected_at") or "").startswith(this_month)]
+            my_insts = [i for i in rule["institutions"] if i["le_book"] in le_books]
             if not my_insts:
                 continue
-            total_rows      += sum(i["failing_rows"] for i in my_insts)
-            last_total_rows += sum(i.get("last_failing_rows") or i["failing_rows"]
-                                   for i in my_insts)
+            total_rows          += sum(i["failing_rows"] for i in my_insts)
+            last_total_rows     += sum(i.get("last_failing_rows") or i["failing_rows"]
+                                       for i in my_insts)
+            original_total_rows += sum(
+                i.get("original_failing_rows") or i["failing_rows"]
+                for i in my_insts
+            )
             n_rules += 1
             for inst in my_insts:
                 dl = inst.get("sla_deadline")
                 if dl and (earliest_dl is None or dl < earliest_dl):
                     earliest_dl = dl
+                det = inst.get("detected_at")
+                if det and (earliest_det is None or det < earliest_det):
+                    earliest_det = det
+                band = inst.get("urgency_band", "new")
+                if band in _band_order and _band_order.index(band) > _band_order.index(worst_urgency):
+                    worst_urgency = band
         if n_rules:
             table_summary.append({
-                "table":           table,
-                "label":           TABLE_NAMES_PRETTY.get(table, table.replace("_", " ").title()),
-                "n_rules":         n_rules,
-                "total_rows":      total_rows,
-                "last_total_rows": last_total_rows,
-                "deadline":        earliest_dl or "—",
+                "table":               table,
+                "label":               TABLE_NAMES_PRETTY.get(table, table.replace("_", " ").title()),
+                "n_rules":             n_rules,
+                "total_rows":          total_rows,
+                "last_total_rows":     last_total_rows,
+                "original_total_rows": original_total_rows,
+                "deadline":            earliest_dl or "—",
+                "detected_at":         earliest_det or this_month,
+                "worst_urgency":       worst_urgency,
             })
 
     if not table_summary:
         return _empty_state(
-            f"No new issues in {month_label}",
-            "No new data quality issues were detected this month for your institution.",
+            "No open issues",
+            "No open data quality issues were found for your institution.",
             icon="✓")
 
-    # sort by most failing rows
-    table_summary.sort(key=lambda r: -r["total_rows"])
+    current_tables = sorted(table_summary, key=lambda r: -r["total_rows"])
 
     # ── find the latest institution report file (mirrors _on_inst_download_confirm order) ──
     rpt_file  = None
@@ -267,88 +278,125 @@ def _inst_issue_list(status, table_filter, _poll, auth_data):
             style=_base,
         )
 
-    # ── table header ──────────────────────────────────────────────────────────
     _H = {"fontSize": "10px", "fontWeight": "900", "color": MUTED,
           "textTransform": "uppercase", "letterSpacing": "0.05em",
           "padding": "7px 14px", "whiteSpace": "nowrap"}
-    hdr = html.Div([
-        html.Span("Table",        style={**_H, "flex": "1"}),
-        html.Span("Issues",       style={**_H, "width": "68px", "textAlign": "center"}),
-        html.Span("Failing Rows", style={**_H, "width": "110px", "textAlign": "right"}),
-        html.Span("Detected",     style={**_H, "width": "90px", "textAlign": "center"}),
-        html.Span("Deadline", style={**_H, "width": "100px"}),
-        html.Span("Report",       style={**_H, "width": "80px", "textAlign": "center"}),
-    ], style={"display": "flex", "background": BG,
-              "borderRadius": "8px 8px 0 0",
-              "borderBottom": f"2px solid {DIVIDER}"})
 
-    _new_col = _URGENCY_COLORS.get("new", MUTED)
-    rows = []
-    for i, row in enumerate(table_summary):
-        bg = "rgba(244,246,249,0.7)" if i % 2 == 0 else CARD
+    def _col_hdr(radius: str = "8px 8px 0 0") -> html.Div:
+        return html.Div([
+            html.Span("Table",        style={**_H, "flex": "1"}),
+            html.Span("Issues",       style={**_H, "width": "68px",  "textAlign": "center"}),
+            html.Span("Failing Rows", style={**_H, "width": "110px", "textAlign": "right"}),
+            html.Span("Progress",     style={**_H, "width": "150px", "textAlign": "center"}),
+            html.Span("Detected",     style={**_H, "width": "90px",  "textAlign": "center"}),
+            html.Span("Deadline",     style={**_H, "width": "100px"}),
+            html.Span("Report",       style={**_H, "width": "80px",  "textAlign": "center"}),
+        ], style={"display": "flex", "background": BG,
+                  "borderRadius": radius, "borderBottom": f"2px solid {DIVIDER}"})
 
-        # month chip
-        urg_chip = html.Span(
-            month_label,
-            style={"fontSize": "10px", "fontWeight": "700", "color": _new_col,
-                   "background": f"rgba({','.join(str(int(_new_col.lstrip('#')[j:j+2],16)) for j in (0,2,4))},.10)",
-                   "border": f"1px solid {_new_col}",
-                   "borderRadius": "4px", "padding": "2px 7px",
-                   "whiteSpace": "nowrap"},
-        )
+    def _urgency_color(band: str) -> str:
+        if band == "overdue":
+            return C_RED
+        return _URGENCY_COLORS.get(band, _URGENCY_COLORS.get("new", MUTED))
 
-        # download icon — table-specific xlsx pulled from the institution's report zip
-        if rpt_file:
-            dl_icon = html.Div(
-                "⬇",
-                id={"type": "inst-tbl-dl-btn", "index": f"{le_book}|{row['table']}"},
-                n_clicks=0,
-                title=f"Download {row['label']} report ({rpt_date})",
-                style={"fontSize": "16px", "color": BRAND,
-                       "cursor": "pointer", "textAlign": "center",
-                       "userSelect": "none"},
+    def _build_rows(rows_list: list) -> list:
+        out = []
+        for i, row in enumerate(rows_list):
+            bg      = "rgba(244,246,249,0.7)" if i % 2 == 0 else CARD
+            row_col = _urgency_color(row.get("worst_urgency", "new"))
+
+            try:
+                det_label = _datetime.strptime(row["detected_at"][:7], "%Y-%m").strftime("%b %Y")
+            except Exception:
+                det_label = row["detected_at"][:7]
+            urg_chip = html.Span(
+                det_label,
+                style={"fontSize": "10px", "fontWeight": "700", "color": row_col,
+                       "background": f"rgba({','.join(str(int(row_col.lstrip('#')[j:j+2],16)) for j in (0,2,4))},.10)",
+                       "border": f"1px solid {row_col}",
+                       "borderRadius": "4px", "padding": "2px 7px", "whiteSpace": "nowrap"},
             )
-        else:
-            dl_icon = html.Span("—", style={"color": MUTED, "fontSize": "12px",
-                                             "textAlign": "center", "display": "block"})
 
-        rows.append(html.Div([
-            html.Div([
-                html.Span("●", style={"color": _new_col, "fontSize": "9px",
-                                       "marginRight": "8px"}),
-                html.Span(row["label"], style={"fontSize": "13px", "fontWeight": "700",
-                                                "color": TEXT}),
-            ], style={"flex": "1", "display": "flex", "alignItems": "center",
-                      "padding": "10px 14px",
-                      "borderLeft": f"3px solid {_new_col}"}),
-            html.Span(
-                str(row["n_rules"]),
-                style={"width": "68px", "textAlign": "center",
-                       "fontSize": "13px", "color": MUTED, "padding": "10px 0"},
-            ),
-            _failing_rows_cell(row["total_rows"], row["last_total_rows"]),
-            html.Div(urg_chip,
-                     style={"width": "90px", "padding": "10px 6px",
-                            "display": "flex", "justifyContent": "center"}),
-            html.Span(
-                row["deadline"],
-                style={"width": "100px", "fontSize": "11px",
-                       "color": MUTED, "padding": "10px 14px"},
-            ),
-            html.Div(dl_icon,
-                     style={"width": "80px", "display": "flex",
-                            "justifyContent": "center", "alignItems": "center"}),
-        ], style={
-            "display": "flex", "alignItems": "center",
-            "background": bg,
-            "borderBottom": f"1px solid {DIVIDER}",
-        }))
+            if rpt_file:
+                dl_icon = html.Div(
+                    "⬇",
+                    id={"type": "inst-tbl-dl-btn", "index": f"{le_book}|{row['table']}"},
+                    n_clicks=0,
+                    title=f"Download {row['label']} report ({rpt_date})",
+                    style={"fontSize": "16px", "color": BRAND,
+                           "cursor": "pointer", "textAlign": "center", "userSelect": "none"},
+                )
+            else:
+                dl_icon = html.Span("—", style={"color": MUTED, "fontSize": "12px",
+                                                 "textAlign": "center", "display": "block"})
 
-    return html.Div(
-        [hdr, *rows],
-        style={"background": CARD, "borderRadius": "8px",
-               "border": f"1px solid {DIVIDER}"},
-    )
+            orig_rows = row.get("original_total_rows", 0) or 0
+            curr_rows = row["total_rows"]
+            if orig_rows and orig_rows > curr_rows:
+                fixed = orig_rows - curr_rows
+                pct   = min(100, round(fixed / orig_rows * 100))
+                prog_cell = html.Div([
+                    html.Div(
+                        html.Div(style={"width": f"{pct}%", "height": "5px",
+                                        "background": C_GREEN, "borderRadius": "3px"}),
+                        style={"height": "5px", "background": DIVIDER,
+                               "borderRadius": "3px", "marginBottom": "3px"},
+                    ),
+                    html.Span(f"{pct}% fixed  ({fixed:,}/{orig_rows:,})",
+                              style={"fontSize": "9px", "fontWeight": "700",
+                                     "color": C_GREEN, "whiteSpace": "nowrap"}),
+                ], style={"padding": "10px 10px", "width": "150px"})
+            else:
+                prog_cell = html.Div(style={"width": "150px"})
+
+            out.append(html.Div([
+                html.Div([
+                    html.Span("●", style={"color": row_col, "fontSize": "9px",
+                                           "marginRight": "8px"}),
+                    html.Span(row["label"], style={"fontSize": "13px", "fontWeight": "700",
+                                                    "color": TEXT}),
+                ], style={"flex": "1", "display": "flex", "alignItems": "center",
+                          "padding": "10px 14px", "borderLeft": f"3px solid {row_col}"}),
+                html.Span(str(row["n_rules"]),
+                          style={"width": "68px", "textAlign": "center",
+                                 "fontSize": "13px", "color": MUTED, "padding": "10px 0"}),
+                _failing_rows_cell(row["total_rows"], row["last_total_rows"]),
+                prog_cell,
+                html.Div(urg_chip, style={"width": "90px", "padding": "10px 6px",
+                                          "display": "flex", "justifyContent": "center"}),
+                html.Span(row["deadline"],
+                          style={"width": "100px", "fontSize": "11px",
+                                 "color": MUTED, "padding": "10px 14px"}),
+                html.Div(dl_icon, style={"width": "80px", "display": "flex",
+                                         "justifyContent": "center", "alignItems": "center"}),
+            ], style={"display": "flex", "alignItems": "center",
+                      "background": bg, "borderBottom": f"1px solid {DIVIDER}"}))
+        return out
+
+    def _section_label(text: str, count: int, color: str) -> html.Div:
+        return html.Div([
+            html.Span(text, style={"fontSize": "11px", "fontWeight": "900",
+                                   "color": color, "textTransform": "uppercase",
+                                   "letterSpacing": "0.06em"}),
+            html.Span(f"  {count}", style={"fontSize": "11px", "fontWeight": "700",
+                                            "color": color,
+                                            "background": f"rgba({','.join(str(int(color.lstrip('#')[j:j+2],16)) for j in (0,2,4))},.10)",
+                                            "borderRadius": "10px",
+                                            "padding": "1px 8px", "marginLeft": "8px"}),
+        ], style={"marginBottom": "8px", "display": "flex", "alignItems": "center"})
+
+    sections: list = []
+
+    if current_tables:
+        current_color = _URGENCY_COLORS.get("attention", MUTED)
+        sections.append(_section_label("Current Issues", len(current_tables), current_color))
+        sections.append(html.Div(
+            [_col_hdr()] + _build_rows(current_tables),
+            style={"background": CARD, "borderRadius": "8px",
+                   "border": f"1px solid {DIVIDER}", "marginBottom": "24px"},
+        ))
+
+    return html.Div(sections)
 
 
 @app.callback(

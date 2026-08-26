@@ -19,7 +19,6 @@
 # backend functions it called were never restored.
 from __future__ import annotations
 
-import sqlite3
 from pathlib import Path
 
 from dq.rules.completeness import COMP_RULE_META
@@ -106,30 +105,16 @@ def _build_rows() -> list[dict]:
 
 
 def ensure_db(db_path: Path = DB_PATH) -> None:
-    """Create (or refresh) the dq_rules SQLite table from the in-memory registry."""
-    con = sqlite3.connect(db_path)
+    """Sync the in-memory rule registry into dq_rules in Greenplum."""
+    from storage.postgres.app_db import get_connection
+    con = get_connection()
     try:
-        con.execute("""
-            CREATE TABLE IF NOT EXISTS dq_rules (
-                rule_id    TEXT PRIMARY KEY,
-                dimension  TEXT NOT NULL,
-                category   TEXT,
-                rule_name  TEXT NOT NULL,
-                tables     TEXT NOT NULL,
-                fields     TEXT
-            )
-        """)
         rows = _build_rows()
+        con.execute("DELETE FROM dq_rules")
         con.executemany(
             """
             INSERT INTO dq_rules (rule_id, dimension, category, rule_name, tables, fields)
-            VALUES (:rule_id, :dimension, :category, :rule_name, :tables, :fields)
-            ON CONFLICT(rule_id) DO UPDATE SET
-                dimension = excluded.dimension,
-                category  = excluded.category,
-                rule_name = excluded.rule_name,
-                tables    = excluded.tables,
-                fields    = excluded.fields
+            VALUES (%(rule_id)s, %(dimension)s, %(category)s, %(rule_name)s, %(tables)s, %(fields)s)
             """,
             rows,
         )

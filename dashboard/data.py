@@ -94,7 +94,7 @@ def _load_activity() -> dict:
 def _pipeline_le_books() -> set:
     """Return the set of le_books included in the current pipeline report."""
     try:
-        data = json.loads(REPORT_FILE.read_text(encoding="utf-8"))
+        data = json.loads(PIPELINE_FILE.read_text(encoding="utf-8"))
         return {str(lb) for lb in (data.get("le_books") or [])}
     except Exception:
         return set()
@@ -223,6 +223,49 @@ def _table_nulls(entry: dict) -> dict[str, dict[str, int]]:
     if not entry:
         return {}
     return entry.get("table_null_cols", {})
+
+
+_DIM_REPORT_FILES: dict[str, Path] = {
+    "completeness": _DIR / "dq_completeness_report.json",
+    "accuracy":     _DIR / "dq_accuracy_report.json",
+    "validity":     _DIR / "dq_validity_report.json",
+    "uniqueness":   _DIR / "dq_uniqueness_report.json",
+    "timeliness":   _DIR / "dq_timeliness_report.json",
+}
+_DIM_SCORE_KEYS: dict[str, str] = {
+    "completeness": "completeness_score",
+    "accuracy":     "accuracy_score",
+    "validity":     "validity_score",
+    "uniqueness":   "uniqueness_score",
+    "timeliness":   "timeliness_score",
+}
+
+
+def _table_dim_scores(le_book: str | None = None) -> dict:
+    """Per-table dimension scores from the latest engine report JSONs.
+
+    Returns {table: {dim: score}} for a specific le_book,
+    or {lb: {table: {dim: score}}} for all institutions when le_book is None.
+    """
+    result: dict = {}
+    for dim, report_file in _DIM_REPORT_FILES.items():
+        if not report_file.exists():
+            continue
+        try:
+            report = json.loads(report_file.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        score_key = _DIM_SCORE_KEYS[dim]
+        for table, tdata in report.get("tables", {}).items():
+            if tdata.get("status") != "evaluated":
+                continue
+            for lb, lb_data in tdata.get("le_book_breakdown", {}).items():
+                s = lb_data.get(score_key)
+                if s is not None:
+                    result.setdefault(lb, {}).setdefault(table, {})[dim] = round(float(s), 1)
+    if le_book is not None:
+        return result.get(str(le_book), {})
+    return result
 
 
 # ── bootstrap values (computed once at process startup) ────────────────────────

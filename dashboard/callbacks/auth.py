@@ -1,12 +1,45 @@
-# Login / logout / user-header callbacks — moved from dq_dashboard_dash.py.
+# Login / logout / user-header callbacks
 from __future__ import annotations
-
 import dash
 from dash import Input, Output, State, ctx, html
 from flask import session as flask_session
-
 from auth import users as auth_mod
 from dashboard.app import app
+
+
+# ── session hydration on page load ───────────────────────────────────────────
+# Fires once on (re)load via url.pathname. If auth-store is empty but the Flask
+# session cookie is still valid (e.g. browser was closed and reopened), this
+# repopulates the store so the user lands on their last page, not login.
+
+@app.callback(
+    Output("auth-store", "data"),
+    Input("url", "pathname"),
+    State("auth-store", "data"),
+)
+def _hydrate_from_flask_session(_, auth_data):
+    auth = auth_data or {}
+    if auth.get("email"):
+        raise dash.exceptions.PreventUpdate   # sessionStorage already populated
+
+    email = flask_session.get("user_email", "")
+    if not email:
+        raise dash.exceptions.PreventUpdate   # no server session either → show login
+
+    user = auth_mod.get_user_by_email(email)
+    if not user:
+        flask_session.clear()
+        raise dash.exceptions.PreventUpdate
+
+    le_books = (auth_mod.get_user_institutions(user["user_id"])
+                if user["role"] in auth_mod.INST_ROLES else [])
+    return {
+        "email":    user["email"],
+        "name":     user["name"],
+        "role":     user["role"],
+        "user_id":  user["user_id"],
+        "le_books": le_books,
+    }
 
 
 # ── login tab switching ───────────────────────────────────────────────────────
@@ -101,6 +134,9 @@ def _update_user_header(auth_data):
     email = auth.get("email", "")
     name  = auth.get("name",  "")
     if not email:
+        return html.Div()
+    # Institution users have their own logout button in the portal nav bar
+    if auth.get("le_books"):
         return html.Div()
     display = name.split()[0] if name else email.split("@")[0]
     return html.Div([

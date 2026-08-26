@@ -1,22 +1,14 @@
 # Validations tab (read-only list of active rules) — moved from dq_dashboard_dash.py.
 from __future__ import annotations
-
 from dash import dcc, html
 import plotly.graph_objects as go
-
-import sqlite3
-from pathlib import Path
-
 from dashboard.components import _dim_pill
 from dashboard.theme import BG, BRAND, CARD, DIVIDER, FONT, MUTED, TEXT
 
-_DB_PATH = Path(__file__).resolve().parents[2] / "dq_rules.db"
-
-
 def _get_rules_from_db() -> list[dict]:
     try:
-        con = sqlite3.connect(_DB_PATH)
-        con.row_factory = sqlite3.Row
+        from storage.postgres.app_db import get_connection
+        con = get_connection()
         rows = con.execute(
             "SELECT rule_id, dimension, category, rule_name, tables, fields "
             "FROM dq_rules ORDER BY dimension, rule_id"
@@ -379,22 +371,52 @@ def _documentation_section() -> html.Div:
             ),
         ]),
 
-        # 6. Dashboard guide
-        _doc_accordion("6.  Dashboard User Guide — BNR Inspector", [
+        # 6. Data profiling
+        _doc_accordion("6.  Data Profiling", [
+            _doc_p(
+                "The Data Profiling tab provides column-level statistics for every institution and table "
+                "in the EDWH. Statistics are computed once per monthly pipeline run and the last three runs are retained, "
+                "allowing month-over-month comparison."
+            ),
+            _doc_h("Statistics Shown Per Column"),
+            _doc_kv_table([
+                ("% Null / # Null",     "Percentage and count of records where this field is empty (NULL). Red ≥ 20%, amber ≥ 5%, green < 5%."),
+                ("% Distinct / # Distinct", "Percentage and count of unique values in this column — a proxy for cardinality."),
+                ("Min / Max",           "Lowest and highest values present in the column for the selected run date."),
+                ("Top Values",          "Up to five most frequent values with their record counts. Suppressed for high-cardinality columns (> 1,000 distinct values)."),
+            ]),
+            _doc_h("Selecting a Run Date"),
+            _doc_p(
+                "Use the Run Date dropdown to compare profiling results across the last three monthly runs. "
+                "If no run date is available for a table, profiling has not yet been executed — run the profiling "
+                "pipeline after the monthly detection completes."
+            ),
+            _doc_h("BNR Inspector View"),
+            _doc_p("Inspectors can select any institution and any table from the filter bar to see that institution's column-level statistics."),
+            _doc_h("Institution Portal View"),
+            _doc_p("Institution users see the same statistics scoped to their own institution only. The institution filter is not shown — it is applied automatically from their login credentials."),
+        ]),
+
+        # 7. Dashboard guide
+        _doc_accordion("7.  Dashboard User Guide — BNR Inspector", [
+            _doc_h("Data Profiling Tab"),
+            _doc_p("The first tab. Select an institution and a table to view column-level completeness, cardinality, and value distribution statistics. Use the Run Date dropdown to compare across the last three pipeline runs. See Section 6 for full details."),
             _doc_h("Home — Category View"),
             _doc_p("The home page shows all institutions grouped by category: B (Commercial Banks), MF (Microfinance Institutions), OSACCO / SACCO (Savings and Credit Cooperatives). Click a category card to see its institutions and scores."),
             _doc_h("Category / Institution View"),
             _doc_p("After selecting a category or institution: five KPI tiles show the current score per dimension. The Institution Reports Table lists available issue evidence packages — each row shows the institution name, tables with issues, and a Download ZIP button. The ZIP contains Excel files of the actual failing rows, broken down by table and rule."),
             _doc_h("Data Correction Tab"),
-            _doc_p("Used to create and manage Data Correction Requests. See Section 8 for the full workflow."),
+            _doc_p("Used to create and manage Data Correction Requests. See Section 9 for the full workflow."),
             _doc_h("Issues Tab"),
             _doc_p("Contains resolved issues and is the primary reference before approving a data correction submission by institutions."),
             _doc_h("Documentation Tab"),
             _doc_p("This tab — visible to all logged-in users — contains the full list of rules being checked and this programme documentation."),
         ]),
 
-        # 7. Portal guide
-        _doc_accordion("7.  Portal User Guide — Institution Staff", [
+        # 8. Portal guide
+        _doc_accordion("8.  Portal User Guide — Institution Staff", [
+            _doc_h("Data Profile Tab"),
+            _doc_p("The first tab. Shows column-level statistics for the institution's own data — null rates, distinct value counts, min/max, and top values per column and table. Use the Run Date dropdown to review and compare the last three monthly snapshots. See Section 6 for full details."),
             _doc_h("Dashboard Page"),
             _doc_p("Shows the five dimension scores scoped to the institution and the last seven (7) runs per dimension."),
             _doc_h("Issues Page (My Issues)"),
@@ -414,8 +436,8 @@ def _documentation_section() -> html.Div:
             ),
         ]),
 
-        # 8. Remediation workflow
-        _doc_accordion("8.  The Data Correction Workflow", [
+        # 9. Remediation workflow
+        _doc_accordion("9.  The Data Correction Workflow", [
             _doc_h("Step 1 — Inspector Creates a Data Correction Request"),
             _doc_p(
                 "An inspector goes to the Data Correction tab, selects the institution, chooses the relevant issues "
@@ -439,8 +461,8 @@ def _documentation_section() -> html.Div:
             ]),
         ]),
 
-        # 9. FAQ
-        _doc_accordion("9.  Frequently Asked Questions", [
+        # 10. FAQ
+        _doc_accordion("10.  Frequently Asked Questions", [
             _doc_h("How often does the system check data quality?"),
             _doc_p("The full detection pipeline runs monthly (subject to change depending on specific data needs). Score histories are updated to reflect any data corrections made between monthly runs."),
             _doc_h("What is the difference between a failing row and an issue?"),

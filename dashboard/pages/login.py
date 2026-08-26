@@ -1,8 +1,6 @@
-# Login page (BNR / Institution / Management tabs) — moved from dq_dashboard_dash.py.
+# Login page
 from __future__ import annotations
-
 from dash import dcc, html
-
 from dashboard.theme import BG, BRAND, CARD, C_RED, DIVIDER, FONT, MUTED, TEXT
 
 

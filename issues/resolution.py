@@ -40,14 +40,18 @@ def _record(issue: dict, invalid: int, run_id: str, stats: dict) -> bool:
     return False
 
 
-def _collect_counts(reports: dict) -> dict[tuple, int]:
-    """Flatten engine reports → {(le_book, rule_id): current_failing_count}.
+def _collect_counts(reports: dict) -> tuple:
+    """Flatten engine reports → (counts, evaluated_lb_tables).
 
-    Reads the same report shape issues.tracker.detect_and_update_issues consumes:
-    completeness contributes null_cells per (le_book, COMP rule); acc/val/uni
-    contribute rules[rid].invalid per le_book. Only 'evaluated' tables are trusted.
+    counts:              {(le_book, rule_id): current_failing_count}
+    evaluated_lb_tables: {(le_book, table)} pairs that had data in the engine
+                         results — used to distinguish "genuinely 0 failures"
+                         from "no data for this institution/period" (both would
+                         otherwise be absent from counts, causing false resolution).
+    Only 'evaluated' tables are trusted.
     """
     counts: dict[tuple, int] = {}
+    evaluated: set = set()
     for table, tdata in (reports.get("comp") or {}).get("tables", {}).items():
         if tdata.get("status") != "evaluated":
             continue
@@ -55,15 +59,17 @@ def _collect_counts(reports: dict) -> dict[tuple, int]:
         if not rid:
             continue
         for lb, b in tdata.get("le_book_breakdown", {}).items():
+            evaluated.add((str(lb), table))
             counts[(str(lb), rid)] = int(b.get("null_cells") or 0)
     for key in ("acc", "val", "uni", "tim"):
         for table, tdata in (reports.get(key) or {}).get("tables", {}).items():
             if tdata.get("status") != "evaluated":
                 continue
             for lb, b in tdata.get("le_book_breakdown", {}).items():
+                evaluated.add((str(lb), table))
                 for rid, rd in b.get("rules", {}).items():
                     counts[(str(lb), rid)] = int(rd.get("invalid") or 0)
-    return counts
+    return counts, evaluated
 
 
 def _known_rule_ids() -> frozenset[str]:
@@ -153,12 +159,18 @@ def run_resolution_scan(engine, schema: str, run_id: str) -> dict:
                    "val":  _run(val_eng,  le_books, tables, extra_where),
                    "uni":  _run(uni_eng,  le_books, tables, extra_where),
                    "tim":  _run(tim_eng,  le_books, tables, extra_where)}
-        counts = _collect_counts(reports)
+        counts, evaluated_lb_tables = _collect_counts(reports)
 
-        # re-record this month's issues (default 0 = no current failure → resolve)
         for iss in m_issues:
             try:
-                cnt = counts.get((str(iss["le_book"]), iss["rule_id"]), 0)
+                lb    = str(iss["le_book"])
+                table = iss["table_name"]
+                if (lb, table) not in evaluated_lb_tables:
+                    log.debug("  skip %s/%s/%s — no data in engine results for this period",
+                              lb, iss["rule_id"], table)
+                    stats["skipped"] += 1
+                    continue
+                cnt = counts.get((lb, iss["rule_id"]), 0)
                 if _record(iss, cnt, run_id, stats):
                     newly_resolved.append(iss)
             except Exception as exc:

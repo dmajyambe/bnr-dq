@@ -49,6 +49,9 @@ SCRIPT_DIR   = Path(__file__).resolve().parents[2]
 HISTORY_FILE = SCRIPT_DIR / "dq_history.json"
 REPORTS_DIR  = SCRIPT_DIR / "reports"
 
+from dashboard.data import _table_dim_scores
+from dashboard.components import _table_score_heatmap
+
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -96,6 +99,7 @@ def _kpi(label: str, value: float | None) -> html.Div:
 def inst_nav_bar(active_page: str, user_name: str, le_book: str,
                  unread_count: int = 0) -> html.Div:
     pages = [
+        ("inst_profiling",   "Data Profile"),
         ("inst_dashboard",   "Dashboard"),
         ("inst_issues",      "My Issues"),
         ("inst_remediation", "Data Correction"),
@@ -273,7 +277,7 @@ def inst_notification_panel(user_id: str) -> html.Div:
     })
 
 
-# ── pages ─────────────────────────────────────────────────────────────────────
+#  pages 
 
 def inst_dashboard_page(le_books: list[str], categories: dict) -> html.Div:
     """Scores + last 7 runs table + line chart + report download for each institution."""
@@ -288,11 +292,26 @@ def inst_dashboard_page(le_books: list[str], categories: dict) -> html.Div:
         name     = (cat_info.get("name") or lb).title()
         cat_type = cat_info.get("category_type", "")
 
-        # ── KPI cards ─────────────────────────────────────────────────────────
+        #  Per-table score breakdown
+        tbl_scores = _table_dim_scores(lb)
+
+        # ── KPI cards — averaged from tbl_scores so chips always match the table ──
+        dim_avgs: dict[str, float | None] = {}
+        for d in dims:
+            vals = [tbl[d] for tbl in tbl_scores.values() if d in tbl]
+            dim_avgs[d] = round(sum(vals) / len(vals), 1) if vals else None
         kpis = html.Div(
-            [_kpi(d.title(), _inst_score(today, lb, d)) for d in dims],
+            [_kpi(d.title(), dim_avgs.get(d)) for d in dims],
             style={"display": "flex", "gap": "12px", "flexWrap": "wrap", "marginBottom": "20px"},
         )
+        table_breakdown = html.Div(
+            _table_score_heatmap(tbl_scores),
+            style={
+                "background": CARD, "borderRadius": "10px",
+                "padding": "16px 20px", "marginBottom": "20px",
+                "border": f"1px solid {DIVIDER}",
+            },
+        ) if tbl_scores else html.Div()
 
         # ── Report download button ─────────────────────────────────────────────
         rpt_files = sorted(REPORTS_DIR.glob(f"{lb}_*.xlsx"), reverse=True) if REPORTS_DIR.exists() else []
@@ -325,48 +344,6 @@ def inst_dashboard_page(le_books: list[str], categories: dict) -> html.Div:
         else:
             dl_btn = html.Span()
 
-        # ── last 7 runs table ──────────────────────────────────────────────────
-        if len(trend) > 1:
-            trend_rows = []
-            for entry in reversed(trend):
-                dt = entry.get("date", "")
-                row_cells = [html.Td(dt, style={"padding": "5px 10px", "fontSize": "11px", "color": MUTED})]
-                for d in dims:
-                    val    = _inst_score(entry, lb, d)
-                    scored = val is not None and float(val) > 0
-                    disp   = f"{val:.1f}%" if scored else "—"
-                    clr    = _score_color(val) if scored else MUTED
-                    row_cells.append(html.Td(disp, style={
-                        "padding":    "5px 10px",
-                        "fontSize":   "12px",
-                        "fontWeight": "700" if scored else "400",
-                        "color":      clr,
-                        "textAlign":  "right",
-                    }))
-                trend_rows.append(html.Tr(row_cells,
-                    style={"borderBottom": f"1px solid {DIVIDER}"}))
-
-            trend_table = html.Table([
-                html.Thead(html.Tr([
-                    html.Th("Date", style={"padding": "6px 10px", "fontSize": "10px",
-                                           "color": MUTED, "textTransform": "uppercase",
-                                           "textAlign": "left"}),
-                ] + [
-                    html.Th(d.title(), style={"padding": "6px 10px", "fontSize": "10px",
-                                              "color": MUTED, "textTransform": "uppercase",
-                                              "textAlign": "right"})
-                    for d in dims
-                ])),
-                html.Tbody(trend_rows),
-            ], style={"width": "100%", "borderCollapse": "collapse",
-                      "background": CARD, "borderRadius": "8px",
-                      "border": f"1px solid {DIVIDER}", "marginBottom": "20px"})
-
-        else:
-            trend_table = html.Div("Not enough history for trend.",
-                                   style={"color": MUTED, "fontSize": "12px",
-                                          "marginBottom": "20px"})
-
         sections.append(html.Div([
             # Header row: name + LE book + download button
             html.Div([
@@ -382,13 +359,7 @@ def inst_dashboard_page(le_books: list[str], categories: dict) -> html.Div:
                       "marginBottom": "16px"}),
 
             kpis,
-
-            html.Div("LAST 7 RUNS", style={
-                "fontSize": "11px", "fontWeight": "900", "color": MUTED,
-                "letterSpacing": "0.06em", "textTransform": "uppercase",
-                "marginBottom": "10px",
-            }),
-            trend_table,
+            table_breakdown,
         ], style={
             "background": CARD, "borderRadius": "10px",
             "padding": "20px 24px", "marginBottom": "20px",
@@ -433,24 +404,38 @@ def inst_issues_page(le_books: list[str]) -> html.Div:
     this_month  = latest_run_month()
     month_label = _datetime.strptime(this_month, "%Y-%m").strftime("%B %Y")
 
-    open_issues = [i for i in get_issues(status="open")
-                   if i["le_book"] in lb_set and i.get("rule_id") in _ev
-                   and (i.get("detected_at") or "").startswith(this_month)]
+    all_open_issues = [i for i in get_issues(status="open")
+                       if i["le_book"] in lb_set and i.get("rule_id") in _ev]
+    open_issues     = [i for i in all_open_issues
+                       if (i.get("detected_at") or "").startswith(this_month)]
+    delayed_issues = [i for i in all_open_issues
+                      if (i.get("detected_at") or "")[:7] < this_month]
 
-    n_new = len(open_issues)
-    clr   = _URGENCY_COLORS.get("new", MUTED)
-    chips = [html.Div([
-        html.Span(str(n_new), style={"fontWeight": "900", "fontSize": "22px", "color": clr}),
-        html.Span(f"New Issues — {month_label}",
-                  style={"fontSize": "11px", "color": MUTED, "marginTop": "2px"}),
-    ], style={
-        "display": "flex", "flexDirection": "column", "alignItems": "center",
-        "background": CARD, "borderRadius": "8px", "padding": "12px 20px",
-        "border": f"2px solid {clr}", "minWidth": "100px",
-    })]
+    n_total   = len(all_open_issues)
+    n_new     = len(open_issues)
+    n_delayed = len(delayed_issues)
 
-    # available table options (only tables that have any issues for this institution)
-    active_tables = sorted({i["table_name"] for i in open_issues})
+    clr_total   = _URGENCY_COLORS.get("attention", MUTED)
+    clr_new     = _URGENCY_COLORS.get("new", MUTED)
+
+    def _chip(count: int, label: str, clr: str) -> html.Div:
+        return html.Div([
+            html.Span(str(count), style={"fontWeight": "900", "fontSize": "22px", "color": clr}),
+            html.Span(label,      style={"fontSize": "11px", "color": MUTED, "marginTop": "2px"}),
+        ], style={
+            "display": "flex", "flexDirection": "column", "alignItems": "center",
+            "background": CARD, "borderRadius": "8px", "padding": "12px 20px",
+            "border": f"2px solid {clr}", "minWidth": "100px",
+        })
+
+    chips = [
+        _chip(n_total,   "Open Issues",          clr_total),
+        _chip(n_new,     f"New — {month_label}", clr_new),
+        _chip(n_delayed, "Delayed",              C_RED),
+    ]
+
+    # available table options (all open issues across months, not just this month)
+    active_tables = sorted({i["table_name"] for i in all_open_issues})
     table_options = [
         {"label": _TABLE_PRETTY.get(t, t.replace("_", " ").title()), "value": t}
         for t in active_tables
@@ -622,3 +607,57 @@ def inst_validations_page(le_books: list[str]) -> html.Div:
             "border": f"1px solid {DIVIDER}",
         }),
     ], style={"padding": "28px 32px", "maxWidth": "1200px", "margin": "0 auto"})
+
+
+def inst_profiling_page(le_books: list[str]) -> html.Div:
+    """Column-level data profiling page for institution users."""
+    _TABLE_PRETTY_LOCAL = {
+        "accounts":               "Accounts",
+        "contract_loans":         "Contract Loans",
+        "contract_schedules":     "Contract Schedules",
+        "contracts_disburse":     "Contracts Disburse",
+        "contracts_expanded":     "Contracts",
+        "customers_expanded":     "Customers",
+        "loan_applications_2":    "Loan Applications",
+        "prev_loan_applications": "Prev Loan Apps",
+    }
+    table_options = [{"label": lbl, "value": tbl}
+                     for tbl, lbl in _TABLE_PRETTY_LOCAL.items()]
+
+    filter_bar = html.Div([
+        html.Div([
+            html.Span("Table", style={"fontSize": "11px", "color": MUTED,
+                                      "fontWeight": "700", "marginBottom": "4px",
+                                      "display": "block"}),
+            dcc.Dropdown(
+                id="inst-prof-table-dd",
+                options=table_options,
+                placeholder="Select table…",
+                clearable=True,
+                style={"fontSize": "13px", "minWidth": "240px"},
+            ),
+        ], style={"flex": "1"}),
+
+        html.Div([
+            html.Span("Run date", style={"fontSize": "11px", "color": MUTED,
+                                         "fontWeight": "700", "marginBottom": "4px",
+                                         "display": "block"}),
+            html.Div(id="inst-prof-run-date-dd"),
+        ], style={"minWidth": "180px"}),
+    ], style={
+        "display": "flex", "gap": "20px", "flexWrap": "wrap",
+        "background": CARD, "borderRadius": "8px", "padding": "16px 20px",
+        "border": f"1px solid {DIVIDER}", "marginBottom": "20px",
+    })
+
+    return html.Div([
+        html.Div([
+            html.H2("My Data Profile", style={
+                "fontSize": "18px", "fontWeight": "900", "color": TEXT, "margin": "0",
+            }),
+        ], style={"display": "flex", "alignItems": "baseline", "marginBottom": "20px"}),
+
+        filter_bar,
+        html.Div(id="inst-prof-summary-cards", style={"marginBottom": "20px"}),
+        html.Div(id="inst-prof-column-table"),
+    ], style={"padding": "28px 32px", "maxWidth": "1400px", "margin": "0 auto"})

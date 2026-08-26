@@ -123,6 +123,7 @@ def run_monthly_detection(engine, schema: str, run_date: str,
         "run_date": run_date,
         "data_processed": datetime.utcnow().isoformat() + "+00:00",
         "mode": "sql",
+        "le_books": sorted(valid_le_books),
     }, indent=2), encoding="utf-8")
 
     log.info("Monthly detection complete — run_date=%s", run_date)

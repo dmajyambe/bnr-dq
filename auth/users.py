@@ -2,9 +2,8 @@
 from __future__ import annotations
 import hashlib
 import secrets
-import sqlite3
 from datetime import datetime
-from storage.sqlite.connection import get_connection
+from storage.postgres.app_db import get_connection
 
 ALLOWED_DOMAIN = "bnr.rw"
 
@@ -17,31 +16,8 @@ ALL_ROLES  = BNR_ROLES | INST_ROLES
 # schema: dq_users
 
 def ensure_users_table() -> None:
-    con = get_connection()
-    try:
-        con.executescript("""
-            CREATE TABLE IF NOT EXISTS dq_users (
-                user_id       TEXT PRIMARY KEY,
-                email         TEXT UNIQUE NOT NULL,
-                name          TEXT NOT NULL DEFAULT '',
-                salt          TEXT NOT NULL,
-                password_hash TEXT NOT NULL,
-                role          TEXT NOT NULL DEFAULT 'viewer',
-                is_active     INTEGER NOT NULL DEFAULT 1,
-                created_at    TEXT NOT NULL,
-                last_login    TEXT
-            );
-
-            CREATE TABLE IF NOT EXISTS dq_user_institutions (
-                user_id  TEXT NOT NULL,
-                le_book  TEXT NOT NULL,
-                PRIMARY KEY (user_id, le_book),
-                FOREIGN KEY (user_id) REFERENCES dq_users(user_id)
-            );
-        """)
-        con.commit()
-    finally:
-        con.close()
+    from storage.postgres.init_tables import init_all
+    init_all()
 
 
 # role validation and email domain checks
@@ -122,12 +98,14 @@ def create_user(email: str, name: str, password: str,
 
         if le_books:
             con.executemany(
-                "INSERT OR IGNORE INTO dq_user_institutions (user_id, le_book) VALUES (?,?)",
+                "INSERT INTO dq_user_institutions (user_id, le_book) VALUES (%s,%s)",
                 [(user_id, lb) for lb in le_books]
             )
         con.commit()
-    except sqlite3.IntegrityError:
-        raise ValueError(f"User already exists: {email}")
+    except Exception as exc:
+        if "unique" in str(exc).lower() or "duplicate" in str(exc).lower():
+            raise ValueError(f"User already exists: {email}")
+        raise
     finally:
         con.close()
 
@@ -258,7 +236,7 @@ def get_user_institutions(user_id: str) -> list[str]:
             "SELECT le_book FROM dq_user_institutions WHERE user_id=? ORDER BY le_book",
             (user_id,)
         ).fetchall()
-        return [r[0] for r in rows]
+        return [r["le_book"] for r in rows]
     finally:
         con.close()
 
@@ -286,7 +264,7 @@ def set_user_institutions(user_id: str, le_books: list[str]) -> None:
         con.execute("DELETE FROM dq_user_institutions WHERE user_id=?", (user_id,))
         if le_books:
             con.executemany(
-                "INSERT OR IGNORE INTO dq_user_institutions (user_id, le_book) VALUES (?,?)",
+                "INSERT INTO dq_user_institutions (user_id, le_book) VALUES (%s,%s)",
                 [(user_id, lb) for lb in le_books]
             )
         con.commit()

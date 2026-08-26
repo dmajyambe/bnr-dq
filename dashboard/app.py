@@ -1,30 +1,16 @@
-# Dash app instance + layout — moved from dq_dashboard_dash.py.
-#
-# gunicorn target: gunicorn dashboard.app:server
-#
-# Import order matters here: `app`/`server` must exist before dashboard.routes
-# and the dashboard.callbacks.* submodules are imported at the bottom, since
-# each of those does `from dashboard.app import app` (or `server`) and
-# registers @app.callback / @server.route at import time.
+# Dash app instance and layout 
 from __future__ import annotations
-
 import os
-
 import dash
 from dash import dcc, html
-
 from auth.users import ensure_users_table
 from dashboard.data import _DIR
 from dashboard.theme import BG, BRAND, CARD, DIVIDER, FONT, MUTED, TEXT
 
 app = dash.Dash(
     __name__,
-    title="BNR Data Quality Monitoring",
+    title="BNR Data Quality Program",
     suppress_callback_exceptions=True,
-    # dash.Dash(__name__) resolves assets_folder relative to this file's own
-    # directory by default — now dashboard/assets/ instead of the project
-    # root's assets/ (where bnr_img.png and style.css actually live). Point
-    # it back explicitly.
     assets_folder=str(_DIR / "assets"),
 )
 server = app.server
@@ -34,7 +20,7 @@ ensure_users_table()
 
 app.layout = html.Div([
 
-    # ── header ────────────────────────────────────────────────────────────────
+    # header 
     html.Div([
         html.Div([
             html.Img(
@@ -72,10 +58,10 @@ app.layout = html.Div([
         "boxShadow":      "0 2px 8px rgba(0,0,0,0.18)",
     }),
 
-    # ── page nav ──────────────────────────────────────────────────────────────
+    #  page nav 
     html.Div(id="page-nav-bar"),
 
-    # ── page content (wrapped in a loader → spinner on every page transition) ──
+    #page content (wrapped in a loader → spinner on every page transition) ──
     dcc.Loading(
         id="page-loading", type="circle", color=BRAND,
         delay_show=250,                      # don't flash on instant renders
@@ -88,15 +74,16 @@ app.layout = html.Div([
         }),
     ),
 
-    # ── notification overlay (fixed, shown on top of page content) ────────────
+    #  notification overlay (fixed, shown on top of page content)
     html.Div(id="notif-overlay", style={
         "position": "fixed", "top": "52px", "right": "80px",
         "zIndex": "500", "display": "none",
     }),
 
-    # ── stores ────────────────────────────────────────────────────────────────
+    #  stores 
     # nav-state: {"cat": None|"B"|"MF"|"SACCO", "inst": None|"<code>"}
     # cat=None means landing page; inst=None means show all in category
+    dcc.Location(id="url", refresh=False),
     dcc.Interval(id="status-poll",   interval=30_000,  n_intervals=0),
     dcc.Interval(id="notif-poll",    interval=60_000,  n_intervals=0),
     dcc.Store(id="nav-state",        data={"cat": None, "inst": None}),
@@ -105,7 +92,7 @@ app.layout = html.Div([
     dcc.Store(id="cr-version",       data=0),
     dcc.Store(id="cr-cat-filter",    data=""),
     dcc.Store(id="notify-status",    data={}),
-    dcc.Store(id="auth-store",       data={}),
+    dcc.Store(id="auth-store",       storage_type="session", data={}),
     dcc.Store(id="inst-active-page", data="inst_dashboard"),
     dcc.Store(id="inst-notif-show",  data=False),
     dcc.Store(id="login-type",       data="bnr"),
@@ -221,6 +208,7 @@ from dashboard.callbacks import (  # noqa: F401,E402
     navigation as _cb_navigation,
     notifications as _cb_notifications,
     pipeline_status as _cb_pipeline_status,
+    profiling as _cb_profiling,
     remediation as _cb_remediation,
 )
 

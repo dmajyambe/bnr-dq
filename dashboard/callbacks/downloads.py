@@ -1,13 +1,10 @@
 # Report/CR/issue download callbacks
 from __future__ import annotations
-
 import csv
 import io
 import json
-
 import dash
 from dash import Input, Output, State, ctx, dcc, html
-
 from dashboard.app import app
 from dashboard.data import CATEGORIES_FILE, REPORTS_DIR, _DIR
 from dashboard.theme import BRAND, DIVIDER, MUTED, TEXT
@@ -73,7 +70,7 @@ def _populate_dl_modal(le_book):
         if issues else f"No new issues detected in {month_label} — report will contain schema data only."
     )
 
-    # ── table header ─────────────────────────────────────────────────────────
+    # table header
     _TH = {
         "padding": "8px 14px", "fontSize": "11px", "fontWeight": "700",
         "color": "#FFFFFF", "textTransform": "uppercase",
@@ -89,7 +86,7 @@ def _populate_dl_modal(le_book):
         html.Span("Status",       style={**_TH, "flex": "0.7", "textAlign": "center"}),
     ], style={"display": "flex", "position": "sticky", "top": "0", "zIndex": "1"})
 
-    # ── urgency colour map ────────────────────────────────────────────────────
+    # urgency color map
     _URGENCY_CLR = {
         "overdue":  "#7C3D1E", "critical": "#A0784A",
         "urgent":   "#B8860B", "attention": "#68686f",
@@ -196,7 +193,7 @@ def _on_inst_download_confirm(n_clicks, le_book):
                                        filename=f"dq_report_{le_book}_{latest_month}.zip"),
                         dash.no_update)
 
-        # ── 3. XLSX fallback ──────────────────────────────────────────────────
+        #  3. XLSX fallback 
         matches = sorted(REPORTS_DIR.glob(f"{le_book}_*.xlsx"), reverse=True)
         if matches:
             return dcc.send_file(str(matches[0])), dash.no_update

@@ -20,8 +20,26 @@ def write_monthly_zips(engine, schema: str, tables: list[str],
     matches its label, even when the caller doesn't pass an explicit extra_where.
     """
     if not extra_where:
-        extra_where, _ = _month_filter(month)
-        log.info("ZIP export date filter (derived from month=%s): %s", month, extra_where)
+        # Cap date_creation at the pipeline detection date for this month so that
+        # records created *after* the pipeline ran are not included in the report
+        # (which would make detected_at appear earlier than date_creation).
+        cutoff = None
+        try:
+            from storage.postgres.app_db import get_connection
+            _y, _m = (int(p) for p in month.split("-")[:2])
+            _ny, _nm = _y + (_m == 12), _m % 12 + 1
+            _con = get_connection()
+            _row = _con.execute(
+                "SELECT MAX(detected_at) AS max_det FROM dq_open_issues "
+                "WHERE detected_at >= ? AND detected_at < ?",
+                [f"{month}-01", f"{_ny:04d}-{_nm:02d}-01"],
+            ).fetchone()
+            _con.close()
+            cutoff = (_row["max_det"] or "")[:10] or None
+        except Exception as _exc:
+            log.warning("Could not look up detection cutoff date: %s", _exc)
+        extra_where, _ = _month_filter(month, cutoff_date=cutoff)
+        log.info("ZIP export date filter (month=%s, cutoff=%s): %s", month, cutoff, extra_where)
 
     ISSUE_REPORTS_DIR.mkdir(exist_ok=True)
 

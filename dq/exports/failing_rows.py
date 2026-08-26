@@ -343,7 +343,7 @@ def _failing_columns(table: str, existing: set) -> list[str]:
 # unnest produces hundreds of millions of intermediate rows on Greenplum before
 # the ROW_NUMBER cap can apply.  For these tables completeness is skipped in
 # build_failing_union; ACC/VAL/UNI/TIM/REL issues are still exported.
-_SKIP_COMPLETENESS_TABLES: frozenset[str] = frozenset({"contracts_expanded"})
+_SKIP_COMPLETENESS_TABLES: frozenset[str] = frozenset({"contracts_expanded","customers_expanded"})
 
 
 def build_failing_union(schema: str, table: str, existing: set,
@@ -554,159 +554,185 @@ def write_institution_zips(engine, schema: str, table: str,
             return ("", "")
         return _issue_dates.get((lb, rid), ("", ""))
 
-    with engine.connect() as conn:
-        try:
-            # Referential-integrity branches (see build_failing_union) join
-            # against a deduplicated parent table that can run to tens of
-            # millions of rows — default work_mem spills that to disk.
-            conn.execute(text("SET work_mem = '512MB'"))
-        except Exception:
-            conn.rollback()
-        existing = all_columns(conn, schema, table)
-        built = build_failing_union(schema, table, existing, valid_le_books, limit,
-                                    extra_where=extra_where,
-                                    per_issue_cap=0)
-        if not built:
+    # Fetch column list once; no row data needed yet.
+    with engine.connect() as _cc:
+        existing = all_columns(_cc, schema, table)
+
+    # Probe with all institutions to get out_cols/issue_cols (same regardless of le_book).
+    _probe = build_failing_union(schema, table, existing, valid_le_books, limit,
+                                 extra_where=extra_where, per_issue_cap=0)
+    if not _probe:
+        return
+    _, out_cols, issue_cols = _probe
+
+    # sheet columns = output cols minus issue_type; insert enrichment after le_book
+    sheet_cols = [c for c in out_cols if c != "issue_type"]
+    header: list[str] = []
+    for c in sheet_cols:
+        header.append(c)
+        if c == "le_book":
+            header += ["stakeholder_name", "category_type"]
+    header.append("issue_type")
+    header.append("detected_at")
+    header.append("sla_deadline")
+
+    from storage.evidence_store import store_rows as _store_evidence
+    run_date = month + "-01"   # label stored with evidence rows
+
+    # Mutable state shared by the helper closures; reset per institution.
+    st: dict = {"wb": None, "path": None, "ws": None, "issue": None,
+                "affected": set(), "n": 0, "used": set(), "part": 1,
+                "detected_at": "", "sla_deadline": "", "lb": None}
+    evidence_buf: dict[str, list[dict]] = {}
+
+    def _sheet_title_part(issue: str, part: int) -> str:
+        sfx  = f" ({part})" if part > 1 else ""
+        base = re.sub(r"[\[\]:*?/\\]", " ", issue)
+        name = (base[:31 - len(sfx)] + sfx).strip() or "issue"
+        i    = 2
+        while name.lower() in st["used"]:
+            sfx2 = f" ({i})"
+            name = (base[:31 - len(sfx2)] + sfx2).strip()
+            i   += 1
+        st["used"].add(name.lower())
+        return name
+
+    def _start_sheet(issue: str, lb: str, part: int = 1):
+        ws       = st["wb"].create_sheet(title=_sheet_title_part(issue, part))
+        affected = set(issue_cols.get(issue, []))
+        det, sla = _dates_for(lb, issue)
+        cells    = []
+        for col in header:
+            cell = WriteOnlyCell(ws, value=col)
+            if col in affected:
+                cell.font, cell.fill = HDR_RED, RED_FILL
+            elif col in ("detected_at", "sla_deadline"):
+                cell.font = DATE_FONT
+            else:
+                cell.font = HDR_FONT
+            cells.append(cell)
+        ws.append(cells)
+        st.update(ws=ws, issue=issue, affected=affected, n=0, part=part,
+                  detected_at=det, sla_deadline=sla)
+
+    def _write_row(m: dict, name: str, ctype: str):
+        if st["n"] >= _EXCEL_MAX_ROWS:
+            _start_sheet(st["issue"], st["lb"], part=st["part"] + 1)
+        affected = st["affected"]
+        cells = []
+        for col in sheet_cols:
+            cell = WriteOnlyCell(st["ws"], value=_coerce(m.get(col)))
+            if col in affected:
+                cell.fill, cell.font = RED_FILL, RED_FONT
+            cells.append(cell)
+            if col == "le_book":
+                cells.append(WriteOnlyCell(st["ws"], value=name))
+                cells.append(WriteOnlyCell(st["ws"], value=ctype))
+        cells.append(WriteOnlyCell(st["ws"], value=st["issue"]))
+        cells.append(WriteOnlyCell(st["ws"], value=st["detected_at"]))
+        cells.append(WriteOnlyCell(st["ws"], value=st["sla_deadline"]))
+        st["ws"].append(cells)
+        st["n"] += 1
+        # buffer raw row for evidence store
+        evidence_buf.setdefault(st["issue"], []).append(
+            {col: m.get(col) for col in sheet_cols}
+        )
+
+    def _new_workbook():
+        fd, path = tempfile.mkstemp(suffix=".xlsx")
+        os.close(fd)
+        st.update(wb=Workbook(write_only=True), path=path, ws=None,
+                  issue=None, used=set())
+
+    def _close(lb: str):
+        if st["wb"] is None:
             return
-        sql, out_cols, issue_cols = built
-
-        # sheet columns = output cols minus issue_type; insert enrichment after le_book
-        sheet_cols = [c for c in out_cols if c != "issue_type"]
-        header: list[str] = []
-        for c in sheet_cols:
-            header.append(c)
-            if c == "le_book":
-                header += ["stakeholder_name", "category_type"]
-        header.append("issue_type")
-        header.append("detected_at")
-        header.append("sla_deadline")
-
-        def _sheet_title(label: str, used: set) -> str:
-            name = re.sub(r"[\[\]:*?/\\]", " ", label)[:31].strip() or "issue"
-            base, i = name, 1
-            while name.lower() in used:
-                sfx = f" ({i})"
-                name = base[:31 - len(sfx)] + sfx
-                i += 1
-            used.add(name.lower())
-            return name
-
-        from storage.evidence_store import store_rows as _store_evidence
-        run_date = month + "-01"   # label stored with evidence rows
-
-        result = conn.execution_options(stream_results=True).execute(text(sql))
-        st = {"wb": None, "path": None, "ws": None, "issue": None,
-              "affected": set(), "n": 0, "used": set(), "part": 1,
-              "detected_at": "", "sla_deadline": ""}
-        # evidence_buf[issue_label] = list of raw row dicts for SQLite
-        evidence_buf: dict[str, list[dict]] = {}
-
-        def _sheet_title_part(issue: str, part: int) -> str:
-            sfx  = f" ({part})" if part > 1 else ""
-            base = re.sub(r"[\[\]:*?/\\]", " ", issue)
-            name = (base[:31 - len(sfx)] + sfx).strip() or "issue"
-            i    = 2
-            while name.lower() in st["used"]:
-                sfx2 = f" ({i})"
-                name = (base[:31 - len(sfx2)] + sfx2).strip()
-                i   += 1
-            st["used"].add(name.lower())
-            return name
-
-        def _start_sheet(issue: str, lb: str, part: int = 1):
-            ws       = st["wb"].create_sheet(title=_sheet_title_part(issue, part))
-            affected = set(issue_cols.get(issue, []))
-            det, sla = _dates_for(lb, issue)
-            cells    = []
-            for col in header:
-                cell = WriteOnlyCell(ws, value=col)
-                if col in affected:
-                    cell.font, cell.fill = HDR_RED, RED_FILL
-                elif col in ("detected_at", "sla_deadline"):
-                    cell.font = DATE_FONT
+        st["wb"].save(st["path"])
+        zip_path = ISSUE_REPORTS_DIR / f"{lb}_{month}.zip"
+        arcname  = f"{table}.xlsx"
+        # If the ZIP already contains this table's sheet, rebuild it without
+        # the stale entry before appending the fresh one (guards against
+        # duplicate entries from partial re-runs).
+        if zip_path.exists():
+            with zipfile.ZipFile(zip_path, "r") as _rz:
+                _entries = _rz.namelist()
+                if arcname in _entries:
+                    kept = [(n, _rz.read(n)) for n in _entries if n != arcname]
                 else:
-                    cell.font = HDR_FONT
-                cells.append(cell)
-            ws.append(cells)
-            st.update(ws=ws, issue=issue, affected=affected, n=0, part=part,
-                      detected_at=det, sla_deadline=sla)
+                    kept = None
+            if kept is not None:
+                tmp = zip_path.with_suffix(".zip.tmp")
+                with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as _wz:
+                    for n, data in kept:
+                        _wz.writestr(n, data)
+                tmp.replace(zip_path)
+        with zipfile.ZipFile(zip_path, "a", zipfile.ZIP_DEFLATED) as zf:
+            zf.write(st["path"], arcname=arcname)
+        os.unlink(st["path"])
+        log.info("  ZIP %-6s  %s.xlsx", lb, table)
+        st.update(wb=None, path=None, ws=None)
+        # persist buffered rows to evidence store
+        for issue_label, rows in evidence_buf.items():
+            if issue_label.startswith("Missing "):
+                rule_id = _TABLE_TO_COMP_RULE.get(table)
+            else:
+                _m = _RULE_PREFIX_RE.match(issue_label or "")
+                rule_id = _m.group(1) if _m else None
+            if rule_id:
+                try:
+                    _store_evidence(lb, rule_id, table, run_date, rows)
+                except Exception as _exc:
+                    log.warning("evidence store failed %s/%s/%s: %s",
+                                lb, rule_id, table, _exc)
+        evidence_buf.clear()
 
-        def _write_row(m: dict, name: str, ctype: str):
-            if st["n"] >= _EXCEL_MAX_ROWS:
-                _start_sheet(st["issue"], cur_lb, part=st["part"] + 1)
-            affected = st["affected"]
-            cells = []
-            for col in sheet_cols:
-                cell = WriteOnlyCell(st["ws"], value=_coerce(m.get(col)))
-                if col in affected:
-                    cell.fill, cell.font = RED_FILL, RED_FONT
-                cells.append(cell)
-                if col == "le_book":
-                    cells.append(WriteOnlyCell(st["ws"], value=name))
-                    cells.append(WriteOnlyCell(st["ws"], value=ctype))
-            cells.append(WriteOnlyCell(st["ws"], value=st["issue"]))
-            cells.append(WriteOnlyCell(st["ws"], value=st["detected_at"]))
-            cells.append(WriteOnlyCell(st["ws"], value=st["sla_deadline"]))
-            st["ws"].append(cells)
-            st["n"] += 1
-            # buffer raw row for evidence store
-            evidence_buf.setdefault(st["issue"], []).append(
-                {col: m.get(col) for col in sheet_cols}
-            )
+    # Query one institution at a time so each Greenplum cursor covers only that
+    # institution's rows — avoids the multi-hour single-query timeout that kills
+    # large tables (e.g. customers_expanded at ~4 M rows across all le_books).
+    for lb in sorted(valid_le_books):
+        built = build_failing_union(schema, table, existing, frozenset({lb}), limit,
+                                    extra_where=extra_where, per_issue_cap=0)
+        if not built:
+            continue
+        sql, _, _ = built  # issue_cols/out_cols are institution-independent
 
-        def _new_workbook():
-            fd, path = tempfile.mkstemp(suffix=".xlsx")
-            os.close(fd)
-            st.update(wb=Workbook(write_only=True), path=path, ws=None,
-                      issue=None, used=set())
+        st.clear()
+        st.update(wb=None, path=None, ws=None, issue=None,
+                  affected=set(), n=0, used=set(), part=1,
+                  detected_at="", sla_deadline="", lb=lb)
+        evidence_buf.clear()
 
-        def _close(lb: str):
-            if st["wb"] is None:
-                return
-            st["wb"].save(st["path"])
-            zip_path = ISSUE_REPORTS_DIR / f"{lb}_{month}.zip"
-            with zipfile.ZipFile(zip_path, "a", zipfile.ZIP_DEFLATED) as zf:
-                zf.write(st["path"], arcname=f"{table}.xlsx")
-            os.unlink(st["path"])
-            log.info("  ZIP %-6s  %s.xlsx", lb, table)
-            st.update(wb=None, path=None, ws=None)
-            # persist buffered rows to Greenplum evidence store
-            for issue_label, rows in evidence_buf.items():
-                if issue_label.startswith("Missing "):
-                    rule_id = _TABLE_TO_COMP_RULE.get(table)
-                else:
-                    _m = _RULE_PREFIX_RE.match(issue_label or "")
-                    rule_id = _m.group(1) if _m else None
-                if rule_id:
-                    try:
-                        _store_evidence(lb, rule_id, table, run_date, rows)
-                    except Exception as _exc:
-                        log.warning("evidence store failed %s/%s/%s: %s",
-                                    lb, rule_id, table, _exc)
-            evidence_buf.clear()
+        with engine.connect() as conn:
+            try:
+                # Referential-integrity branches join against a deduplicated
+                # parent table that can be tens of millions of rows — default
+                # work_mem spills that to disk.
+                conn.execute(text("SET work_mem = '512MB'"))
+                conn.execute(text("SET statement_timeout = '30min'"))
+            except Exception:
+                conn.rollback()
 
-        cur_lb: str | None = None
-        for row in result:
-            m  = dict(row._mapping)
-            lb = str(m["le_book"]).strip() if m.get("le_book") is not None else None
-            if lb is None:
-                continue
-            issue = m.get("issue_type")
+            result = conn.execution_options(stream_results=True).execute(text(sql))
+            cur_issue: str | None = None
             info  = categories.get(lb, {})
             name  = info.get("name") or lb
             name  = name.title() if isinstance(name, str) else name
             ctype = info.get("category_type") or ""
-            if lb != cur_lb:
-                if cur_lb is not None:
-                    _close(cur_lb)
-                cur_lb = lb
-                _new_workbook()
-                _start_sheet(issue, lb)
-            elif issue != st["issue"]:
-                _start_sheet(issue, lb)
-            _write_row(m, name, ctype)
-        if cur_lb is not None:
-            _close(cur_lb)
+
+            for row in result:
+                m     = dict(row._mapping)
+                issue = m.get("issue_type")
+                if cur_issue is None:
+                    _new_workbook()  # defer until first row so empty institutions skip ZIP
+                    _start_sheet(issue, lb)
+                    cur_issue = issue
+                elif issue != cur_issue:
+                    _start_sheet(issue, lb)
+                    cur_issue = issue
+                _write_row(m, name, ctype)
+
+            if st["wb"] is not None:
+                _close(lb)
 
 
 # def _copy_detection_sheets(
@@ -918,7 +944,16 @@ def write_resolved_institution_zip(le_book: str, month: str, resolved_issues: li
                     ev_ws = wb.create_sheet(title=(rule_id + " — Records")[:31])
                     if ev_rows:
                         ev_hdr = list(ev_rows[0].keys())
-                        ev_ws.append([WriteOnlyCell(ev_ws, value=h) for h in ev_hdr])
+                        _all_meta = {**VAL_RULE_META, **ACC_RULE_META, **UNI_RULE_META}
+                        rule_key_fields = set(_all_meta.get(rule_id, {}).get("fields", []))
+                        ev_hdr_cells = []
+                        for col_name in ev_hdr:
+                            c = WriteOnlyCell(ev_ws, value=col_name)
+                            c.font      = HDR_FONT
+                            c.alignment = HDR_ALIGN
+                            c.fill      = HDR_FILL_GRN if col_name in rule_key_fields else HDR_FILL
+                            ev_hdr_cells.append(c)
+                        ev_ws.append(ev_hdr_cells)
                         for ev_row in ev_rows:
                             ev_ws.append([
                                 WriteOnlyCell(ev_ws, value=_coerce(ev_row.get(c)))
@@ -927,11 +962,8 @@ def write_resolved_institution_zip(le_book: str, month: str, resolved_issues: li
                     log.debug("  evidence from store: %s/%s — %d rows (run %s)",
                               rule_id, table, len(ev_rows), ev_run_date)
                 else:
-                    # fallback: try the detection ZIP from the detection month
-                    det_month = (iss.get("detected_at") or "")[:7]
-                    if det_month:
-                        det_zip = ISSUE_REPORTS_DIR / f"{le_book}_{det_month}.zip"
-                        _copy_detection_sheets(wb, det_zip, table, rule_id, _xlsx_cache)
+                    log.debug("  no evidence rows for %s/%s/%s — records sheet omitted",
+                              rule_id, table, le_book)
 
             fd, tmp_path = tempfile.mkstemp(suffix=".xlsx")
             os.close(fd)

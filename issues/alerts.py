@@ -14,7 +14,7 @@ from email.mime.text import MIMEText
 
 from issues import repositories as repo
 from issues.state_machine import URGENCY_COLORS, NOTIFY_INTERVAL, urgency_band
-from storage.sqlite.connection import get_connection
+from storage.postgres.app_db import get_connection
 
 log = logging.getLogger("issues.alerts")
 

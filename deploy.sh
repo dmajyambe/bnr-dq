@@ -1,8 +1,4 @@
 #!/usr/bin/env bash
-# deploy.sh — Pull latest code and restart the dashboard.
-# Usage:
-#   bash deploy.sh           # pull from git + restart
-#   bash deploy.sh --no-git  # restart only (skip git pull)
 
 set -euo pipefail
 

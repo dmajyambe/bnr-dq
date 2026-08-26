@@ -1,10 +1,7 @@
-# Remediation tab (Data Correction Request workflow) — moved from dq_dashboard_dash.py.
+# Remediation tab (Data Correction Request workflow)
 from __future__ import annotations
-
 import json
-
 from dash import dcc, html
-
 from dashboard.components import _empty_state, _fmt_int
 from dashboard.theme import BG, BRAND, CARD, DIVIDER, FONT, MUTED, TABLE_NAMES_PRETTY, TEXT, C_GREEN, C_RED
 
@@ -131,7 +128,7 @@ def _build_cr_list(crs: list[dict], role: str = "bnr_admin") -> html.Div:
                         chip_color = "#16A34A" if tbl_status == "approved" else "#D97706"
                         chip_label = "Approved" if tbl_status == "approved" else "Pending"
                         approve_btn = html.Span() if tbl_status == "approved" else html.Div(
-                            "✓ Approve Table",
+                            "Approve Table",
                             id={"type": "cr-tbl-approve-btn", "index": f"{cr['cr_id']}|{tbl}"},
                             n_clicks=0,
                             style={"display": "inline-block", "background": "#16A34A",
@@ -525,7 +522,7 @@ def _remediation_page(role: str = "bnr_admin", cat: str = "") -> html.Div:
             "marginBottom": "6px",
         }),
         html.P(
-            "Fill in your notes here before clicking Approve or Reject on a submitted CR below.",
+            "(Optional) Fill in your notes here before clicking Approve or Reject on a submitted Data Correction  below.",
             style={"fontSize": "11px", "color": MUTED, "margin": "0 0 8px"},
         ),
         dcc.Textarea(
@@ -547,7 +544,7 @@ def _remediation_page(role: str = "bnr_admin", cat: str = "") -> html.Div:
         "marginBottom": "20px",
     })
 
-    # ── CR list section ────────────────────────────────────────────────────────
+    #  CR list section 
     status_options = [{"label": "All Statuses", "value": "all"}] + [
         {"label": lbl, "value": key}
         for key, lbl in cr_mod.STATUS_LABELS.items()
@@ -589,7 +586,7 @@ def _remediation_page(role: str = "bnr_admin", cat: str = "") -> html.Div:
         # Page header
         html.Div([
             html.Div([
-                html.H2("Data Quality Remediation", style={
+                html.H2("Data Quality Correction", style={
                     "fontSize": "18px", "fontWeight": "900", "color": TEXT,
                     "margin": "0", "lineHeight": "1.2",
                 }),
