@@ -37,3 +37,9 @@ Thumbs.db
 
 # Claude Code local agent worktrees
 .claude/worktrees/
+
+# Large database files
+*.db
+
+# Generated issue reports
+issue_reports/
