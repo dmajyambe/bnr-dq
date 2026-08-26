@@ -24,8 +24,6 @@ __pycache__/
 *.py[cod]
 *.pyo
 
-# SQLite (rules are now in PostgreSQL; db kept for tests only)
-dq_rules.db
 
 # Scratch / duplicates
 *.pgsql
@@ -36,3 +34,6 @@ bnr_img.png
 *.swp
 *.swo
 Thumbs.db
+
+# Claude Code local agent worktrees
+.claude/worktrees/

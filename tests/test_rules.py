@@ -1,5 +1,5 @@
 """
-Tests for the rule registry (dq_rules.py) and SQLite store (dq_rules.db).
+Tests for the rule registry (dq/rules/registry.py) and SQLite store (dq_rules.db).
 """
 import sqlite3
 import tempfile
@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-import dq_rules
+import dq.rules.registry as dq_rules
 
 
 # ── Rule registry content ──────────────────────────────────────────────────────

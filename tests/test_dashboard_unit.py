@@ -1,18 +1,26 @@
 """
-Unit tests for dashboard helper functions (dq_dashboard_dash.py).
+Unit tests for dashboard helper functions — formerly all in
+dq_dashboard_dash.py, now split across dashboard/{theme,data,components}.py
+and dashboard/pages/{landing,dashboard_tab}.py.
 No browser / Dash server required — tests pure Python logic only.
 """
 import pytest
 from dash import html, dcc
 
-import dq_dashboard_dash as dash_app
-from dq_dashboard_dash import (
-    DIMS, DIM_LABELS, DIM_COLORS,
-    _cat_scores, _filter_institutions, _inst_scores,
+import dashboard.data as dash_app
+from dashboard.components import (
     _score_color, _score_bg,
-    _category_counts, _kpi_card, _sparkline,
+    _kpi_card, _sparkline,
     _trend_figure, _institution_table,
-    _landing_page, _dashboard_content,
+)
+from dashboard.data import (
+    _cat_scores, _filter_institutions, _inst_scores,
+    _category_counts,
+)
+from dashboard.pages.dashboard_tab import _dashboard_content
+from dashboard.pages.landing import _landing_page
+from dashboard.theme import (
+    DIMS, DIM_LABELS, DIM_COLORS,
     C_GREEN, C_AMBER, C_RED,
 )
 
@@ -247,7 +255,7 @@ class TestComponentRendering:
         assert isinstance(table, html.Div)
 
     def test_landing_page_renders(self):
-        from dq_dashboard_dash import _counts
+        from dashboard.data import _counts
         page = _landing_page(_counts)
         assert isinstance(page, html.Div)
 
