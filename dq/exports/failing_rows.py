@@ -28,6 +28,9 @@ from dq.sql.metadata import all_columns
 log = logging.getLogger("dq.exports.failing_rows")
 
 SCRIPT_DIR        = Path(__file__).resolve().parents[2]
+SCRIPT_DIR_=Path(__file__)
+print("SCRIPT_DIR_:",SCRIPT_DIR_)
+print("SCRIPT_DIR",SCRIPT_DIR)
 ISSUE_REPORTS_DIR = SCRIPT_DIR / "issue_reports"
 
 # Excel hard limit: 1,048,576 rows per sheet (1 header = 1,048,575 data rows).
@@ -884,10 +887,14 @@ def write_resolved_institution_zip(le_book: str, month: str, resolved_issues: li
                 dimension     = (iss.get("dimension") or "").title()
                 inst_name     = (iss.get("institution_name") or le_book).title()
                 rows_at_det   = iss.get("original_failing_rows") or iss.get("last_failing_rows") or iss.get("failing_rows", 0)
-                rows_remaining = iss.get("failing_rows", 0)
-                rows_resolved  = max(0, (rows_at_det or 0) - (rows_remaining or 0))
-                is_partial     = rows_remaining > 0
-                resolution     = "Partial" if is_partial else "Full"
+                # Issues reach write_resolved_zips only after two consecutive
+                # clean scans (invalid==0 twice). mark_pending_resolution()
+                # never zeroes failing_rows in dq_open_issues, so the field
+                # still holds the original detection count — ignore it here.
+                rows_remaining = 0
+                rows_resolved  = rows_at_det or 0
+                is_partial     = False
+                resolution     = "Full"
                 detected      = iss.get("detected_at", "")
                 resolved      = iss.get("resolved_at", "")
                 deadline      = iss.get("sla_deadline", "")

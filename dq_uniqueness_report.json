@@ -1,203 +1,45 @@
 {
-  "generated_at": "2026-08-26T11:50:37",
+  "generated_at": "2026-08-27T00:17:30",
   "tables": {
     "contract_loans": {
-      "status": "evaluated",
-      "row_count": 10,
-      "rules_evaluated": [
-        "UNI-001"
-      ],
-      "uniqueness_score": 100.0,
-      "le_book_breakdown": {
-        "040": {
-          "row_count": 10,
-          "uniqueness_score": 100.0,
-          "rules": {
-            "UNI-001": {
-              "rule_name": "No duplicate loan records within the period",
-              "category": "Duplicate Detection",
-              "fields": [
-                "contract_sequence_number",
-                "date_of_provision",
-                "disbursed_amount",
-                "prin_outstanding_amt_fcy",
-                "prin_outstanding_amt_lcy"
-              ],
-              "valid": 10,
-              "invalid": 0,
-              "total": 10,
-              "uniqueness_score": 100.0
-            }
-          }
-        }
-      }
+      "status": "no_data",
+      "row_count": 0
     },
     "contracts_disburse": {
-      "status": "evaluated",
-      "row_count": 10,
-      "rules_evaluated": [
-        "UNI-002"
-      ],
-      "uniqueness_score": 100.0,
-      "le_book_breakdown": {
-        "040": {
-          "row_count": 10,
-          "uniqueness_score": 100.0,
-          "rules": {
-            "UNI-002": {
-              "rule_name": "No duplicate disbursement records within the period",
-              "category": "Duplicate Detection",
-              "fields": [
-                "contract_id",
-                "currency",
-                "current_disbursed_amt",
-                "previous_disbursed_amt",
-                "first_payment_date"
-              ],
-              "valid": 10,
-              "invalid": 0,
-              "total": 10,
-              "uniqueness_score": 100.0
-            }
-          }
-        }
-      }
+      "status": "no_data",
+      "row_count": 0
     },
     "contracts_expanded": {
-      "status": "evaluated",
-      "row_count": 10,
-      "rules_evaluated": [
-        "UNI-003",
-        "UNI-005"
-      ],
-      "uniqueness_score": 100.0,
-      "le_book_breakdown": {
-        "040": {
-          "row_count": 10,
-          "uniqueness_score": 100.0,
-          "rules": {
-            "UNI-003": {
-              "rule_name": "No duplicate contract records within the period",
-              "category": "Duplicate Detection",
-              "fields": [
-                "contract_sequence_number",
-                "start_date",
-                "maturity_date",
-                "principal_amount_lcy",
-                "vision_sbu",
-                "contract_status"
-              ],
-              "valid": 10,
-              "invalid": 0,
-              "total": 10,
-              "uniqueness_score": 100.0
-            },
-            "UNI-005": {
-              "rule_name": "Contract ID must not repeat within the period",
-              "category": "Duplicate Detection",
-              "fields": [
-                "contract_id"
-              ],
-              "valid": 10,
-              "invalid": 0,
-              "total": 10,
-              "uniqueness_score": 100.0
-            }
-          }
-        }
-      }
+      "status": "no_data",
+      "row_count": 0
     },
     "accounts": {
-      "status": "evaluated",
-      "row_count": 10,
-      "rules_evaluated": [
-        "UNI-004"
-      ],
-      "uniqueness_score": 100.0,
-      "le_book_breakdown": {
-        "040": {
-          "row_count": 10,
-          "uniqueness_score": 100.0,
-          "rules": {
-            "UNI-004": {
-              "rule_name": "Account Number must not repeat within the period",
-              "category": "Duplicate Detection",
-              "fields": [
-                "account_no"
-              ],
-              "valid": 10,
-              "invalid": 0,
-              "total": 10,
-              "uniqueness_score": 100.0
-            }
-          }
-        }
-      }
+      "status": "no_data",
+      "row_count": 0
     },
     "customers_expanded": {
-      "status": "evaluated",
-      "row_count": 10,
-      "rules_evaluated": [
-        "UNI-006"
-      ],
-      "uniqueness_score": 100.0,
-      "le_book_breakdown": {
-        "040": {
-          "row_count": 10,
-          "uniqueness_score": 100.0,
-          "rules": {
-            "UNI-006": {
-              "rule_name": "Customer ID must not repeat within the period",
-              "category": "Duplicate Detection",
-              "fields": [
-                "customer_id"
-              ],
-              "valid": 10,
-              "invalid": 0,
-              "total": 10,
-              "uniqueness_score": 100.0
-            }
-          }
-        }
-      }
+      "status": "no_data",
+      "row_count": 0
     },
     "loan_applications_2": {
-      "status": "evaluated",
-      "row_count": 10,
-      "rules_evaluated": [
-        "UNI-007"
-      ],
-      "uniqueness_score": 100.0,
-      "le_book_breakdown": {
-        "040": {
-          "row_count": 10,
-          "uniqueness_score": 100.0,
-          "rules": {
-            "UNI-007": {
-              "rule_name": "Loan Application ID must not repeat within the period",
-              "category": "Duplicate Detection",
-              "fields": [
-                "loan_application_id"
-              ],
-              "valid": 10,
-              "invalid": 0,
-              "total": 10,
-              "uniqueness_score": 100.0
-            }
-          }
-        }
-      }
+      "status": "no_data",
+      "row_count": 0
     }
   },
-  "warnings": {},
-  "le_books": [
-    "040"
-  ],
+  "warnings": {
+    "contract_loans": "No applicable uniqueness columns found.",
+    "contracts_disburse": "No applicable uniqueness columns found.",
+    "contracts_expanded": "No applicable uniqueness columns found.",
+    "accounts": "No applicable uniqueness columns found.",
+    "customers_expanded": "No applicable uniqueness columns found.",
+    "loan_applications_2": "No applicable uniqueness columns found."
+  },
+  "le_books": [],
   "executive_summary": {
-    "overall_uniqueness_score": 100.0,
+    "overall_uniqueness_score": 0.0,
     "total_tables": 6,
-    "evaluated_tables": 6,
+    "evaluated_tables": 0,
     "schema": "dqp",
-    "row_limit": 10
+    "row_limit": 0
   }
 }
