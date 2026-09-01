@@ -99,12 +99,26 @@ _TABLES = [
 
     # Migration: add new columns to pre-existing tables (safe to re-run)
     """
-    ALTER TABLE dq_open_issues 
-    ADD COLUMN IF NOT EXISTS original_failing_rows INTEGER;
+    DO $$
+    BEGIN
+        IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'dq_open_issues' AND column_name = 'original_failing_rows'
+        ) THEN
+            ALTER TABLE dq_open_issues ADD COLUMN original_failing_rows INTEGER;
+        END IF;
+    END$$;
     """,
     """
-    ALTER TABLE dq_issue_evidence 
-    ADD COLUMN IF NOT EXISTS snapshot_type TEXT NOT NULL DEFAULT 'original';
+    DO $$
+    BEGIN
+        IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'dq_issue_evidence' AND column_name = 'snapshot_type'
+        ) THEN
+            ALTER TABLE dq_issue_evidence ADD COLUMN snapshot_type TEXT NOT NULL DEFAULT 'original';
+        END IF;
+    END$$;
     """,
 
     """
@@ -138,8 +152,15 @@ _TABLES = [
     """,
 
     """
-    ALTER TABLE dq_column_profiles 
-    ADD COLUMN IF NOT EXISTS data_type TEXT;
+    DO $$
+    BEGIN
+        IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'dq_column_profiles' AND column_name = 'data_type'
+        ) THEN
+            ALTER TABLE dq_column_profiles ADD COLUMN data_type TEXT;
+        END IF;
+    END$$;
     """,
 
     """
