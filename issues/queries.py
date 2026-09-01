@@ -8,7 +8,8 @@ from datetime import date
 
 from issues import repositories as repo
 from issues.state_machine import OPEN_SQL, urgency_band
-from storage.postgres.app_db import get_connection
+from sqlalchemy import text
+from storage.postgres.connection import get_engine
 
 
 def get_table_dimension_impact(
@@ -20,16 +21,15 @@ def get_table_dimension_impact(
     """
     from issues.state_machine import OPEN_SQL
     repo.ensure_tables()
-    con = get_connection()
-    try:
+    with get_engine().connect() as con:
         rows = con.execute(
-            f"SELECT table_name, dimension, le_book, "
-            f"SUM(failing_rows) AS total_rows "
-            f"FROM dq_open_issues WHERE status IN {OPEN_SQL} "
-            f"GROUP BY table_name, dimension, le_book"
-        ).fetchall()
-    finally:
-        con.close()
+            text(
+                f"SELECT table_name, dimension, le_book, "
+                f"SUM(failing_rows) AS total_rows "
+                f"FROM dq_open_issues WHERE status IN {OPEN_SQL} "
+                f"GROUP BY table_name, dimension, le_book"
+            )
+        ).mappings().fetchall()
 
     result: dict[str, dict[str, dict]] = {}
     for row in rows:
@@ -54,13 +54,10 @@ def get_institution_issue_summary() -> dict[str, dict]:
     evidence = get_all_evidence()  # {le_book: frozenset of rule_ids with report evidence}
 
     repo.ensure_tables()
-    con = get_connection()
-    try:
+    with get_engine().connect() as con:
         rows = con.execute(
-            f"SELECT le_book, rule_id, detected_at, sla_deadline FROM dq_open_issues WHERE status IN {OPEN_SQL}"
-        ).fetchall()
-    finally:
-        con.close()
+            text(f"SELECT le_book, rule_id, detected_at, sla_deadline FROM dq_open_issues WHERE status IN {OPEN_SQL}")
+        ).mappings().fetchall()
 
     summary: dict[str, dict] = {}
     _order = ["new", "attention", "urgent", "critical", "overdue"]
@@ -104,19 +101,16 @@ def get_issues_by_table(
     repo.ensure_tables()
     statuses = (f"('{status}','pending_resolution')" if include_pending
                 else f"('{status}')")
-    con = get_connection()
-    try:
-        clauses = [f"status IN {statuses}"]
-        params: list = []
+    with get_engine().connect() as con:
         if le_book:
-            clauses.append("le_book=?")
-            params.append(le_book)
-        where = "WHERE " + " AND ".join(clauses)
-        rows  = con.execute(
-            f"SELECT * FROM dq_open_issues {where} ORDER BY sla_deadline", params
-        ).fetchall()
-    finally:
-        con.close()
+            rows = con.execute(
+                text(f"SELECT * FROM dq_open_issues WHERE status IN {statuses} AND le_book=:lb ORDER BY sla_deadline"),
+                {"lb": le_book},
+            ).mappings().fetchall()
+        else:
+            rows = con.execute(
+                text(f"SELECT * FROM dq_open_issues WHERE status IN {statuses} ORDER BY sla_deadline")
+            ).mappings().fetchall()
 
     today = date.today()
 

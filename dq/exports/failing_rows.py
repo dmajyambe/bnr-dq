@@ -1,4 +1,4 @@
-
+#get failing rows for each institution and write to excel sheet
 from __future__ import annotations
 import io
 import logging
@@ -27,13 +27,12 @@ from dq.sql.metadata import all_columns
 
 log = logging.getLogger("dq.exports.failing_rows")
 
-SCRIPT_DIR        = Path(__file__).resolve().parents[2]
-SCRIPT_DIR_=Path(__file__)
-print("SCRIPT_DIR_:",SCRIPT_DIR_)
-print("SCRIPT_DIR",SCRIPT_DIR)
+SCRIPT_DIR= Path(__file__).resolve().parents[2]
+# SCRIPT_DIR_=Path(__file__)
+# print("SCRIPT_DIR_:",SCRIPT_DIR_)
+# print("SCRIPT_DIR",SCRIPT_DIR)
 ISSUE_REPORTS_DIR = SCRIPT_DIR / "issue_reports"
 
-# Excel hard limit: 1,048,576 rows per sheet (1 header = 1,048,575 data rows).
 # When a single issue exceeds this, overflow into consecutive numbered sheets.
 _EXCEL_MAX_ROWS = 1_048_575
 
@@ -52,7 +51,7 @@ IDENTIFIER_COLS: dict[str, list[str]] = {
     "prev_loan_applications": ["le_book", "loan_application_id"],
 }
 
-
+#cast types for excel 
 def _coerce(v):
     if v is None or isinstance(v, (str, int, float, bool, _date, _datetime)):
         return v
@@ -74,7 +73,7 @@ def _affected_cols_for_rule(rule_id: str) -> list[str]:
         return list(UNI_RULE_META[rule_id].get("fields", []))
     return []
 
-
+#string lateral quoting for sql
 def _sqlstr(s: str) -> str:
     """Quote a Python string as a SQL string literal."""
     return "'" + s.replace("'", "''") + "'"
@@ -327,9 +326,8 @@ def _tim_invalid(rule_id: str, existing: set) -> tuple[str, list[str]] | None:
 
     return None
 
-
+#get failing columns that are also present in db
 def _failing_columns(table: str, existing: set) -> list[str]:
-    """All rule-target columns for a table (the 'failing' columns), present in DB."""
     cols: set[str] = {c for c in MANDATORY_COLUMNS.get(table, []) if c in existing}
     for rid in ACC_TABLE_RULES.get(table, []):
         cols |= {c for c in ACC_RULE_META.get(rid, {}).get("fields", []) if c in existing}
@@ -339,13 +337,10 @@ def _failing_columns(table: str, existing: set) -> list[str]:
         cols |= {c for c in UNI_RULE_META.get(rid, {}).get("fields", []) if c in existing}
     for rid in TIM_TABLE_RULES.get(table, []):
         cols |= {c for c in TIM_RULE_META.get(rid, {}).get("fields", []) if c in existing}
-    return sorted(cols)
+    return sorted(cols) 
 
 
-# Tables whose MANDATORY_COLUMNS list is so large that the CROSS JOIN LATERAL
-# unnest produces hundreds of millions of intermediate rows on Greenplum before
-# the ROW_NUMBER cap can apply.  For these tables completeness is skipped in
-# build_failing_union; ACC/VAL/UNI/TIM/REL issues are still exported.
+#skip them for now ( too many rows )
 _SKIP_COMPLETENESS_TABLES: frozenset[str] = frozenset({"contracts_expanded","customers_expanded"})
 
 
@@ -505,16 +500,13 @@ _TABLE_TO_COMP_RULE: dict[str, str] = {
 }
 _RULE_PREFIX_RE = re.compile(r"^([A-Z]+-\d+)")
 
-
+#write failing rows to excel sheet for each institution
 def write_institution_zips(engine, schema: str, table: str,
                            valid_le_books: frozenset, categories: dict,
                            month: str, limit: int = 0,
                            max_rows_per_sheet: int = 50000,
                            extra_where: str = "") -> None:
-    """Stream FAILING rows (all dimensions) for `table` from SQL and write a
-    per-institution {table}.xlsx into their monthly ZIP — ONE SHEET PER ISSUE
-    (sheet name = issue type), with the affected column(s) highlighted red.
-    """
+    
     from openpyxl import Workbook
     from openpyxl.cell import WriteOnlyCell
     from openpyxl.styles import Font, PatternFill
@@ -533,16 +525,16 @@ def write_institution_zips(engine, schema: str, table: str,
     lb_list = list(valid_le_books)
     if lb_list:
         try:
-            from storage.postgres.app_db import get_connection
-            _ph = ",".join("?" * len(lb_list))
-            with get_connection() as _con:
-                for _r in _con.execute(
-                    f"SELECT le_book, table_name, rule_id, detected_at, sla_deadline "
-                    f"FROM dq_open_issues "
-                    f"WHERE table_name=? AND le_book IN ({_ph})"
-                    f" AND status IN ('open','pending_resolution')",
-                    [table] + lb_list,
-                ).fetchall():
+            from sqlalchemy import bindparam, text as _text
+            from storage.postgres.connection import get_engine
+            _sql = _text(
+                "SELECT le_book, table_name, rule_id, detected_at, sla_deadline "
+                "FROM dq_open_issues "
+                "WHERE table_name=:tbl AND le_book IN :lbs "
+                "AND status IN ('open','pending_resolution')"
+            ).bindparams(bindparam("lbs", expanding=True))
+            with get_engine().connect() as _con:
+                for _r in _con.execute(_sql, {"tbl": table, "lbs": lb_list}).mappings():
                     _issue_dates[(_r["le_book"], _r["table_name"], _r["rule_id"])] = (
                         _r["detected_at"] or "", _r["sla_deadline"] or ""
                     )
@@ -700,7 +692,7 @@ def write_institution_zips(engine, schema: str, table: str,
 
     # Query one institution at a time so each Greenplum cursor covers only that
     # institution's rows — avoids the multi-hour single-query timeout that kills
-    # large tables (e.g. customers_expanded at ~4 M rows across all le_books).
+    # large tables (e.g. customers_8expanded at ~4 M rows across all le_books).
     for lb in sorted(valid_le_books):
         built = build_failing_union(schema, table, existing, frozenset({lb}), limit,
                                     extra_where=extra_where, per_issue_cap=0)

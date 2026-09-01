@@ -21,7 +21,8 @@ from datetime import date, datetime
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
-from storage.postgres.app_db import get_connection
+from sqlalchemy import bindparam, text
+from storage.postgres.connection import get_engine
 
 log = logging.getLogger("remediation.change_requests")
 
@@ -68,15 +69,12 @@ def ensure_table() -> None:
 
 def _next_cr_id() -> str:
     today = date.today().strftime("%Y%m%d")
-    con   = get_connection()
-    try:
+    with get_engine().connect() as con:
         row = con.execute(
-            "SELECT COUNT(*) AS n FROM dq_change_requests WHERE cr_id LIKE ?",
-            (f"CR-{today}-%",),
-        ).fetchone()
+            text("SELECT COUNT(*) AS n FROM dq_change_requests WHERE cr_id LIKE :pat"),
+            {"pat": f"CR-{today}-%"},
+        ).mappings().fetchone()
         seq = (row["n"] if row else 0) + 1
-    finally:
-        con.close()
     return f"CR-{today}-{seq:04d}"
 
 
@@ -112,47 +110,49 @@ def create_cr(
     issue_ids: list[str] = []
     if tables:
         try:
-            con_q = get_connection()
-            placeholders = ",".join("?" * len(tables))
-            rows = con_q.execute(
-                f"SELECT issue_id FROM dq_open_issues WHERE le_book=? AND table_name IN ({placeholders})"
-                f" AND status IN ('open','pending_resolution')",
-                [le_book] + list(tables),
-            ).fetchall()
-            issue_ids = [r["issue_id"] for r in rows]
-            con_q.close()
+            with get_engine().connect() as con_q:
+                rows = con_q.execute(
+                    text(
+                        "SELECT issue_id FROM dq_open_issues WHERE le_book=:lb AND table_name IN :tables"
+                        " AND status IN ('open','pending_resolution')"
+                    ).bindparams(bindparam("tables", expanding=True)),
+                    {"lb": le_book, "tables": list(tables)},
+                ).mappings().fetchall()
+                issue_ids = [r["issue_id"] for r in rows]
         except Exception as exc:
             log.warning("Could not derive issue_ids for CR %s: %s", cr_id, exc)
             issue_ids = []
 
-    con = get_connection()
-    try:
-        con.execute("""
+    with get_engine().begin() as con:
+        con.execute(
+            text("""
             INSERT INTO dq_change_requests
                 (cr_id, title, description, issue_ids, le_book, institution_name,
                  dimension, assigned_to, created_by, created_at, updated_at,
                  target_date, status, failing_rows, tables, table_approvals)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,'open',?,?,?)
-        """, (
-            cr_id,
-            title.strip(),
-            (description or "").strip(),
-            json.dumps(issue_ids),
-            le_book,
-            institution_name,
-            dimension,
-            (assigned_to or "").strip(),
-            (created_by  or "").strip(),
-            now, now,
-            (target_date or ""),
-            failing_rows,
-            json.dumps(tables),
-            json.dumps(table_approvals),
-        ))
-        con.commit()
+            VALUES (:cr_id,:title,:description,:issue_ids,:le_book,:institution_name,
+                    :dimension,:assigned_to,:created_by,:created_at,:updated_at,
+                    :target_date,'open',:failing_rows,:tables,:table_approvals)
+        """),
+            {
+                "cr_id": cr_id,
+                "title": title.strip(),
+                "description": (description or "").strip(),
+                "issue_ids": json.dumps(issue_ids),
+                "le_book": le_book,
+                "institution_name": institution_name,
+                "dimension": dimension,
+                "assigned_to": (assigned_to or "").strip(),
+                "created_by": (created_by or "").strip(),
+                "created_at": now,
+                "updated_at": now,
+                "target_date": (target_date or ""),
+                "failing_rows": failing_rows,
+                "tables": json.dumps(tables),
+                "table_approvals": json.dumps(table_approvals),
+            },
+        )
         log.info("CR created: %s  (%s / %s)", cr_id, le_book, title)
-    finally:
-        con.close()
 
     # Portal notifications to all inst_users of this le_book
     try:
@@ -182,37 +182,32 @@ def create_cr(
 def get_crs(status: str | None = None, le_book: str | None = None) -> list[dict]:
     """Return all CRs, optionally filtered by status and/or institution."""
     ensure_table()
-    con = get_connection()
-    try:
+    with get_engine().connect() as con:
         clauses: list[str] = []
-        params:  list      = []
+        params:  dict      = {}
         if status and status != "all":
-            clauses.append("status=?")
-            params.append(status)
+            clauses.append("status=:status")
+            params["status"] = status
         if le_book:
-            clauses.append("le_book=?")
-            params.append(le_book)
+            clauses.append("le_book=:lb")
+            params["lb"] = le_book
         where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
         rows  = con.execute(
-            f"SELECT * FROM dq_change_requests {where} ORDER BY created_at DESC",
+            text(f"SELECT * FROM dq_change_requests {where} ORDER BY created_at DESC"),
             params,
-        ).fetchall()
+        ).mappings().fetchall()
         return [dict(r) for r in rows]
-    finally:
-        con.close()
 
 
 def get_cr(cr_id: str) -> dict | None:
     """Fetch one CR by ID, or None if not found."""
     ensure_table()
-    con = get_connection()
-    try:
+    with get_engine().connect() as con:
         row = con.execute(
-            "SELECT * FROM dq_change_requests WHERE cr_id=?", (cr_id,)
-        ).fetchone()
+            text("SELECT * FROM dq_change_requests WHERE cr_id=:cr_id"),
+            {"cr_id": cr_id},
+        ).mappings().fetchone()
         return dict(row) if row else None
-    finally:
-        con.close()
 
 
 def update_status(
@@ -227,11 +222,12 @@ def update_status(
     """
     ensure_table()
     now = datetime.utcnow().strftime("%Y-%m-%d")
-    con = get_connection()
-    try:
+    cr_row = None
+    with get_engine().begin() as con:
         row = con.execute(
-            "SELECT status FROM dq_change_requests WHERE cr_id=?", (cr_id,)
-        ).fetchone()
+            text("SELECT status FROM dq_change_requests WHERE cr_id=:cr_id"),
+            {"cr_id": cr_id},
+        ).mappings().fetchone()
         if not row:
             return False, f"CR {cr_id} not found."
         cur     = row["status"]
@@ -242,26 +238,28 @@ def update_status(
                 f"Allowed: {allowed or ['none']}."
             )
         if new_status in ("approved", "rejected"):
-            con.execute("""
+            con.execute(
+                text("""
                 UPDATE dq_change_requests
-                   SET status=?, updated_at=?, reviewed_by=?, reviewed_at=?, review_notes=?
-                 WHERE cr_id=?
-            """, (new_status, now, actor, now, notes or "", cr_id))
+                   SET status=:new_status, updated_at=:now, reviewed_by=:actor,
+                       reviewed_at=:now, review_notes=:notes
+                 WHERE cr_id=:cr_id
+            """),
+                {"new_status": new_status, "now": now, "actor": actor,
+                 "notes": notes or "", "cr_id": cr_id},
+            )
         else:
             con.execute(
-                "UPDATE dq_change_requests SET status=?, updated_at=? WHERE cr_id=?",
-                (new_status, now, cr_id),
+                text("UPDATE dq_change_requests SET status=:new_status, updated_at=:now WHERE cr_id=:cr_id"),
+                {"new_status": new_status, "now": now, "cr_id": cr_id},
             )
-        con.commit()
         log.info("CR %s: %s → %s  (actor=%s)", cr_id, cur, new_status, actor or "—")
 
         # Fetch CR details for notifications
         cr_row = con.execute(
-            "SELECT le_book, institution_name, title FROM dq_change_requests WHERE cr_id=?",
-            (cr_id,)
-        ).fetchone()
-    finally:
-        con.close()
+            text("SELECT le_book, institution_name, title FROM dq_change_requests WHERE cr_id=:cr_id"),
+            {"cr_id": cr_id},
+        ).mappings().fetchone()
 
     # Fire portal notifications (non-blocking)
     if cr_row:
@@ -292,14 +290,11 @@ def update_status(
 def get_stats() -> dict[str, int]:
     """Return {status: count} for all CRs."""
     ensure_table()
-    con = get_connection()
-    try:
+    with get_engine().connect() as con:
         rows = con.execute(
-            "SELECT status, COUNT(*) AS n FROM dq_change_requests GROUP BY status"
-        ).fetchall()
+            text("SELECT status, COUNT(*) AS n FROM dq_change_requests GROUP BY status")
+        ).mappings().fetchall()
         return {r["status"]: r["n"] for r in rows}
-    finally:
-        con.close()
 
 
 def approve_table(cr_id: str, table_name: str, actor: str = "") -> tuple[bool, str]:
@@ -327,15 +322,11 @@ def approve_table(cr_id: str, table_name: str, actor: str = "") -> tuple[bool, s
     }
 
     now = datetime.utcnow().strftime("%Y-%m-%d")
-    con = get_connection()
-    try:
+    with get_engine().begin() as con:
         con.execute(
-            "UPDATE dq_change_requests SET table_approvals=?, updated_at=? WHERE cr_id=?",
-            (json.dumps(table_approvals), now, cr_id),
+            text("UPDATE dq_change_requests SET table_approvals=:ta, updated_at=:now WHERE cr_id=:cr_id"),
+            {"ta": json.dumps(table_approvals), "now": now, "cr_id": cr_id},
         )
-        con.commit()
-    finally:
-        con.close()
 
     log.info("CR %s: table '%s' approved by %s", cr_id, table_name, actor or "—")
 

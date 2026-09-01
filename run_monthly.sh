@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # run_monthly.sh — Monthly DQ detection + immediate resolution run.
-# Invoked by cron on the 2nd of each month at 15:00.
-# Logs to logs/monthly_YYYY-MM-DD.log and keeps 90 days.
+#Invoced by a cronjob on the server.  Logs to logs/monthly_YYYY-MM-DD.log.
 
 set -euo pipefail
 

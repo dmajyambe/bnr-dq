@@ -7,13 +7,15 @@ from dashboard.theme import BG, BRAND, CARD, DIVIDER, FONT, MUTED, TEXT
 
 def _get_rules_from_db() -> list[dict]:
     try:
-        from storage.postgres.app_db import get_connection
-        con = get_connection()
-        rows = con.execute(
-            "SELECT rule_id, dimension, category, rule_name, tables, fields "
-            "FROM dq_rules ORDER BY dimension, rule_id"
-        ).fetchall()
-        con.close()
+        from sqlalchemy import text
+        from storage.postgres.connection import get_engine
+        with get_engine().connect() as con:
+            rows = con.execute(
+                text(
+                    "SELECT rule_id, dimension, category, rule_name, tables, fields "
+                    "FROM dq_rules ORDER BY dimension, rule_id"
+                )
+            ).mappings().fetchall()
         return [dict(r) for r in rows]
     except Exception:
         from dq.rules.registry import get_all_rules

@@ -1,5 +1,5 @@
 # Accuracy engine
-
+#creates sql queries for accuracy checks
 from __future__ import annotations
 import json
 import logging
@@ -23,7 +23,7 @@ logging.basicConfig(
 )
 log = logging.getLogger("dq.engines.accuracy")
 
-# referential-integrity rules (REL-001..008) are handled in a separate pass
+#ps: referential-integrity rules are handled in a separate pass
 def _acc_rule_sql(rule_id: str, existing: set) -> tuple[str, str] | None:
     def has(*cols: str) -> bool:
         return all(c in existing for c in cols)
@@ -32,6 +32,7 @@ def _acc_rule_sql(rule_id: str, existing: set) -> tuple[str, str] | None:
         if not has("account_status"):
             return None
         vals = ", ".join(f"'{v}'" for v in sorted(str(x) for x in VALID_ACCOUNT_STATUS))
+        #print(vals)
         return (
             'SUM(CASE WHEN "account_status" IS NOT NULL THEN 1 ELSE 0 END)',
             f'SUM(CASE WHEN "account_status" IS NOT NULL AND "account_status"::TEXT IN ({vals}) THEN 1 ELSE 0 END)',
@@ -80,7 +81,7 @@ def _acc_rule_sql(rule_id: str, existing: set) -> tuple[str, str] | None:
         return (
             'SUM(CASE WHEN "customer_gender" IS NOT NULL AND "marital_status" IS NOT NULL THEN 1 ELSE 0 END)',
             'SUM(CASE WHEN "customer_gender" IS NOT NULL AND "marital_status" IS NOT NULL '
-            'AND (UPPER(TRIM("customer_gender"::TEXT)) <> \'C\' OR UPPER(TRIM("marital_status"::TEXT)) = \'NA\') THEN 1 ELSE 0 END)',
+            'AND (UPPER(TRIM("customer_gender"::TEXT)) = \'C\' OR UPPER(TRIM("marital_status"::TEXT)) <> \'NA\') THEN 1 ELSE 0 END)',
         )
 
     return None

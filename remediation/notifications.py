@@ -17,7 +17,8 @@ import logging
 import secrets
 from datetime import datetime
 
-from storage.postgres.app_db import get_connection
+from sqlalchemy import text
+from storage.postgres.connection import get_engine
 
 log = logging.getLogger("remediation.notifications")
 
@@ -43,62 +44,57 @@ def create_notification(user_id: str, notif_type: str, message: str,
     ensure_table()
     nid = secrets.token_hex(12)
     now = datetime.utcnow().isoformat(timespec="seconds")
-    con = get_connection()
-    try:
-        con.execute("""
+    with get_engine().begin() as con:
+        con.execute(
+            text("""
             INSERT INTO dq_notifications
                 (notif_id, user_id, type, message, cr_id, le_book, is_read, created_at)
-            VALUES (?,?,?,?,?,?,0,?)
-        """, (nid, user_id, notif_type, message, cr_id, le_book, now))
-        con.commit()
-    finally:
-        con.close()
+            VALUES (:nid,:user_id,:notif_type,:message,:cr_id,:le_book,0,:now)
+        """),
+            {"nid": nid, "user_id": user_id, "notif_type": notif_type,
+             "message": message, "cr_id": cr_id, "le_book": le_book, "now": now},
+        )
     return nid
 
 
 def get_notifications(user_id: str, limit: int = 30) -> list[dict]:
     ensure_table()
-    con = get_connection()
-    try:
-        rows = con.execute("""
+    with get_engine().connect() as con:
+        rows = con.execute(
+            text("""
             SELECT * FROM dq_notifications
-            WHERE user_id = ?
+            WHERE user_id = :user_id
             ORDER BY created_at DESC
-            LIMIT ?
-        """, (user_id, limit)).fetchall()
+            LIMIT :limit
+        """),
+            {"user_id": user_id, "limit": limit},
+        ).mappings().fetchall()
         return [dict(r) for r in rows]
-    finally:
-        con.close()
 
 
 def get_unread_count(user_id: str) -> int:
     ensure_table()
-    con = get_connection()
-    try:
+    with get_engine().connect() as con:
         return con.execute(
-            "SELECT COUNT(*) AS n FROM dq_notifications WHERE user_id=? AND is_read=0",
-            (user_id,)
-        ).fetchone()["n"]
-    finally:
-        con.close()
+            text("SELECT COUNT(*) AS n FROM dq_notifications WHERE user_id=:user_id AND is_read=0"),
+            {"user_id": user_id},
+        ).mappings().fetchone()["n"]
 
 
 def mark_read(notif_id: str) -> None:
-    con = get_connection()
-    try:
-        con.execute("UPDATE dq_notifications SET is_read=1 WHERE notif_id=?", (notif_id,))
-        con.commit()
-    finally:
-        con.close()
+    with get_engine().begin() as con:
+        con.execute(
+            text("UPDATE dq_notifications SET is_read=1 WHERE notif_id=:nid"),
+            {"nid": notif_id},
+        )
 
 
 def mark_all_read(user_id: str) -> None:
-    con = get_connection()
-    try:
-        con.execute("UPDATE dq_notifications SET is_read=1 WHERE user_id=?", (user_id,))
-        con.commit()
-    finally:
-        con.close()
+    with get_engine().begin() as con:
+        con.execute(
+            text("UPDATE dq_notifications SET is_read=1 WHERE user_id=:user_id"),
+            {"user_id": user_id},
+        )
 
 
 # ── broadcast helpers ──────────────────────────────────────────────────────────
@@ -144,16 +140,16 @@ def send_sla_warnings() -> int:
     high = (today + timedelta(days=8)).isoformat()
 
     ensure_table()
-    con = get_connection()
-    try:
+    with get_engine().connect() as con:
         warned_today = {
-            r["le_book"] for r in con.execute("""
+            r["le_book"] for r in con.execute(
+                text("""
                 SELECT DISTINCT le_book FROM dq_notifications
-                WHERE type='sla_warning' AND DATE(created_at)=?
-            """, (today.isoformat(),)).fetchall()
+                WHERE type='sla_warning' AND DATE(created_at)=:today
+            """),
+                {"today": today.isoformat()},
+            ).mappings().fetchall()
         }
-    finally:
-        con.close()
 
     issues = get_open_issues()
     seen: set[str] = set()

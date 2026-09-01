@@ -106,21 +106,18 @@ def _build_rows() -> list[dict]:
 
 def ensure_db(db_path: Path = DB_PATH) -> None:
     """Sync the in-memory rule registry into dq_rules in Greenplum."""
-    from storage.postgres.app_db import get_connection
-    con = get_connection()
-    try:
+    from sqlalchemy import text
+    from storage.postgres.connection import get_engine
+    with get_engine().begin() as con:
         rows = _build_rows()
-        con.execute("DELETE FROM dq_rules")
-        con.executemany(
-            """
+        con.execute(text("DELETE FROM dq_rules"))
+        con.execute(
+            text("""
             INSERT INTO dq_rules (rule_id, dimension, category, rule_name, tables, fields)
-            VALUES (%(rule_id)s, %(dimension)s, %(category)s, %(rule_name)s, %(tables)s, %(fields)s)
-            """,
+            VALUES (:rule_id, :dimension, :category, :rule_name, :tables, :fields)
+            """),
             rows,
         )
-        con.commit()
-    finally:
-        con.close()
 
 
 def get_all_rules() -> list[dict]:

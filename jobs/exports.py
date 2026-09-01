@@ -1,40 +1,34 @@
 # Generates the per-institution failing-row ZIPs for a reporting month.
 from __future__ import annotations
-
 import logging
-
 from dq.exports.failing_rows import ISSUE_REPORTS_DIR, write_institution_zips
 from dq.sql.filters import month_filter as _month_filter
 
 log = logging.getLogger("jobs.exports")
 
-
+#write zipped folders into issue_reports/{le_book}_{month}.zip for every table
 def write_monthly_zips(engine, schema: str, tables: list[str],
                        valid_le_books: frozenset, categories: dict,
                        month: str, limit: int = 0,
                        extra_where: str = "") -> None:
-    """Remove stale ZIPs for this month, then stream a fresh {table}.xlsx into
-    each institution's issue_reports/{le_book}_{month}.zip for every table.
-
-    Always scopes rows to `month` via date_last_modified so the ZIP content
-    matches its label, even when the caller doesn't pass an explicit extra_where.
-    """
     if not extra_where:
         # Cap date_creation at the pipeline detection date for this month so that
         # records created *after* the pipeline ran are not included in the report
         # (which would make detected_at appear earlier than date_creation).
         cutoff = None
         try:
-            from storage.postgres.app_db import get_connection
+            from sqlalchemy import text
+            from storage.postgres.connection import get_engine
             _y, _m = (int(p) for p in month.split("-")[:2])
             _ny, _nm = _y + (_m == 12), _m % 12 + 1
-            _con = get_connection()
-            _row = _con.execute(
-                "SELECT MAX(detected_at) AS max_det FROM dq_open_issues "
-                "WHERE detected_at >= ? AND detected_at < ?",
-                [f"{month}-01", f"{_ny:04d}-{_nm:02d}-01"],
-            ).fetchone()
-            _con.close()
+            with get_engine().connect() as _con:
+                _row = _con.execute(
+                    text(
+                        "SELECT MAX(detected_at) AS max_det FROM dq_open_issues "
+                        "WHERE detected_at >= :start AND detected_at < :end"
+                    ),
+                    {"start": f"{month}-01", "end": f"{_ny:04d}-{_nm:02d}-01"},
+                ).mappings().fetchone()
             cutoff = (_row["max_det"] or "")[:10] or None
         except Exception as _exc:
             log.warning("Could not look up detection cutoff date: %s", _exc)
@@ -85,7 +79,6 @@ def write_resolved_zips(resolved_issues: list[dict]) -> None:
     """Group newly-resolved issues by (le_book, month) and write pre-built resolved ZIPs."""
     from collections import defaultdict
     from dq.exports.failing_rows import write_resolved_institution_zip
-
     groups: dict[tuple, list[dict]] = defaultdict(list)
     for iss in resolved_issues:
         month = (iss.get("detected_at") or "")[:7]

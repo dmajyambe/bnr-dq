@@ -1,10 +1,8 @@
 #data loading
 from __future__ import annotations
-
 import json
 import logging
 from pathlib import Path
-
 from dashboard.theme import CATEGORIES, DIMS
 
 log = logging.getLogger("dashboard.data")
@@ -37,23 +35,23 @@ def latest_run_month() -> str:
     return date.today().strftime("%Y-%m")
 
 
-# ── issue tracker (loaded fresh each render — SQLite is fast) ─────────────────
-def _issue_summary() -> dict:
-    try:
-        from issues.queries import get_institution_issue_summary
-        return get_institution_issue_summary()
-    except Exception:
-        return {}
+# unused — callers import from issues.queries / issues.repositories directly
+# def _issue_summary() -> dict:
+#     try:
+#         from issues.queries import get_institution_issue_summary
+#         return get_institution_issue_summary()
+#     except Exception:
+#         return {}
+#
+# def _institution_issues(le_book: str) -> list:
+#     try:
+#         from issues.repositories import get_open_issues
+#         return get_open_issues(le_book)
+#     except Exception:
+#         return []
 
-def _institution_issues(le_book: str) -> list:
-    try:
-        from issues.repositories import get_open_issues
-        return get_open_issues(le_book)
-    except Exception:
-        return []
 
-
-# ── data loading ───────────────────────────────────────────────────────────────
+# data loading 
 
 def _load_history() -> list:
     if not HISTORY_FILE.exists():
@@ -140,7 +138,7 @@ def _fresh_pipeline() -> dict:
     return _PIPELINE
 
 
-# ── data access helpers ────────────────────────────────────────────────────────
+#  data access helpers 
 
 def _today_entry()      -> dict:
     # Most recent run that actually scored institutions — skip empty/no-data runs

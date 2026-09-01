@@ -2,7 +2,6 @@
 # Reads original_failing_rows vs current failing_rows and the dq_issue_progress
 # scan log to compute how many rows have been fixed so far.
 from __future__ import annotations
-
 import io
 import logging
 
@@ -17,7 +16,8 @@ def get_progress_summary(issue_id_: str) -> dict:
     Returns {} if the issue is not found or has no original_failing_rows yet.
     """
     from issues.repositories import ensure_tables, get_issue_by_id
-    from storage.postgres.app_db import get_connection
+    from sqlalchemy import text
+    from storage.postgres.connection import get_engine
 
     ensure_tables()
     iss = get_issue_by_id(issue_id_)
@@ -33,19 +33,19 @@ def get_progress_summary(issue_id_: str) -> dict:
     fixed    = max(0, original - current)
     pct      = round(fixed / original * 100) if original else 0
 
-    con = get_connection()
     try:
-        rows = con.execute(
-            "SELECT scan_date, failing_rows FROM dq_issue_progress "
-            "WHERE issue_id=%s ORDER BY scan_date",
-            (issue_id_,),
-        ).fetchall()
-        scans = [{"scan_date": r["scan_date"], "failing_rows": int(r["failing_rows"])}
-                 for r in rows]
+        with get_engine().connect() as con:
+            rows = con.execute(
+                text(
+                    "SELECT scan_date, failing_rows FROM dq_issue_progress "
+                    "WHERE issue_id=:iid ORDER BY scan_date"
+                ),
+                {"iid": issue_id_},
+            ).mappings().fetchall()
+            scans = [{"scan_date": r["scan_date"], "failing_rows": int(r["failing_rows"])}
+                     for r in rows]
     except Exception:
         scans = []
-    finally:
-        con.close()
 
     return {
         "original": original,

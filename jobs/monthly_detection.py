@@ -10,8 +10,8 @@ from dotenv import load_dotenv
 
 SCRIPT_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(SCRIPT_DIR))
+# print(sys.path)
 from dq.sql.filters import month_filter
-
 
 load_dotenv()
 
@@ -56,10 +56,7 @@ def run_monthly_detection(engine, schema: str, run_date: str,
 
     issue_repo.ensure_tables()
 
-    # Derive a consistent date window once so scoring engines and ZIP export
-    # both operate on the exact same rows.  When --month is supplied the caller
-    # already provides extra_where; for a default (no --month) run we derive it
-    # from run_date so the window is date_creation >= first-of-month <= run_date.
+    # set consistent date window
     if not extra_where:
         extra_where, _ = month_filter(run_date[:7], cutoff_date=run_date)
         log.info("Date filter derived from run_date=%s: %s", run_date, extra_where)
@@ -114,7 +111,7 @@ def run_monthly_detection(engine, schema: str, run_date: str,
                     "for run_date=%s (would otherwise render as a 0%% cliff / blank overview)",
                     run_date)
 
-    # Write pipeline_run.json so the dashboard "Data as of" banner
+    #Write pipeline_run.json so the dashboard "Data as of" banner
     import json as _json
     _pipeline_file = SCRIPT_DIR / "pipeline_run.json"
     _pipeline_tmp  = _pipeline_file.with_suffix(".json.tmp")
@@ -159,8 +156,7 @@ if __name__ == "__main__":
                              "to the month-end date.")
     args = parser.parse_args() 
 
-    # --month: restrict data to that calendar month (by date_creation) and
-    # date the run at month-end so issues are tagged to the reporting period.
+    # date the run at month-end so issues are tagged to the reporting period( when --month is passed)
     extra_where = ""
     if args.month:
         extra_where, args.date = month_filter(args.month)
@@ -186,3 +182,5 @@ if __name__ == "__main__":
     log.info("Done.")
     log.info("=" * 60)
     sys.exit(0)
+# print(SCRIPT_DIR)
+

@@ -1,4 +1,4 @@
-# Utility module for Institution-scope lookups against the dqp schema.
+# Utility module for Institutions(le-books and categories)
 from __future__ import annotations
 import logging
 from sqlalchemy import text
@@ -6,7 +6,6 @@ from sqlalchemy import text
 log = logging.getLogger("storage.postgres.institutions")
 
 CATEGORY_TYPES = ("MF", "SACCO", "OSACCO", "B")
-
 
 def get_valid_le_books(engine, schema: str) -> frozenset:
     """Return le_book codes whose category_type is in CATEGORY_TYPES."""
@@ -36,7 +35,7 @@ def get_valid_le_books(engine, schema: str) -> frozenset:
 
 def get_le_book_categories(engine, schema: str) -> dict:
     """Return {le_book: {"name": ..., "category_type": ...}} for all in-scope institutions."""
-    filter_list = ", ".join(f"'{t}'" for t in CATEGORY_TYPES)
+    filter_list = ", ".join(f"'{t}'" for t in CATEGORY_TYPES)#MERGE THE CATEGORIES INTO A COMMA SEP LIST
     sql = text(f"""
         SELECT lb.le_book,
                LOWER(lb.leb_description)  AS le_book_name,
@@ -61,7 +60,7 @@ def get_le_book_categories(engine, schema: str) -> dict:
             name = str(r[1]).strip() if r[1] and str(r[1]).strip() not in ("", "none", "nan") else lb
             ct   = str(r[2]).strip() if r[2] else ""
             result[lb] = {"name": name, "category_type": ct}
-        log.info("le_book categories: %d institutions loaded", len(result))
+        log.info(f"le_book categories: {len(result)} institutions loaded")
         return result
     except Exception as exc:
         log.warning("Could not fetch le_book categories: %s", exc)

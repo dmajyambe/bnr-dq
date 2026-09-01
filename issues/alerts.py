@@ -14,7 +14,8 @@ from email.mime.text import MIMEText
 
 from issues import repositories as repo
 from issues.state_machine import URGENCY_COLORS, NOTIFY_INTERVAL, urgency_band
-from storage.postgres.app_db import get_connection
+from sqlalchemy import text
+from storage.postgres.connection import get_engine
 
 log = logging.getLogger("issues.alerts")
 
@@ -203,16 +204,12 @@ def send_notification(le_book: str, inst_name: str,
 
     # Update notified_at for all issues in this batch
     today_str = date.today().isoformat()
-    con = get_connection()
-    try:
-        ids = [iss["issue_id"] for iss in issues]
-        con.executemany(
-            "UPDATE dq_open_issues SET notified_at=? WHERE issue_id=?",
-            [(today_str, iid) for iid in ids]
+    ids = [iss["issue_id"] for iss in issues]
+    with get_engine().begin() as con:
+        con.execute(
+            text("UPDATE dq_open_issues SET notified_at=:notified_at WHERE issue_id=:issue_id"),
+            [{"notified_at": today_str, "issue_id": iid} for iid in ids],
         )
-        con.commit()
-    finally:
-        con.close()
 
     return True
 

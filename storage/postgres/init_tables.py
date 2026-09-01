@@ -1,18 +1,11 @@
-"""Create all application tables in the dqp Greenplum schema.
-
-Run once (or re-run safely — all statements use IF NOT EXISTS / ON CONFLICT DO NOTHING).
-Call init_all() from a setup script or from the migrate_to_greenplum job.
-"""
+# Creating all the needed  tables(DDL)
 from __future__ import annotations
-
 import logging
-
 log = logging.getLogger("storage.postgres.init_tables")
 
-# ── DDL ──────────────────────────────────────────────────────────────────────
-
+# DDL 
 _TABLES = [
-    # Active issues only — resolved issues live in dq_resolved_issues
+    # Active issues only
     """
     CREATE TABLE IF NOT EXISTS dq_open_issues (
         issue_id              TEXT PRIMARY KEY,
@@ -25,7 +18,7 @@ _TABLES = [
         failing_rows          INTEGER NOT NULL DEFAULT 0,
         last_failing_rows     INTEGER,
         original_failing_rows INTEGER,
-        detected_at           TEXT NOT NULL,
+        detected_at          TEXT NOT NULL,
         sla_deadline          TEXT NOT NULL,
         urgency_band          TEXT NOT NULL DEFAULT 'new',
         assigned_to           TEXT,
@@ -34,9 +27,9 @@ _TABLES = [
         recurrence_count      INTEGER NOT NULL DEFAULT 0,
         status                TEXT NOT NULL DEFAULT 'open'
     ) DISTRIBUTED BY (issue_id)
-    """,
+    """, 
 
-    # Resolved / retired issues — written once, never updated
+    # Resolved (written once, never updated)
     """
     CREATE TABLE IF NOT EXISTS dq_resolved_issues (
         issue_id           TEXT NOT NULL,
@@ -81,15 +74,8 @@ _TABLES = [
     """,
 
     """
-    DO $$ BEGIN
-        IF NOT EXISTS (
-            SELECT 1 FROM pg_indexes
-            WHERE indexname = 'idx_issue_evidence_lookup'
-        ) THEN
-            CREATE INDEX idx_issue_evidence_lookup
-            ON dq_issue_evidence (le_book, rule_id, table_name);
-        END IF;
-    END $$
+    CREATE INDEX IF NOT EXISTS idx_issue_evidence_lookup
+    ON dq_issue_evidence (le_book, rule_id, table_name);
     """,
 
     # Per-scan row counts for partial-resolution progress tracking
@@ -104,24 +90,12 @@ _TABLES = [
 
     # Migration: add new columns to pre-existing tables (safe to re-run)
     """
-    DO $$ BEGIN
-        IF NOT EXISTS (
-            SELECT 1 FROM information_schema.columns
-            WHERE table_name = 'dq_open_issues' AND column_name = 'original_failing_rows'
-        ) THEN
-            ALTER TABLE dq_open_issues ADD COLUMN original_failing_rows INTEGER;
-        END IF;
-    END $$
+    ALTER TABLE dq_open_issues 
+    ADD COLUMN IF NOT EXISTS original_failing_rows INTEGER;
     """,
     """
-    DO $$ BEGIN
-        IF NOT EXISTS (
-            SELECT 1 FROM information_schema.columns
-            WHERE table_name = 'dq_issue_evidence' AND column_name = 'snapshot_type'
-        ) THEN
-            ALTER TABLE dq_issue_evidence ADD COLUMN snapshot_type TEXT NOT NULL DEFAULT 'original';
-        END IF;
-    END $$
+    ALTER TABLE dq_issue_evidence 
+    ADD COLUMN IF NOT EXISTS snapshot_type TEXT NOT NULL DEFAULT 'original';
     """,
 
     """
@@ -155,14 +129,8 @@ _TABLES = [
     """,
 
     """
-    DO $$ BEGIN
-        IF NOT EXISTS (
-            SELECT 1 FROM information_schema.columns
-            WHERE table_name = 'dq_column_profiles' AND column_name = 'data_type'
-        ) THEN
-            ALTER TABLE dq_column_profiles ADD COLUMN data_type TEXT;
-        END IF;
-    END $$
+    ALTER TABLE dq_column_profiles 
+    ADD COLUMN IF NOT EXISTS data_type TEXT;
     """,
 
     """
@@ -225,27 +193,23 @@ _TABLES = [
     """,
 ]
 
-
 _init_done = False
 
-
 def init_all() -> None:
-    """Create all application tables in dqp.  Safe to call repeatedly."""
+    """Create all application tables in dqp."""
     global _init_done
     if _init_done:
         return
-    from storage.postgres.app_db import get_connection
-    con = get_connection()
-    try:
+    from sqlalchemy import text
+    from storage.postgres.connection import get_engine
+
+    with get_engine().begin() as con:
         for ddl in _TABLES:
             s = ddl.strip()
             if s:
-                con.execute(s)
-        con.commit()
-        log.info("init_tables: all application tables ensured in dqp")
-        _init_done = True
-    finally:
-        con.close()
+                con.execute(text(s))
+    log.info("All  tables ensured in dqp")
+    _init_done = True
 
 
 if __name__ == "__main__":

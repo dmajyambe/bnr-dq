@@ -58,12 +58,8 @@ def run_rule_dimension_sql(
     dim_label: str = "rule",
     extra_where: str = "",
 ) -> dict:
-    """Run a rule-based dimension in pure SQL. See module docstring for the shape.
-
-    table_rules / rule_meta : the dimension's registry (e.g. ACC_TABLE_RULES / ACC_RULE_META)
-    rule_sql_fn(rule_id, existing) -> (total_expr, valid_expr) | None
-    score_key / overall_key : e.g. "accuracy_score" / "overall_accuracy_score"
-    """
+    """Run a rule-based dimension engine against a database schema, returning the report dict."""
+    
     report       = new_report()
     all_scores:   list[float] = []
     all_le_books: set         = set()

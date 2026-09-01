@@ -7,7 +7,8 @@ from __future__ import annotations
 
 import logging
 
-from storage.postgres.app_db import get_connection
+from sqlalchemy import text
+from storage.postgres.connection import get_engine
 
 log = logging.getLogger("dq.profiling.storage")
 
@@ -24,80 +25,85 @@ def write_profiles(profiles: list[dict], keep_runs: int = _KEEP_RUNS) -> None:
     if not profiles:
         return
     ensure_table()
-    con = get_connection()
-    try:
+    with get_engine().begin() as con:
         # Delete any existing rows for the same (le_book, table, column, run_date)
         # before re-inserting — Greenplum does not support ON CONFLICT.
-        con.executemany(
-            "DELETE FROM dq_column_profiles "
-            "WHERE le_book=%(le_book)s AND table_name=%(table_name)s "
-            "AND column_name=%(column_name)s AND run_date=%(run_date)s",
+        con.execute(
+            text(
+                "DELETE FROM dq_column_profiles "
+                "WHERE le_book=:le_book AND table_name=:table_name "
+                "AND column_name=:column_name AND run_date=:run_date"
+            ),
             profiles,
         )
-        con.executemany("""
+        con.execute(
+            text("""
             INSERT INTO dq_column_profiles
                 (le_book, table_name, column_name, run_date, row_count,
                  null_count, null_pct, distinct_count, distinct_pct,
                  min_val, max_val, top_values, data_type)
             VALUES
-                (%(le_book)s, %(table_name)s, %(column_name)s, %(run_date)s, %(row_count)s,
-                 %(null_count)s, %(null_pct)s, %(distinct_count)s, %(distinct_pct)s,
-                 %(min_val)s, %(max_val)s, %(top_values)s, %(data_type)s)
-        """, profiles)
+                (:le_book, :table_name, :column_name, :run_date, :row_count,
+                 :null_count, :null_pct, :distinct_count, :distinct_pct,
+                 :min_val, :max_val, :top_values, :data_type)
+        """),
+            profiles,
+        )
 
         # Prune old runs — keep only the most recent `keep_runs` per (le_book, table_name)
         pairs = {(p["le_book"], p["table_name"]) for p in profiles}
         for lb, tbl in pairs:
             keep = [r["run_date"] for r in con.execute(
-                "SELECT DISTINCT run_date FROM dq_column_profiles "
-                "WHERE le_book=%s AND table_name=%s ORDER BY run_date DESC LIMIT %s",
-                (lb, tbl, keep_runs),
-            ).fetchall()]
+                text(
+                    "SELECT DISTINCT run_date FROM dq_column_profiles "
+                    "WHERE le_book=:lb AND table_name=:tbl ORDER BY run_date DESC LIMIT :n"
+                ),
+                {"lb": lb, "tbl": tbl, "n": keep_runs},
+            ).mappings().fetchall()]
             if keep:
-                ph = ",".join(["%s"] * len(keep))
+                from sqlalchemy import bindparam
                 con.execute(
-                    f"DELETE FROM dq_column_profiles "
-                    f"WHERE le_book=%s AND table_name=%s AND run_date NOT IN ({ph})",
-                    (lb, tbl, *keep),
+                    text(
+                        "DELETE FROM dq_column_profiles "
+                        "WHERE le_book=:lb AND table_name=:tbl AND run_date NOT IN :keep"
+                    ).bindparams(bindparam("keep", expanding=True)),
+                    {"lb": lb, "tbl": tbl, "keep": keep},
                 )
 
-        con.commit()
         log.info("Wrote %d profile records (%d run(s) retained per table/institution)",
                  len(profiles), keep_runs)
-    finally:
-        con.close()
 
 
 def available_run_dates(le_book: str, table: str) -> list[str]:
     """Return up to keep_runs run dates for this institution+table, newest first."""
     ensure_table()
-    con = get_connection()
     try:
-        rows = con.execute(
-            "SELECT DISTINCT run_date FROM dq_column_profiles "
-            "WHERE le_book=%s AND table_name=%s ORDER BY run_date DESC LIMIT %s",
-            (le_book, table, _KEEP_RUNS),
-        ).fetchall()
-        return [r["run_date"] for r in rows]
+        with get_engine().connect() as con:
+            rows = con.execute(
+                text(
+                    "SELECT DISTINCT run_date FROM dq_column_profiles "
+                    "WHERE le_book=:lb AND table_name=:tbl ORDER BY run_date DESC LIMIT :n"
+                ),
+                {"lb": le_book, "tbl": table, "n": _KEEP_RUNS},
+            ).mappings().fetchall()
+            return [r["run_date"] for r in rows]
     except Exception:
         return []
-    finally:
-        con.close()
 
 
 def load_profile(le_book: str, table: str, run_date: str) -> list[dict]:
     """Return column profiles for one institution+table+run, ordered by column name."""
     ensure_table()
-    con = get_connection()
     try:
-        rows = con.execute(
-            "SELECT * FROM dq_column_profiles "
-            "WHERE le_book=%s AND table_name=%s AND run_date=%s "
-            "ORDER BY column_name",
-            (le_book, table, run_date),
-        ).fetchall()
-        return [dict(r) for r in rows]
+        with get_engine().connect() as con:
+            rows = con.execute(
+                text(
+                    "SELECT * FROM dq_column_profiles "
+                    "WHERE le_book=:lb AND table_name=:tbl AND run_date=:run_date "
+                    "ORDER BY column_name"
+                ),
+                {"lb": le_book, "tbl": table, "run_date": run_date},
+            ).mappings().fetchall()
+            return [dict(r) for r in rows]
     except Exception:
         return []
-    finally:
-        con.close()
