@@ -74,8 +74,17 @@ _TABLES = [
     """,
 
     """
-    CREATE INDEX IF NOT EXISTS idx_issue_evidence_lookup
-    ON dq_issue_evidence (le_book, rule_id, table_name);
+    DO $$
+    BEGIN
+        IF NOT EXISTS (
+            SELECT 1 FROM pg_indexes
+            WHERE tablename = 'dq_issue_evidence'
+              AND indexname = 'idx_issue_evidence_lookup'
+        ) THEN
+            CREATE INDEX idx_issue_evidence_lookup
+            ON dq_issue_evidence (le_book, rule_id, table_name);
+        END IF;
+    END$$;
     """,
 
     # Per-scan row counts for partial-resolution progress tracking
