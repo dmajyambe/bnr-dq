@@ -136,10 +136,6 @@ def _table_dim_matrix(
         }))
 
     total_fr = sum(_table_total(impact[t]) for t in tables_sorted)
-    total_ni = len({
-        d for cells in impact.values() for cell in cells.values()
-        for d in [cell]           # just to iterate; inst_count already summed
-    })
     n_tables  = len(tables_sorted)
     n_dims    = len(active_dims)
 
